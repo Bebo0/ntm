@@ -1,0 +1,50 @@
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+                                                                                                                  ▄
+                                                                                 █▀▀█ █▀▀█ █▀▀█ █▀▀▄ █▀▀▀ █▀▀█ █▀▀█ █▀▀█
+                                                                                 █  █ █  █ █▀▀▀ █  █ █    █  █ █  █ █▀▀▀
+                                                                                 ▀▀▀▀ █▀▀▀ ▀▀▀▀ ▀▀▀▀ ▀▀▀▀ ▀▀▀▀ ▀▀▀▀ ▀▀▀▀
+
+
+                                                               ┃
+                                                               ┃  please run the focused tests and report back ENDMK60
+                                                               ┃
+                                                               ┃  Build · Big Pickle OpenCode Zen
+                                                               ╹▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀
+                                                                                                               tab agents  ctrl+p commands
+
+
+
+                                                                        ● Tip Run /connect to add an AI provider and start coding
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+  /home/agent/projects/demo                                                                                                                                                                    1.18.32
+

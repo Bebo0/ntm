@@ -1,0 +1,50 @@
+  ┃  step 069: canonical_json check the module
+  ┃  step 070: canonical_json check the module                                                                                                                  New session - 2026-09-27T22:35:28.
+  ┃  step 071: canonical_json check the module                                                                                                                  689Z
+  ┃  step 072: canonical_json check the module
+  ┃  step 073: canonical_json check the module                                                                                                                  Context
+  ┃  step 074: canonical_json check the module                                                                                                                  0 tokens
+  ┃  step 075: canonical_json check the module                                                                                                                  0% used
+  ┃  step 076: canonical_json check the module                                                                                                                  $0.00 spent
+  ┃  step 077: canonical_json check the module
+  ┃  step 078: canonical_json check the module                                                                                                                  MCP
+  ┃  step 079: canonical_json check the module                                                                                                                  • example-mcp    Connected
+  ┃  step 080: canonical_json check the module
+  ┃  step 081: canonical_json check the module                                                                                                                  LSP
+  ┃  step 082: canonical_json check the module                                                                                                                  LSPs are disabled
+  ┃  step 083: canonical_json check the module
+  ┃  step 084: canonical_json check the module
+  ┃  step 085: canonical_json check the module
+  ┃  step 086: canonical_json check the module
+  ┃  step 087: canonical_json check the module
+  ┃  step 088: canonical_json check the module
+  ┃  step 089: canonical_json check the module
+  ┃  step 090: canonical_json check the module
+  ┃  step 091: canonical_json check the module
+  ┃  step 092: canonical_json check the module
+  ┃  step 093: canonical_json check the module
+  ┃  step 094: canonical_json check the module
+  ┃  step 095: canonical_json check the module
+  ┃  step 096: canonical_json check the module
+  ┃  step 097: canonical_json check the module
+  ┃  step 098: canonical_json check the module
+  ┃  step 099: canonical_json check the module
+  ┃  step 100: canonical_json check the module                                                                                                                    ⬖ Getting started                ✕
+  ┃  step 101: canonical_json check the module
+  ┃  step 102: canonical_json check the module                                                                                                                      OpenCode includes free models
+  ┃  step 103: canonical_json check the module                                                                                                                      so you can start immediately.
+  ┃  step 104: canonical_json check the module
+  ┃  step 105: canonical_json check the module                                                                                                                      Connect from 75+ providers to
+  ┃  step 106: canonical_json check the module                                                                                                                      use other models, including
+  ┃  ENDMARKER333                                                                                                                                                   Claude, GPT, Gemini etc
+  ┃
+                                                                                                                                                                    Connect provider        /connect
+     ▣  Build · Big Pickle
+
+  ┃                                                                                                                                                             /home/agent/projects/demo
+  ┃
+  ┃
+  ┃  Build · Big Pickle OpenCode Zen
+  ╹▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀
+   ⬝⬝⬝⬝■■■■  esc interrupt                                                                                                       tab agents  ctrl+p commands    • OpenCode 1.18.32
+

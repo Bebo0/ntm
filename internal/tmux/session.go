@@ -2148,6 +2148,15 @@ func needsBufferSend(agentType AgentType, content string) bool {
 		// Enter submits — verified live. Typed newlines would not survive
 		// send-keys -l, so multi-line prompts go through the buffer.
 		return strings.Contains(content, "\n")
+	case AgentOpencode:
+		// OpenCode's TUI does not reliably take typed bursts: send-keys -l of
+		// even 200-400 bytes is intermittently dropped or left unpainted, and
+		// multi-KB prompts are lost wholesale while the send reports success
+		// (GH #333, verified live against OpenCode 1.18.32). Bracketed paste
+		// lands at every size and renders at once — short pastes literally,
+		// large ones as a "[Pasted ~N lines]" token — and a pasted "/command"
+		// still opens OpenCode's command menu, so every payload is pasted.
+		return content != ""
 	default:
 		return false
 	}
@@ -2198,6 +2207,11 @@ func (c *Client) SendKeysForAgentDoubleEnterContext(ctx context.Context, target,
 	}
 	if err := waitForSendDelay(ctx, DoubleEnterFirstDelay); err != nil {
 		return err
+	}
+	if canonicalAgentType(agentType) == AgentOpencode && strings.TrimSpace(keys) != "" {
+		if err := c.requireOpencodePayloadStaged(ctx, target); err != nil {
+			return err
+		}
 	}
 	// First Enter
 	if err := c.RunSilentContext(ctx, "send-keys", "-t", ExactTarget(target), "Enter"); err != nil {
