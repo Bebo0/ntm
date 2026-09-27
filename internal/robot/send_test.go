@@ -97,7 +97,7 @@ func TestVerifySendRenderEvidenceDistinguishesRenderedUnchangedAndUnavailable(t 
 		}
 	}
 
-	evidence := verifySendRenderEvidenceWith(panes, keys, []string{"0", "1", "2"}, baselines, postCapture)
+	evidence := verifySendRenderEvidenceWith(panes, keys, []string{"0", "1", "2"}, baselines, postCapture, sendRenderSettle{polls: 3})
 	if len(evidence) != 3 {
 		t.Fatalf("evidence length = %d, want 3", len(evidence))
 	}
@@ -112,6 +112,71 @@ func TestVerifySendRenderEvidenceDistinguishesRenderedUnchangedAndUnavailable(t 
 	}
 	if sendRenderEvidenceComplete(evidence) {
 		t.Fatal("mixed evidence must not count as complete")
+	}
+}
+
+// TestVerifySendRenderEvidencePollsForLateComposerRedraw is the GH #332
+// regression: a stage-only send (--enter=false) returns the moment the keys are
+// written, and Claude Code redraws its composer a few ms later. A single
+// post-send capture matched the baseline and reported a landed paste as
+// failed; the verifier must keep re-capturing within its bounded window.
+func TestVerifySendRenderEvidencePollsForLateComposerRedraw(t *testing.T) {
+	panes := []tmux.Pane{{ID: "%1"}, {ID: "%2"}, {ID: "%3"}}
+	keys := []string{"0", "1", "2"}
+	composer := "❯ \n──────\n  ? for shortcuts"
+	baselines := map[string]sendRenderBaseline{
+		"0": {output: composer},
+		"1": {output: composer},
+		"2": {output: composer},
+	}
+	captures := map[string]int{}
+	postCapture := func(pane tmux.Pane) (string, error) {
+		captures[pane.ID]++
+		switch pane.ID {
+		case "%1":
+			// Composer redraws with the payload on the third look.
+			if captures[pane.ID] >= 3 {
+				return "❯ probe\n──────\n  ? for shortcuts", nil
+			}
+			return composer, nil
+		default:
+			// %2 never renders; %3 was not delivered.
+			return composer, nil
+		}
+	}
+	var slept []time.Duration
+	settle := sendRenderSettle{polls: 5, interval: 50 * time.Millisecond, sleep: func(d time.Duration) { slept = append(slept, d) }}
+
+	evidence := verifySendRenderEvidenceWith(panes, keys, []string{"0", "1"}, baselines, postCapture, settle)
+	if len(evidence) != 3 {
+		t.Fatalf("evidence length = %d, want 3", len(evidence))
+	}
+	if !evidence[0].DeliveredAndRendered || !evidence[0].RenderChanged {
+		t.Fatalf("late-redraw evidence = %+v, want delivered and rendered", evidence[0])
+	}
+	if captures["%1"] != 3 {
+		t.Fatalf("pane %%1 captured %d times, want polling to stop once the render changed (3)", captures["%1"])
+	}
+	if evidence[1].DeliveredAndRendered || evidence[1].RenderChanged || !evidence[1].RenderAvailable {
+		t.Fatalf("never-rendered evidence = %+v, want available but unchanged", evidence[1])
+	}
+	if captures["%2"] != 1+settle.polls {
+		t.Fatalf("pane %%2 captured %d times, want the full bounded window (%d)", captures["%2"], 1+settle.polls)
+	}
+	if evidence[2].Delivered || evidence[2].DeliveredAndRendered {
+		t.Fatalf("undelivered evidence = %+v, must not count as rendered", evidence[2])
+	}
+	if captures["%3"] != 1 {
+		t.Fatalf("undelivered pane captured %d times, want a single look (no polling)", captures["%3"])
+	}
+	if len(slept) != settle.polls {
+		t.Fatalf("slept %d times, want %d (bounded window)", len(slept), settle.polls)
+	}
+	if sendRenderEvidenceComplete(evidence) {
+		t.Fatal("evidence with an unrendered delivered pane must not count as complete")
+	}
+	if !sendRenderEvidenceComplete(evidence[:1]) {
+		t.Fatal("late-rendered pane alone must count as complete")
 	}
 }
 

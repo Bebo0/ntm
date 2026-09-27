@@ -7523,18 +7523,40 @@ func captureSendRenderBaselinesWith(panes []tmux.Pane, keys []string, capture fu
 	return baselines
 }
 
+// sendRenderSettle bounds how long --verify-render keeps re-capturing a
+// delivered pane whose screen still matches the pre-send baseline. A TUI such
+// as Claude Code redraws its composer a few milliseconds after the paste
+// lands, so a single capture taken the instant Dispatch returns can miss text
+// that is already in the composer — most visibly on a stage-only send
+// (--enter=false), which returns as soon as the keys are written (GH #332).
+type sendRenderSettle struct {
+	// polls is the maximum number of re-captures after the first capture.
+	polls int
+	// interval is the pause before each re-capture.
+	interval time.Duration
+	sleep    func(time.Duration)
+}
+
+// defaultSendRenderSettle re-captures for up to ~2s. Panes whose render
+// changes stop being polled immediately, so only a pane that genuinely shows
+// no change pays the full window.
+var defaultSendRenderSettle = sendRenderSettle{polls: 20, interval: 100 * time.Millisecond, sleep: time.Sleep}
+
 func verifySendRenderEvidence(panes []tmux.Pane, keys, successful []string, baselines map[string]sendRenderBaseline) []SendRenderEvidence {
 	return verifySendRenderEvidenceWith(panes, keys, successful, baselines, func(pane tmux.Pane) (string, error) {
 		return capturePaneFallback(pane, sendRenderVerificationLines)
-	})
+	}, defaultSendRenderSettle)
 }
 
-func verifySendRenderEvidenceWith(panes []tmux.Pane, keys, successful []string, baselines map[string]sendRenderBaseline, capture func(tmux.Pane) (string, error)) []SendRenderEvidence {
+func verifySendRenderEvidenceWith(panes []tmux.Pane, keys, successful []string, baselines map[string]sendRenderBaseline, capture func(tmux.Pane) (string, error), settle sendRenderSettle) []SendRenderEvidence {
 	successfulSet := make(map[string]struct{}, len(successful))
 	for _, key := range successful {
 		successfulSet[key] = struct{}{}
 	}
 	evidence := make([]SendRenderEvidence, 0, len(keys))
+	// pending holds indexes into evidence (and panes) that are worth
+	// re-capturing: delivered, with a baseline, and not yet changed.
+	var pending []int
 	for i, pane := range panes {
 		if i >= len(keys) {
 			break
@@ -7543,23 +7565,53 @@ func verifySendRenderEvidenceWith(panes []tmux.Pane, keys, successful []string, 
 		baseline := baselines[key]
 		entry := SendRenderEvidence{Pane: key, BaselineAvailable: baseline.err == nil}
 		_, entry.Delivered = successfulSet[key]
-		post, err := capture(pane)
-		if baseline.err != nil {
-			entry.CaptureError = "pre-send capture unavailable: " + baseline.err.Error()
+		observeSendRender(&entry, baseline, pane, capture)
+		if entry.Delivered && entry.BaselineAvailable && !entry.RenderChanged {
+			pending = append(pending, len(evidence))
 		}
-		if err != nil {
-			if entry.CaptureError != "" {
-				entry.CaptureError += "; "
-			}
-			entry.CaptureError += "post-send capture unavailable: " + err.Error()
-		} else {
-			entry.RenderAvailable = true
-			entry.RenderChanged = baseline.err == nil && baseline.output != post
-		}
-		entry.DeliveredAndRendered = entry.Delivered && entry.BaselineAvailable && entry.RenderAvailable && entry.RenderChanged
 		evidence = append(evidence, entry)
 	}
+
+	for poll := 0; poll < settle.polls && len(pending) > 0; poll++ {
+		if settle.sleep != nil && settle.interval > 0 {
+			settle.sleep(settle.interval)
+		}
+		still := pending[:0]
+		for _, idx := range pending {
+			observeSendRender(&evidence[idx], baselines[keys[idx]], panes[idx], capture)
+			if !evidence[idx].RenderChanged {
+				still = append(still, idx)
+			}
+		}
+		pending = still
+	}
+
+	for i := range evidence {
+		entry := &evidence[i]
+		entry.DeliveredAndRendered = entry.Delivered && entry.BaselineAvailable && entry.RenderAvailable && entry.RenderChanged
+	}
 	return evidence
+}
+
+// observeSendRender records one post-send capture of pane into entry,
+// replacing any earlier observation so the evidence reflects the latest look.
+func observeSendRender(entry *SendRenderEvidence, baseline sendRenderBaseline, pane tmux.Pane, capture func(tmux.Pane) (string, error)) {
+	entry.CaptureError = ""
+	entry.RenderAvailable = false
+	entry.RenderChanged = false
+	if baseline.err != nil {
+		entry.CaptureError = "pre-send capture unavailable: " + baseline.err.Error()
+	}
+	post, err := capture(pane)
+	if err != nil {
+		if entry.CaptureError != "" {
+			entry.CaptureError += "; "
+		}
+		entry.CaptureError += "post-send capture unavailable: " + err.Error()
+		return
+	}
+	entry.RenderAvailable = true
+	entry.RenderChanged = baseline.err == nil && baseline.output != post
 }
 
 func sendRenderEvidenceComplete(evidence []SendRenderEvidence) bool {
