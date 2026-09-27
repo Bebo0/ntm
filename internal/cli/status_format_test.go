@@ -80,8 +80,10 @@ func TestModelNameForPane(t *testing.T) {
 	cfg = nil
 
 	defaults := config.DefaultModels()
-	if got := modelNameForPane(tmux.Pane{Type: tmux.AgentClaude}); got != defaults.DefaultClaude {
-		t.Errorf("default claude model = %q, want %q", got, defaults.DefaultClaude)
+	// The built-in Claude launch model is delegated to Claude Code (ntm#334);
+	// estimates still run against the Claude family instead of vanishing.
+	if got := modelNameForPane(tmux.Pane{Type: tmux.AgentClaude}); got != config.ClaudeEstimationModel {
+		t.Errorf("default claude model = %q, want %q", got, config.ClaudeEstimationModel)
 	}
 	if got := modelNameForPane(tmux.Pane{Type: tmux.AgentCodex}); got != defaults.DefaultCodex {
 		t.Errorf("default codex model = %q, want %q", got, defaults.DefaultCodex)
@@ -174,8 +176,8 @@ func TestModelNameForPaneCanonicalizesAliases(t *testing.T) {
 	t.Cleanup(func() { cfg = oldCfg })
 
 	aliasDefaults := config.DefaultModels()
-	if got := modelNameForPane(tmux.Pane{Type: tmux.AgentType("claude_code")}); got != aliasDefaults.DefaultClaude {
-		t.Fatalf("claude alias model = %q, want %q", got, aliasDefaults.DefaultClaude)
+	if got := modelNameForPane(tmux.Pane{Type: tmux.AgentType("claude_code")}); got != config.ClaudeEstimationModel {
+		t.Fatalf("claude alias model = %q, want %q", got, config.ClaudeEstimationModel)
 	}
 	if got := modelNameForPane(tmux.Pane{Type: tmux.AgentType("openai-codex")}); got != aliasDefaults.DefaultCodex {
 		t.Fatalf("codex alias model = %q, want %q", got, aliasDefaults.DefaultCodex)

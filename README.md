@@ -124,6 +124,13 @@ ntm zoom payments 3
 ntm attach payments
 ```
 
+A bare `--cc=N` passes no `--model`, so Claude Code starts with its own default
+or saved model and context setting. Pin one with `--cc=N:MODEL` (the built-in
+aliases `opus`, `sonnet`, and `haiku` pass Claude Code's own family aliases,
+which track the newest model) or set `[models] default_claude` in
+`~/.config/ntm/config.toml`; `default_claude = ""` restores the delegate
+behaviour.
+
 #### Grok Build (phase one)
 
 NTM recognizes the official xAI Grok Build CLI as the canonical `grok` agent

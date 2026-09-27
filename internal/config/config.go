@@ -36,6 +36,11 @@ const (
 	// persona or agent spec provides one. Kept alongside the Codex default so
 	// both agent types share one obvious place to change the house default.
 	DefaultClaudeReasoningEffort = "xhigh"
+	// ClaudeEstimationModel is the model family NTM assumes for context-window
+	// and cost ESTIMATES on a Claude pane whose launch model was left to Claude
+	// Code (models.default_claude = "", the built-in default; ntm#334). It is
+	// never passed to Claude Code as --model.
+	ClaudeEstimationModel = "claude-opus"
 )
 
 // validSynthesisStrategies defines the canonical synthesis strategy names.
@@ -1724,7 +1729,10 @@ type ModelsConfig struct {
 // Model IDs should match those in internal/agents/profiles.go (no date suffixes).
 func DefaultModels() ModelsConfig {
 	return ModelsConfig{
-		DefaultClaude:   "claude-opus-4-8",
+		// Empty: no --model is injected, so Claude Code launches with its own
+		// default / saved model and context setting. A hard-coded model ID went
+		// stale with every model release (ntm#15, #71, #78, #196, #334).
+		DefaultClaude:   "",
 		DefaultCodex:    DefaultCodexModel,
 		DefaultGemini:   "gemini-3-pro-preview",
 		DefaultGrok:     "",
@@ -1733,12 +1741,14 @@ func DefaultModels() ModelsConfig {
 		// Empty: omp's own config (modelRoles.default) chooses the model and
 		// no --model is injected.
 		DefaultOmp: "",
+		// Claude Code resolves its own family aliases to the newest model in
+		// that family, so mapping to them (not to dated IDs) never goes stale.
 		Claude: map[string]string{
-			"opus":      "claude-opus-4-8",
-			"sonnet":    "claude-sonnet-4-6",
-			"haiku":     "claude-haiku-4-5",
-			"architect": "claude-opus-4-8",
-			"fast":      "claude-sonnet-4-6",
+			"opus":      "opus",
+			"sonnet":    "sonnet",
+			"haiku":     "haiku",
+			"architect": "opus",
+			"fast":      "sonnet",
 		},
 		Codex: map[string]string{
 			"gpt4":  "gpt-4",
@@ -3981,7 +3991,7 @@ func Print(cfg *Config, w io.Writer) error {
 	// Write models configuration
 	fmt.Fprintln(w, "[models]")
 	fmt.Fprintln(w, "# Default models when no specifier given")
-	fmt.Fprintf(w, "default_claude = %q\n", cfg.Models.DefaultClaude)
+	fmt.Fprintf(w, "default_claude = %q  # Empty passes no --model: Claude Code uses its own default/saved model\n", cfg.Models.DefaultClaude)
 	fmt.Fprintf(w, "default_codex = %q\n", cfg.Models.DefaultCodex)
 	fmt.Fprintf(w, "default_gemini = %q\n", cfg.Models.DefaultGemini)
 	fmt.Fprintf(w, "default_grok = %q  # Empty delegates model selection to Grok Build\n", cfg.Models.DefaultGrok)

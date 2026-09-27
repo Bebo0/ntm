@@ -207,11 +207,11 @@ func TestResolveAgentModel_Precedence(t *testing.T) {
 	hermes.Defaults.Model = "google/gemini-2.5-flash"
 	// A plugin entry keyed to a built-in type proves the global default wins
 	// over a plugin default (this branch is never reached for built-ins).
-	ccPlugin := plugins.AgentPlugin{Name: "cc"}
-	ccPlugin.Defaults.Model = "plugin/should-not-win"
+	codPlugin := plugins.AgentPlugin{Name: string(AgentTypeCodex)}
+	codPlugin.Defaults.Model = "plugin/should-not-win"
 	pluginMap := map[string]plugins.AgentPlugin{
-		"hermes": hermes,
-		"cc":     ccPlugin,
+		"hermes":               hermes,
+		string(AgentTypeCodex): codPlugin,
 	}
 
 	// 1. Explicit model on the spec wins over the plugin default.
@@ -220,11 +220,11 @@ func TestResolveAgentModel_Precedence(t *testing.T) {
 	}
 
 	// 2. Global config default for a built-in type wins over any plugin default.
-	wantDefault := cfg.Models.DefaultClaude
+	wantDefault := cfg.Models.DefaultCodex
 	if wantDefault == "" {
-		t.Fatal("expected a non-empty default claude model in config.Default()")
+		t.Fatal("expected a non-empty default codex model in config.Default()")
 	}
-	if got := resolveAgentModel(AgentTypeClaude, "", pluginMap); got != wantDefault {
+	if got := resolveAgentModel(AgentTypeCodex, "", pluginMap); got != wantDefault {
 		t.Errorf("global default: got %q, want %q", got, wantDefault)
 	}
 
@@ -317,14 +317,16 @@ func TestResolveModel_WithConfig(t *testing.T) {
 		modelSpec string
 		want      string
 	}{
-		{"claude alias opus", AgentTypeClaude, "opus", "claude-opus-4-8"},
-		{"claude alias sonnet", AgentTypeClaude, "sonnet", "claude-sonnet-4-6"},
+		{"claude alias opus", AgentTypeClaude, "opus", "opus"},
+		{"claude alias architect", AgentTypeClaude, "architect", "opus"},
+		{"claude alias sonnet", AgentTypeClaude, "sonnet", "sonnet"},
 		{"codex alias o3", AgentTypeCodex, "o3", "o3"},
 		{"gemini alias flash", AgentTypeGemini, "flash", "gemini-3-flash"},
 		{"grok exact account model", AgentTypeGrok, "account-current", "account-current"},
 		{"grok default delegated", AgentTypeGrok, "", ""},
 		{"unknown alias passthrough", AgentTypeClaude, "unknown-custom", "unknown-custom"},
-		{"claude default", AgentTypeClaude, "", "claude-opus-4-8"},
+		// Empty: Claude Code picks its own default model (ntm#334).
+		{"claude default delegated", AgentTypeClaude, "", ""},
 		{"codex default", AgentTypeCodex, "", config.DefaultCodexModel},
 		{"gemini default", AgentTypeGemini, "", "gemini-3-pro-preview"},
 	}

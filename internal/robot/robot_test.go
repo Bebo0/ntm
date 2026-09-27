@@ -1626,6 +1626,22 @@ func TestModelNameForPane(t *testing.T) {
 			},
 			want: "account/grok-override",
 		},
+		{
+			// ntm#334: the launch model is delegated to Claude Code, but
+			// context/cost estimates keep a Claude-family model.
+			name: "claude delegated default estimates as claude family",
+			pane: tmux.Pane{Type: tmux.AgentClaude},
+			cfg:  &config.Config{Models: config.DefaultModels()},
+			want: config.ClaudeEstimationModel,
+		},
+		{
+			name: "claude configured default wins",
+			pane: tmux.Pane{Type: tmux.AgentClaude},
+			cfg: &config.Config{
+				Models: config.ModelsConfig{DefaultClaude: "claude-pinned"},
+			},
+			want: "claude-pinned",
+		},
 	}
 
 	for _, tt := range tests {

@@ -557,11 +557,41 @@ url = "http://original:1234/mcp/"
 
 func TestModelsConfig(t *testing.T) {
 	cfg := Default()
-	if cfg.Models.DefaultClaude == "" {
-		t.Error("DefaultClaude should not be empty")
+	// Empty by design: no --model is injected, so Claude Code launches with
+	// its own default / saved model instead of a stale pinned ID (ntm#334).
+	if cfg.Models.DefaultClaude != "" {
+		t.Errorf("DefaultClaude = %q, want empty (delegate to Claude Code)", cfg.Models.DefaultClaude)
 	}
 	if len(cfg.Models.Claude) == 0 {
 		t.Error("Claude aliases should not be empty")
+	}
+}
+
+// TestDefaultClaudeLaunchPassesNoModel is the ntm#334 guard: with the built-in
+// config a bare --cc pane must launch without --model, so Claude Code uses its
+// own default/saved model; an explicit alias still reaches the command line.
+func TestDefaultClaudeLaunchPassesNoModel(t *testing.T) {
+	cfg := Default()
+	bare, err := GenerateAgentCommand(cfg.Agents.Claude, AgentTemplateVars{
+		AgentType: "cc",
+		Model:     cfg.Models.GetModelName("cc", ""),
+	})
+	if err != nil {
+		t.Fatalf("GenerateAgentCommand (bare) error = %v", err)
+	}
+	if strings.Contains(bare, "--model") {
+		t.Fatalf("bare Claude launch injected a model: %q", bare)
+	}
+
+	aliased, err := GenerateAgentCommand(cfg.Agents.Claude, AgentTemplateVars{
+		AgentType: "cc",
+		Model:     cfg.Models.GetModelName("cc", "opus"),
+	})
+	if err != nil {
+		t.Fatalf("GenerateAgentCommand (alias) error = %v", err)
+	}
+	if !strings.Contains(aliased, "--model 'opus'") {
+		t.Fatalf("aliased Claude launch = %q, want it to contain --model 'opus'", aliased)
 	}
 }
 
@@ -576,7 +606,9 @@ func TestGetModelName(t *testing.T) {
 		{"gemini", "", models.DefaultGemini},
 		{"grok", "", ""},
 		{"grok-build", "", ""},
-		{"claude", "opus", "claude-opus-4-8"},
+		{"claude", "", ""},
+		{"claude", "opus", "opus"},
+		{"claude", "fast", "sonnet"},
 		{"codex", "gpt4", "gpt-4"},
 		{"gemini", "flash", "gemini-3-flash"},
 		{"claude", "custom-model", "custom-model"},

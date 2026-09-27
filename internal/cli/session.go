@@ -1861,7 +1861,12 @@ func modelNameForPane(p tmux.Pane) string {
 	defaults := config.DefaultModels()
 	switch agentType {
 	case tmux.AgentClaude:
-		return defaults.DefaultClaude
+		if defaults.DefaultClaude != "" {
+			return defaults.DefaultClaude
+		}
+		// Launch model delegated to Claude Code (ntm#334): estimate context
+		// and cost against the Claude family rather than dropping them.
+		return config.ClaudeEstimationModel
 	case tmux.AgentCodex:
 		return defaults.DefaultCodex
 	case tmux.AgentGemini, tmux.AgentAntigravity:

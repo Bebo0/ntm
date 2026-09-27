@@ -2666,10 +2666,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				modelName := ""
 				switch data.AgentType {
 				case string(tmux.AgentClaude):
-					if m.cfg != nil {
+					if m.cfg != nil && m.cfg.Models.DefaultClaude != "" {
 						modelName = m.cfg.Models.DefaultClaude
 					} else {
-						modelName = "claude-sonnet-4-6"
+						modelName = config.ClaudeEstimationModel
 					}
 				case string(tmux.AgentCodex):
 					if m.cfg != nil {
@@ -4921,7 +4921,7 @@ func (m *Model) resolveCostModelForPane(pane tmux.Pane) string {
 		if m.cfg != nil && m.cfg.Models.DefaultClaude != "" {
 			return m.cfg.Models.DefaultClaude
 		}
-		return "claude-sonnet-4-6"
+		return config.ClaudeEstimationModel
 	case tmux.AgentCodex:
 		if m.cfg != nil && m.cfg.Models.DefaultCodex != "" {
 			return m.cfg.Models.DefaultCodex
