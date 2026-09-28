@@ -440,4 +440,3 @@ func TestJobAdmissionNonPipelineKeepsExistingProjectResolution(t *testing.T) {
 		}
 	}
 }
-

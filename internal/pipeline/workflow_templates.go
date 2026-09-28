@@ -64,7 +64,7 @@ func snapshotWorkflowTemplates(ctx context.Context, root, sourceFile string, wor
 		var resolved string
 		if step.PromptFile != "" && step.Template == "" {
 			// Foreach materializes variable-dependent prompt_file paths at
-			// runtime. Do not read a literal placeholder or prefix an absolute
+			// runtime. Do not read a literal "${...}" path or prefix an absolute
 			// path expression with the current working directory.
 			if !managedTemplateSnapshot(original) && strings.Contains(original, "${") {
 				slog.Warn("pipeline prompt_file remains a live variable-dependent input", "step_id", step.ID, "prompt_file", original)

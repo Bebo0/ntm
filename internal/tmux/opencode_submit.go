@@ -18,7 +18,7 @@ import (
 //	╹▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀
 //
 // The bottom bar row is the agent/model line, not input. An empty composer
-// shows an "Ask anything…" placeholder. Submitted prompts are echoed into the
+// shows an "Ask anything…" hint. Submitted prompts are echoed into the
 // transcript with the same bar prefix, but always separated from the composer
 // by a non-bar row, so only the contiguous run ending at the rule is the
 // composer (all verified live, GH #333).
@@ -32,7 +32,7 @@ const (
 // opencodeComposerDraft extracts the text currently in an OpenCode composer
 // from a visible-pane capture. found is false when no composer is on screen.
 // The returned draft joins the input rows with newlines and is empty for an
-// empty composer (including one showing only the placeholder).
+// empty composer (including one showing only the hint text).
 //
 // Rows are cut to the columns spanned by the closing rule: once a session
 // exists, a wide pane draws a sidebar (session title, context, cwd) on the

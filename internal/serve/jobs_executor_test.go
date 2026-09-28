@@ -491,4 +491,3 @@ func TestJobExecutorShutdownPublishesCancellationBeforeQueueSelection(t *testing
 		t.Fatalf("queued work was not discarded exactly once: %d", discarded.Load())
 	}
 }
-
