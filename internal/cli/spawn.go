@@ -4733,7 +4733,7 @@ func (c *spawnIdentityCoordinator) prepareAgent(parentCtx context.Context, agent
 	// delegation marker instead of failing the pane's identity (ntm#261).
 	if strings.TrimSpace(model) == "" {
 		model = delegatedModelPlaceholder(program)
-		if !IsJSONOutput() {
+		if !IsJSONOutput() && !modelDelegationIsBuiltInDefault(agent.agentType) {
 			output.PrintInfof("No model resolved for pane %d (%s); registering with Agent Mail as %q — set models.default_%s or pass an explicit model to name it",
 				agent.paneIndex, agent.agentType, model, modelDefaultKeyForType(agent.agentType))
 		}
@@ -4916,6 +4916,23 @@ func delegatedModelPlaceholder(program string) string {
 		program = "agent"
 	}
 	return program + "/cli-default"
+}
+
+// modelDelegationIsBuiltInDefault reports whether leaving the launch model to
+// the agent's own CLI is NTM's built-in default for this agent type: a known
+// type whose compiled-in [models] default is empty (claude since ntm#334, and
+// grok, opencode, omp), or one with no [models] key at all. Such a pane
+// resolving no model is the intended configuration, so the delegation notice
+// — which suggests setting models.default_<type> — would advise undoing the
+// default on every spawn. Plugin types and a user-blanked non-empty default
+// (codex, gemini, ollama) still get the notice.
+func modelDelegationIsBuiltInDefault(agentType string) bool {
+	canonical := agentpkg.AgentType(agentType).Canonical()
+	if !canonical.IsValid() || canonical == agentpkg.AgentTypeUser {
+		return false
+	}
+	defaults := config.DefaultModels()
+	return strings.TrimSpace(defaults.GetModelName(string(canonical), "")) == ""
 }
 
 // modelDefaultKeyForType names the [models] key a user would set to give the
