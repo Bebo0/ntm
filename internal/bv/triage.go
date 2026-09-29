@@ -74,6 +74,18 @@ func acquireTriageRunLock(ctx context.Context, deadline time.Time, timeout time.
 	}
 }
 
+// triageBudgetError reports expiry of this call's own triage budget the same
+// way as every other triage timeout ("bv timed out after ..."), instead of the
+// internal deadline context's bare "context deadline exceeded" (for example
+// while the tracker source is captured or the run lock is awaited). The cause
+// stays wrapped; the caller's own cancellation or deadline passes through.
+func triageBudgetError(parent context.Context, err error, timeout time.Duration) error {
+	if err == nil || parent.Err() != nil || !errors.Is(err, context.DeadlineExceeded) || strings.Contains(err.Error(), "timed out after") {
+		return err
+	}
+	return fmt.Errorf("bv timed out after %v: %w", timeout, err)
+}
+
 func normalizeTriageDir(dir string) (string, error) {
 	if dir == "" {
 		dir = util.ResolveProjectDir("")
@@ -115,7 +127,7 @@ func GetTriageWithTimeout(dir string, timeout time.Duration) (*TriageResponse, e
 	return getTriageContext(context.Background(), dir, timeout)
 }
 
-func getTriageContext(ctx context.Context, dir string, timeout time.Duration) (*TriageResponse, error) {
+func getTriageContext(ctx context.Context, dir string, timeout time.Duration) (_ *TriageResponse, err error) {
 	if ctx == nil {
 		return nil, fmt.Errorf("triage context is required")
 	}
@@ -130,8 +142,10 @@ func getTriageContext(ctx context.Context, dir string, timeout time.Duration) (*
 		timeout = CommandTimeout()
 	}
 	deadline := time.Now().Add(timeout)
+	parent := ctx
 	ctx, cancel := context.WithDeadline(ctx, deadline)
 	defer cancel()
+	defer func() { err = triageBudgetError(parent, err, timeout) }()
 	source, err := captureTriageSource(ctx, normalizedDir)
 	if err != nil {
 		return nil, err
