@@ -9,8 +9,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/Dicklesworthstone/ntm/internal/agentmail"
 	"gopkg.in/yaml.v3"
+
+	"github.com/Dicklesworthstone/ntm/internal/agentmail"
 )
 
 // Exercise capture through the existing public generator and real Agent Mail

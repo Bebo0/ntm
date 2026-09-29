@@ -14,9 +14,10 @@ import (
 	"testing"
 	"time"
 
+	"gopkg.in/yaml.v3"
+
 	"github.com/Dicklesworthstone/ntm/internal/agentmail"
 	"github.com/Dicklesworthstone/ntm/internal/handoff"
-	"gopkg.in/yaml.v3"
 )
 
 // Use the spawn recovery entry point, a real on-disk handoff, and the real
