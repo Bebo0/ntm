@@ -183,7 +183,13 @@ func TestSnapshotPromptFilesShareTemplateBudgetAndDeduplication(t *testing.T) {
 }
 
 func TestSnapshotPromptFilesPreserveGeneratedAndVariablePaths(t *testing.T) {
-	root, cwd := t.TempDir(), t.TempDir()
+	// os.Getwd reports the resolved directory; on macOS t.TempDir() sits
+	// behind /var -> /private/var, so compare against the canonical path.
+	root := t.TempDir()
+	cwd, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
 	promptFileTestCWD(t, cwd)
 	workflow := promptFileWorkflow("generated.md")
 	workflow.Steps = append(workflow.Steps, Step{ID: "dynamic", PromptFile: "${item.path}"})
