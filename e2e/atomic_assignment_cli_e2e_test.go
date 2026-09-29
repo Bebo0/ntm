@@ -3177,6 +3177,10 @@ func TestE2EAtomicAssignmentObservationDeadlineContracts(t *testing.T) {
 		beadID := fixture.createBead(t, "Delayed assignment observation")
 		prompt := fmt.Sprintf("NTM_ATOMIC_DELAYED_OBSERVATION_%d", time.Now().UnixNano())
 		tmuxBinary, reached := fixture.armTMUXCaptureDelay(t, 2500*time.Millisecond)
+		// Every capture-pane takes 2.5s here. Delivery captures the pane for
+		// the workspace-trust gate (d6d088e9) and again for composer readiness,
+		// on top of the pre-claim observation, so the command budget must
+		// cover four slow captures; 8s only ever covered three.
 		result := fixture.runNTM(t, map[string]string{"NTM_TMUX_BINARY": tmuxBinary},
 			"assign", fixture.session,
 			"--repo="+fixture.projectDir,
@@ -3186,7 +3190,7 @@ func TestE2EAtomicAssignmentObservationDeadlineContracts(t *testing.T) {
 			"--force",
 			"--ignore-deps",
 			"--reserve-files=false",
-			"--timeout=8s",
+			"--timeout=15s",
 			"--json",
 		)
 		if result.exitCode != 0 || len(bytes.TrimSpace(result.stderr)) != 0 {
