@@ -6,8 +6,11 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
+	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -19,6 +22,13 @@ type watcherToolHandler func(args map[string]interface{}) (interface{}, *agentma
 
 func newWatcherMCPServer(t *testing.T, handlers map[string]watcherToolHandler) *httptest.Server {
 	t.Helper()
+
+	// Granted rows stay live on the server. ReservePaths verifies every grant
+	// through read-only resource readback before trusting the receipt, so the
+	// fixture serves the project identity and active reservations like Agent
+	// Mail's resource://project/{key} and resource://file_reservations/{key}.
+	var ledgerMu sync.Mutex
+	var ledger []map[string]interface{}
 
 	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
@@ -32,6 +42,38 @@ func newWatcherMCPServer(t *testing.T, handlers map[string]watcherToolHandler) *
 		}
 
 		w.Header().Set("Content-Type", "application/json")
+
+		if req.Method == "resources/read" {
+			params, _ := req.Params.(map[string]interface{})
+			uri, _ := params["uri"].(string)
+			var payload interface{}
+			switch {
+			case strings.HasPrefix(uri, "resource://project/"):
+				key, _ := url.PathUnescape(strings.TrimPrefix(uri, "resource://project/"))
+				payload = map[string]interface{}{"id": 1, "slug": "project", "human_key": key}
+			case strings.HasPrefix(uri, "resource://file_reservations/"):
+				ledgerMu.Lock()
+				payload = append([]map[string]interface{}{}, ledger...)
+				ledgerMu.Unlock()
+			default:
+				_ = json.NewEncoder(w).Encode(agentmail.JSONRPCResponse{
+					JSONRPC: "2.0",
+					ID:      req.ID,
+					Error:   &agentmail.JSONRPCError{Code: -32602, Message: "unknown resource: " + uri},
+				})
+				return
+			}
+			text, _ := json.Marshal(payload)
+			resultJSON, _ := json.Marshal(map[string]interface{}{
+				"contents": []map[string]interface{}{{"uri": uri, "text": string(text)}},
+			})
+			_ = json.NewEncoder(w).Encode(agentmail.JSONRPCResponse{
+				JSONRPC: "2.0",
+				ID:      req.ID,
+				Result:  json.RawMessage(resultJSON),
+			})
+			return
+		}
 
 		if req.Method != "tools/call" {
 			_ = json.NewEncoder(w).Encode(agentmail.JSONRPCResponse{
@@ -64,6 +106,18 @@ func newWatcherMCPServer(t *testing.T, handlers map[string]watcherToolHandler) *
 				Error:   rpcErr,
 			})
 			return
+		}
+
+		if granted, ok := result.(agentmail.ReservationResult); ok && toolName == "file_reservation_paths" {
+			ledgerMu.Lock()
+			for _, grant := range granted.Granted {
+				ledger = append(ledger, map[string]interface{}{
+					"id": grant.ID, "agent": args["agent_name"], "path_pattern": grant.PathPattern,
+					"exclusive": grant.Exclusive, "reason": grant.Reason,
+					"created_ts": grant.CreatedTS, "expires_ts": grant.ExpiresTS,
+				})
+			}
+			ledgerMu.Unlock()
 		}
 
 		resultJSON, _ := json.Marshal(result)
@@ -538,9 +592,12 @@ func TestCheckPaneOutputsScansAgentPanes(t *testing.T) {
 
 	server := newWatcherMCPServer(t, map[string]watcherToolHandler{
 		"file_reservation_paths": func(args map[string]interface{}) (interface{}, *agentmail.JSONRPCError) {
+			// A live grant: requested mode and reason, unexpired lease.
+			reason, _ := args["reason"].(string)
 			return agentmail.ReservationResult{
 				Granted: []agentmail.FileReservation{
-					{ID: 11, PathPattern: "/watched.go", AgentName: "TestAgent", Exclusive: true},
+					{ID: 11, ProjectID: 1, PathPattern: "/watched.go", AgentName: "TestAgent", Exclusive: true, Reason: reason,
+						ExpiresTS: agentmail.FlexTime{Time: time.Now().Add(time.Hour)}},
 				},
 			}, nil
 		},

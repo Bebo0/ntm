@@ -95,6 +95,37 @@ func (c *Client) readReservationProject(ctx context.Context, projectKey string) 
 	return &project, nil
 }
 
+func activeReservationsURI(projectKey string) string {
+	return fmt.Sprintf("resource://file_reservations/%s?active_only=true&format=json", url.PathEscape(projectKey))
+}
+
+// ReadActiveReservations lists every active reservation in the project through
+// the read-only, paginated resource view only. Unlike ListReservations it never
+// falls back to the legacy list_file_reservations/list_reservations tools
+// (which current Agent Mail servers do not provide), so an unavailable resource
+// surfaces as an error instead of extra tool calls. Inspection surfaces that
+// promise read-only resource access use it.
+func (c *Client) ReadActiveReservations(ctx context.Context, projectKey string) ([]FileReservation, error) {
+	return c.listActiveReservationsFromResource(ctx, projectKey)
+}
+
+// listActiveReservationsFromResource backs ReadActiveReservations. Grant
+// verification uses it instead of ListReservations so an unavailable resource
+// leaves the grant unverified rather than falling back to legacy list tools:
+// ownership evidence must come from the same independent, paginated,
+// project-checked readback.
+func (c *Client) listActiveReservationsFromResource(ctx context.Context, projectKey string) ([]FileReservation, error) {
+	uri := activeReservationsURI(projectKey)
+	raw, err := c.ReadResource(ctx, uri)
+	if err != nil {
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
+		return nil, err
+	}
+	return c.readReservationPages(ctx, projectKey, "", true, uri, raw)
+}
+
 func (c *Client) readReservationPages(ctx context.Context, projectKey, agentName string, allAgents bool, uri string, first json.RawMessage) ([]FileReservation, error) {
 	rows := make([]reservationResourceRow, 0)
 	seen := make(map[int]struct{})
@@ -337,7 +368,7 @@ func (c *Client) completeReservationGrantOwnership(ctx context.Context, opts Fil
 	if err != nil {
 		return err
 	}
-	reservations, err := c.ListReservations(ctx, opts.ProjectKey, "", true)
+	reservations, err := c.listActiveReservationsFromResource(ctx, opts.ProjectKey)
 	if err != nil {
 		return fmt.Errorf("read back granted reservations: %w", err)
 	}

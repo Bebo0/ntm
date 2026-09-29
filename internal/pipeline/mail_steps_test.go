@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"reflect"
 	"strings"
 	"sync"
@@ -319,6 +320,7 @@ func TestExecuteMailStep_DispatchesThroughAgentMail(t *testing.T) {
 		defer requestsMu.Unlock()
 		return requests[idx]
 	}
+	ledger := &reservationLedger{}
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			t.Fatalf("method = %s, want POST", r.Method)
@@ -332,6 +334,9 @@ func TestExecuteMailStep_DispatchesThroughAgentMail(t *testing.T) {
 		body := http.MaxBytesReader(w, r.Body, 1<<20)
 		if err := json.NewDecoder(body).Decode(&req); err != nil {
 			t.Fatalf("decode request: %v", err)
+		}
+		if ledger.serveReadback(t, w, req.ID, req.Method, req.Params) {
+			return
 		}
 		if req.Method != "tools/call" {
 			t.Fatalf("method = %s, want tools/call", req.Method)
@@ -360,19 +365,10 @@ func TestExecuteMailStep_DispatchesThroughAgentMail(t *testing.T) {
 				},
 			}
 		case "file_reservation_paths":
+			grant := ledger.grant(88, "internal/pipeline/mail_steps.go", args)
+			grant["agent_name"], grant["project_id"], grant["created_ts"] = args["agent_name"], 1, reservationLedgerCreated
 			result = map[string]interface{}{
-				"granted": []map[string]interface{}{
-					{
-						"id":           88,
-						"path_pattern": "internal/pipeline/mail_steps.go",
-						"agent_name":   args["agent_name"],
-						"project_id":   1,
-						"exclusive":    args["exclusive"],
-						"reason":       args["reason"],
-						"expires_ts":   "2026-05-08T10:00:00Z",
-						"created_ts":   "2026-05-08T09:00:00Z",
-					},
-				},
+				"granted":   []map[string]interface{}{grant},
 				"conflicts": []interface{}{},
 			}
 		case "fetch_inbox":
@@ -739,6 +735,7 @@ func newAgentMailRuntimeFixture(t *testing.T, failTool string) (*httptest.Server
 		return append([]mailRuntimeFixtureRequest(nil), requests...)
 	}
 
+	ledger := &reservationLedger{}
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			t.Fatalf("method = %s, want POST", r.Method)
@@ -752,6 +749,9 @@ func newAgentMailRuntimeFixture(t *testing.T, failTool string) (*httptest.Server
 		body := http.MaxBytesReader(w, r.Body, 1<<20)
 		if err := json.NewDecoder(body).Decode(&req); err != nil {
 			t.Fatalf("decode request: %v", err)
+		}
+		if ledger.serveReadback(t, w, req.ID, req.Method, req.Params) {
+			return
 		}
 		if req.Method != "tools/call" {
 			t.Fatalf("method = %s, want tools/call", req.Method)
@@ -800,16 +800,10 @@ func newAgentMailRuntimeFixture(t *testing.T, failTool string) (*httptest.Server
 				},
 			}
 		case "file_reservation_paths":
+			// Real Agent Mail grant receipts carry no project_id/agent_name;
+			// ownership comes from the ledger readback.
 			result = map[string]interface{}{
-				"granted": []map[string]interface{}{
-					{
-						"id":           202,
-						"path_pattern": "internal/pipeline/mail_steps_test.go",
-						"exclusive":    args["exclusive"],
-						"reason":       args["reason"],
-						"expires_ts":   "2026-05-08T10:00:00Z",
-					},
-				},
+				"granted":   []map[string]interface{}{ledger.grant(202, "internal/pipeline/mail_steps_test.go", args)},
 				"conflicts": []interface{}{},
 			}
 		case "fetch_inbox":
@@ -872,4 +866,71 @@ func TestStep_HasMailStep_FalseWhenAbsent(t *testing.T) {
 	if (*Step)(nil).hasMailStep() {
 		t.Errorf("hasMailStep() on nil receiver returned true")
 	}
+}
+
+const (
+	reservationLedgerCreated = "2026-05-08T09:00:00Z"
+	reservationLedgerExpires = "2099-05-08T10:00:00Z"
+)
+
+// reservationLedger models the live reservation rows behind an Agent Mail
+// fixture. agentmail.ReservePaths never trusts a grant receipt on its own: it
+// reads the project identity (resource://project/{key}) and the active
+// reservations (resource://file_reservations/{key}) back from the server,
+// read-only, and matches the granted IDs against them.
+type reservationLedger struct {
+	mu   sync.Mutex
+	rows []map[string]interface{}
+}
+
+// grant records a live row for the request and returns its receipt.
+func (l *reservationLedger) grant(id int, path string, args map[string]interface{}) map[string]interface{} {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.rows = append(l.rows, map[string]interface{}{
+		"id": id, "agent": args["agent_name"], "path_pattern": path,
+		"exclusive": args["exclusive"], "reason": args["reason"],
+		"created_ts": reservationLedgerCreated, "expires_ts": reservationLedgerExpires,
+	})
+	return map[string]interface{}{
+		"id": id, "path_pattern": path, "exclusive": args["exclusive"],
+		"reason": args["reason"], "expires_ts": reservationLedgerExpires,
+	}
+}
+
+// serveReadback answers the ownership readback resources and reports whether
+// the request was one of them.
+func (l *reservationLedger) serveReadback(t *testing.T, w http.ResponseWriter, id interface{}, method string, params map[string]interface{}) bool {
+	t.Helper()
+	if method != "resources/read" {
+		return false
+	}
+	uri, _ := params["uri"].(string)
+	var payload interface{}
+	switch {
+	case strings.HasPrefix(uri, "resource://project/"):
+		key, err := url.PathUnescape(strings.TrimPrefix(uri, "resource://project/"))
+		if err != nil {
+			t.Fatalf("project resource key %q: %v", uri, err)
+		}
+		payload = map[string]interface{}{"id": 1, "slug": "ntm", "human_key": key}
+	case strings.HasPrefix(uri, "resource://file_reservations/"):
+		l.mu.Lock()
+		payload = append([]map[string]interface{}(nil), l.rows...)
+		l.mu.Unlock()
+	default:
+		t.Fatalf("unexpected resource read %q", uri)
+	}
+	text, err := json.Marshal(payload)
+	if err != nil {
+		t.Fatalf("encode resource: %v", err)
+	}
+	w.Header().Set("Content-Type", "application/json")
+	if err := json.NewEncoder(w).Encode(map[string]interface{}{
+		"jsonrpc": "2.0", "id": id,
+		"result": map[string]interface{}{"contents": []map[string]interface{}{{"uri": uri, "text": string(text)}}},
+	}); err != nil {
+		t.Fatalf("encode resource response: %v", err)
+	}
+	return true
 }

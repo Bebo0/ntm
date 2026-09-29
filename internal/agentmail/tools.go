@@ -616,7 +616,7 @@ func (c *Client) ListReservations(ctx context.Context, projectKey, agentName str
 	//
 	// The server accepts either project slug or human_key in {slug}; we pass projectKey
 	// (usually an absolute path) URL-escaped for compatibility.
-	uri := fmt.Sprintf("resource://file_reservations/%s?active_only=true&format=json", url.PathEscape(projectKey))
+	uri := activeReservationsURI(projectKey)
 
 	result, err := c.ReadResource(ctx, uri)
 	if err != nil {

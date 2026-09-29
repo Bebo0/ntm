@@ -25,15 +25,15 @@ type WorkReservationSnapshot struct {
 // ReadWorkReservations resolves the project independently of reservation rows
 // and verifies it again after the complete paginated read. The second check
 // prevents a deleted/recreated project from being attributed to its old ID.
-// This must never call ensure_project or any other mutating endpoint.
+// This must never call ensure_project or any other mutating endpoint, and it
+// reads rows only through the paginated resource view: an unavailable resource
+// is reported as unavailable evidence, never replaced by legacy list tools.
 func (c *Client) ReadWorkReservations(ctx context.Context, projectKey string) (*WorkReservationSnapshot, error) {
 	if c == nil {
 		return nil, errors.New("work reservation client is unavailable")
 	}
 	return readWorkReservations(ctx, projectKey, c.readReservationProject,
-		func(ctx context.Context, project string) ([]FileReservation, error) {
-			return c.ListReservations(ctx, project, "", true)
-		}, time.Now)
+		c.listActiveReservationsFromResource, time.Now)
 }
 
 func readWorkReservations(ctx context.Context, projectKey string,

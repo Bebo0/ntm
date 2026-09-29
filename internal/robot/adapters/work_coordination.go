@@ -423,7 +423,9 @@ func (a *WorkCoordinationAdapter) collectCoordination(ctx context.Context, now t
 		}
 	}
 
-	if reservations, err := client.ListReservations(ctx, a.config.ProjectDir, "", true); err == nil {
+	// Resource-only read: coordination inspection must not issue tool calls,
+	// including legacy list tools, when the reservation resource is down.
+	if reservations, err := client.ReadActiveReservations(ctx, a.config.ProjectDir); err == nil {
 		inputs.Reservations = reservations
 		inputs.ReservationConflicts = deriveReservationConflicts(reservations, now)
 	}

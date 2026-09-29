@@ -247,6 +247,23 @@ func newMailStub(t *testing.T, inbox []agentmail.InboxMessage) *mailStub {
 				}
 				resourceText = mustJSONString(t, rows)
 			}
+			if strings.HasPrefix(uri, "resource://project/") {
+				// Read-only project identity, as served by Agent Mail's
+				// resource://project/{slug} (id, slug, human_key, agents).
+				// Reservation grant verification resolves ownership here.
+				key := strings.TrimPrefix(uri, "resource://project/")
+				if decoded, err := url.PathUnescape(key); err == nil {
+					key = decoded
+				}
+				writeResponse(map[string]interface{}{
+					"contents": []map[string]interface{}{{
+						"text": mustJSONString(t, map[string]interface{}{
+							"id": 1, "slug": "stub", "human_key": key, "agents": stub.listAgents,
+						}),
+					}},
+				})
+				return
+			}
 			if strings.HasPrefix(uri, "resource://agents/") {
 				projectKey = strings.TrimPrefix(uri, "resource://agents/")
 				if idx := strings.Index(projectKey, "?"); idx >= 0 {
@@ -380,10 +397,23 @@ func newMailStub(t *testing.T, inbox []agentmail.InboxMessage) *mailStub {
 				Reason:    toString(args["reason"]),
 			}
 			stub.reserveCalls = append(stub.reserveCalls, call)
+			// Like the real server, a grant is a live reservation row that the
+			// client independently reads back before trusting the receipt.
+			nextID := 1
+			for _, reservation := range stub.reservations {
+				if reservation.ID >= nextID {
+					nextID = reservation.ID + 1
+				}
+			}
 			granted := make([]map[string]interface{}, 0, len(call.Paths))
 			for i, path := range call.Paths {
+				stub.reservations = append(stub.reservations, agentmail.FileReservation{
+					ID: nextID + i, ProjectID: 1, AgentName: call.Agent, PathPattern: path,
+					Exclusive: call.Exclusive, Reason: call.Reason,
+					CreatedTS: agentmail.FlexTime{Time: time.Date(2030, 2, 1, 0, 0, 0, 0, time.UTC)}, ExpiresTS: agentmail.FlexTime{Time: time.Date(2030, 2, 1, 1, 0, 0, 0, time.UTC)},
+				})
 				granted = append(granted, map[string]interface{}{
-					"id":           i + 1,
+					"id":           nextID + i,
 					"path_pattern": path,
 					"agent_name":   call.Agent,
 					"project_id":   1,
