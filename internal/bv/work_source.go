@@ -98,7 +98,13 @@ func actionableWithWorkSource(ctx context.Context, dir string, n int, collect fu
 	for _, id := range eligibility.EligibleIDs {
 		allowed[id] = true
 	}
+	// Gated rows pass through for the callers to report, but they must not
+	// consume the caller's limit: a capped planner (spawn --assign asks for
+	// 100) would otherwise see only gated rows on a heavily gated backlog and
+	// report nothing to do while eligible work sits below the cutoff.
+	gatedLabels := operatorGatedLabelsForProject(dir)
 	result := make([]TriageRecommendation, 0, len(eligibility.EligibleIDs))
+	claimable := 0
 	for _, candidate := range candidates {
 		id := strings.TrimSpace(candidate.ID)
 		if !allowed[id] {
@@ -107,9 +113,22 @@ func actionableWithWorkSource(ctx context.Context, dir string, n int, collect fu
 		delete(allowed, id)
 		candidate.ID = id
 		result = append(result, candidate)
-		if n > 0 && len(result) >= n {
+		if recommendationCarriesOperatorGate(gatedLabels, candidate) {
+			continue
+		}
+		claimable++
+		if n > 0 && claimable >= n {
 			break
 		}
 	}
 	return result, nil
+}
+
+func recommendationCarriesOperatorGate(gatedLabels map[string]struct{}, recommendation TriageRecommendation) bool {
+	for _, label := range recommendation.Labels {
+		if _, gated := gatedLabels[strings.ToLower(strings.TrimSpace(label))]; gated {
+			return true
+		}
+	}
+	return false
 }

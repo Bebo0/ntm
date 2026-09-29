@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 
 	"github.com/Dicklesworthstone/ntm/internal/worksource"
@@ -197,5 +198,44 @@ esac
 	got, err := GetActionableRecommendationsContext(context.Background(), project, 0)
 	if err != nil || got == nil || len(got) != 0 {
 		t.Fatalf("all-ineligible plan was not an empty queue: %+v %v", got, err)
+	}
+}
+
+// Gated rows are reported to callers but must not use up a capped planner's
+// limit (spawn --assign asks for 100), or a gated head of the queue hides the
+// eligible work below it.
+func TestActionableSourceGatedRowsDoNotConsumeLimit(t *testing.T) {
+	project := t.TempDir()
+	if err := os.Mkdir(filepath.Join(project, ".beads"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	data := `{"id":"gated-a","status":"open","issue_type":"task","labels":["needs-approval"]}` + "\n" +
+		`{"id":"gated-b","status":"open","issue_type":"task","labels":["needs-approval"]}` + "\n" +
+		`{"id":"ready","status":"open","issue_type":"task"}` + "\n" +
+		`{"id":"later","status":"open","issue_type":"task"}` + "\n"
+	if err := os.WriteFile(filepath.Join(project, ".beads", "issues.jsonl"), []byte(data), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := ConfigureProjectOperatorGatedLabels(project, []string{"needs-approval"}); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = ConfigureProjectOperatorGatedLabels(project, nil) })
+	got, err := actionableWithWorkSource(context.Background(), project, 1, func(context.Context, string, int) ([]TriageRecommendation, error) {
+		return []TriageRecommendation{
+			{ID: "gated-a", Labels: []string{"needs-approval"}},
+			{ID: "gated-b", Labels: []string{"Needs-Approval"}},
+			{ID: "ready"},
+			{ID: "later"},
+		}, nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ids := make([]string, 0, len(got))
+	for _, recommendation := range got {
+		ids = append(ids, recommendation.ID)
+	}
+	if strings.Join(ids, ",") != "gated-a,gated-b,ready" {
+		t.Fatalf("capped plan = %v, want gated rows reported plus one claimable row", ids)
 	}
 }
