@@ -2,8 +2,6 @@
 // This file defines a design token system for the NTM TUI.
 package styles
 
-import ()
-
 // Spacing defines consistent spacing values (in terminal character units).
 // Use these instead of raw numbers for consistent UI spacing.
 type Spacing struct {
