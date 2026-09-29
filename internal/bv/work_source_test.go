@@ -141,3 +141,61 @@ esac
 		t.Fatal("read-only planning changed the tracker", err)
 	}
 }
+
+// Operator-gated candidates reach the callers, which report them as skipped
+// and treat gated-only queues as drained; eligibility here must not drop them.
+func TestActionableSourceLeavesOperatorGatesToCallers(t *testing.T) {
+	project := t.TempDir()
+	if err := os.Mkdir(filepath.Join(project, ".beads"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	data := `{"id":"gated","status":"open","issue_type":"task","labels":["needs-approval"]}` + "\n"
+	if err := os.WriteFile(filepath.Join(project, ".beads", "issues.jsonl"), []byte(data), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := ConfigureProjectOperatorGatedLabels(project, []string{"needs-approval"}); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = ConfigureProjectOperatorGatedLabels(project, nil) })
+	got, err := actionableWithWorkSource(context.Background(), project, 0, func(context.Context, string, int) ([]TriageRecommendation, error) {
+		return []TriageRecommendation{{ID: "gated", Labels: []string{"needs-approval"}}}, nil
+	})
+	if err != nil || len(got) != 1 || got[0].ID != "gated" {
+		t.Fatalf("operator-gated candidate was dropped before caller classification: %+v %v", got, err)
+	}
+}
+
+// Through the public entry point an all-ineligible plan is an empty queue, not
+// a failed read: assign/watch/spawn report it as nothing to do.
+func TestActionablePublicEntryTreatsAllIneligibleAsEmptyQueue(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("fake tools use a POSIX shell")
+	}
+	project, _ := sourceGuardFixture(t)
+	bin := t.TempDir()
+	bvScript := `#!/bin/sh
+case "$*" in
+  *--robot-plan*) printf '%s\n' '{"plan":{"tracks":[{"track_id":"one","items":[{"id":"blocked","title":"Blocked join","status":"open","priority":1}]}],"summary":{"total_actionable":1}}}' ;;
+  *--robot-triage*) printf '%s\n' '{"triage":{"recommendations":[{"id":"blocked","title":"Blocked join","status":"open","priority":1}]}}' ;;
+  *) exit 1 ;;
+esac
+`
+	brScript := `#!/bin/sh
+case "$*" in
+  *ready*|*list*) printf '%s\n' '[{"id":"blocked","status":"open","issue_type":"task","labels":[]}]' ;;
+  *) printf '%s\n' '{}' ;;
+esac
+`
+	for name, script := range map[string]string{"bv": bvScript, "br": brScript} {
+		if err := os.WriteFile(filepath.Join(bin, name), []byte(script), 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	InvalidateTriageCache()
+	t.Cleanup(InvalidateTriageCache)
+	got, err := GetActionableRecommendationsContext(context.Background(), project, 0)
+	if err != nil || got == nil || len(got) != 0 {
+		t.Fatalf("all-ineligible plan was not an empty queue: %+v %v", got, err)
+	}
+}

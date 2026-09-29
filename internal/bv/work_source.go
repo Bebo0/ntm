@@ -3,6 +3,7 @@ package bv
 import (
 	"context"
 	"errors"
+	"log/slog"
 	"strings"
 
 	"github.com/Dicklesworthstone/ntm/internal/worksource"
@@ -25,8 +26,20 @@ func (e *WorkEligibilityError) Unwrap() error { return ErrNoClaimableWork }
 // GetActionableRecommendationsContext adds canonical eligibility to the
 // existing source-bound plan/lifecycle reconciliation. Keep DB-only workspaces
 // operational without claiming that their candidates were JSONL-verified.
+//
+// When every collected candidate fails canonical eligibility, the actionable
+// queue is empty: assign, watch, spawn and the coordinator report a normal
+// empty/drained queue, exactly as when bv returns no candidates. The typed
+// WorkEligibilityError stays available from actionableWithWorkSource for
+// evidence consumers; a failed or mismatched source read is still an error.
 func GetActionableRecommendationsContext(ctx context.Context, dir string, n int) ([]TriageRecommendation, error) {
-	return actionableWithWorkSource(ctx, dir, n, getActionableRecommendationsFromToolsContext)
+	recommendations, err := actionableWithWorkSource(ctx, dir, n, getActionableRecommendationsFromToolsContext)
+	var ineligible *WorkEligibilityError
+	if errors.As(err, &ineligible) {
+		slog.Debug("no claimable work after canonical eligibility checks", "dir", dir, "excluded", len(ineligible.Exclusions))
+		return []TriageRecommendation{}, nil
+	}
+	return recommendations, err
 }
 
 func actionableWithWorkSource(ctx context.Context, dir string, n int, collect func(context.Context, string, int) ([]TriageRecommendation, error)) ([]TriageRecommendation, error) {
@@ -69,7 +82,12 @@ func actionableWithWorkSource(ctx context.Context, dir string, n int, collect fu
 	for _, candidate := range candidates {
 		ids = append(ids, candidate.ID)
 	}
-	eligibility := source.Filter(ids, worksource.EligibilityPolicy{GatedLabels: OperatorGatedLabelsForProject(dir)})
+	// Operator gates are deliberately NOT applied here. Every caller classifies
+	// gated candidates itself and reports them (skipped "operator-gated label",
+	// gated queues treated as drained), and claims re-check the gate atomically.
+	// Dropping them here would hide that evidence and turn a gated-only queue
+	// into a no-claimable failure.
+	eligibility := source.Filter(ids, worksource.EligibilityPolicy{})
 	if err := worksource.Validate(ctx, source.Identity); err != nil {
 		return nil, err
 	}

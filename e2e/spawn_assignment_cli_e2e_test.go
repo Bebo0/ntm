@@ -8784,6 +8784,9 @@ type spawnAssignmentMCPStub struct {
 	list       int
 	reserve    int
 	errors     []string
+	// granted holds the live rows behind file_reservation_paths receipts;
+	// ntm reads them back through the resource view to verify each grant.
+	granted []map[string]any
 	// blockAgentsPath makes the agents resource wait for request cancellation
 	// after recording a marker. It is used only by the signal-cancellation E2E.
 	blockAgentsPath string
@@ -8871,14 +8874,16 @@ func (s *spawnAssignmentMCPStub) handleTool(w http.ResponseWriter, id any, name 
 		}
 		s.reserve++
 		now := time.Now().UTC()
+		grant := map[string]any{
+			"id": spawnAssignmentReservationID, "path_pattern": s.path,
+			"agent_name": s.recipient, "project_id": spawnAssignmentProjectID,
+			"exclusive": true, "reason": "bead assignment: " + s.beadID,
+			"created_ts": now.Format(time.RFC3339Nano),
+			"expires_ts": now.Add(time.Hour).Format(time.RFC3339Nano),
+		}
+		s.granted = append(s.granted, grant)
 		s.writeResult(w, id, map[string]any{
-			"granted": []map[string]any{{
-				"id": spawnAssignmentReservationID, "path_pattern": s.path,
-				"agent_name": s.recipient, "project_id": spawnAssignmentProjectID,
-				"exclusive": true, "reason": "bead assignment: " + s.beadID,
-				"created_ts": now.Format(time.RFC3339Nano),
-				"expires_ts": now.Add(time.Hour).Format(time.RFC3339Nano),
-			}},
+			"granted":   []map[string]any{grant},
 			"conflicts": []any{},
 		})
 	default:
@@ -8894,9 +8899,36 @@ func (s *spawnAssignmentMCPStub) handleResource(ctx context.Context, w http.Resp
 			s.failRPCLocked(w, id, -32602, "unexpected reservation resource URI: "+resourceURI)
 			return
 		}
+		text, err := json.Marshal(append([]map[string]any{}, s.granted...))
+		if err != nil {
+			s.failRPCLocked(w, id, -32603, "encode reservations: "+err.Error())
+			return
+		}
 		s.writeResult(w, id, map[string]any{
 			"contents": []map[string]any{{
-				"uri": resourceURI, "mimeType": "application/json", "text": "[]",
+				"uri": resourceURI, "mimeType": "application/json", "text": string(text),
+			}},
+		})
+		return
+	}
+	if strings.HasPrefix(resourceURI, "resource://project/") {
+		// Read-only project identity used to verify reservation grants.
+		defer s.mu.Unlock()
+		project, err := url.PathUnescape(strings.TrimPrefix(resourceURI, "resource://project/"))
+		if err != nil || project != s.projectDir {
+			s.failRPCLocked(w, id, -32602, fmt.Sprintf("project resource=%q err=%v want=%q", project, err, s.projectDir))
+			return
+		}
+		text, err := json.Marshal(map[string]any{
+			"id": spawnAssignmentProjectID, "slug": "spawn-assignment-e2e", "human_key": s.projectDir, "agents": []any{},
+		})
+		if err != nil {
+			s.failRPCLocked(w, id, -32603, "encode project: "+err.Error())
+			return
+		}
+		s.writeResult(w, id, map[string]any{
+			"contents": []map[string]any{{
+				"uri": resourceURI, "mimeType": "application/json", "text": string(text),
 			}},
 		})
 		return

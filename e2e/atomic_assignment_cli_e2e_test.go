@@ -15,6 +15,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -435,6 +436,7 @@ func (s *atomicAssignmentMailStub) handle(w http.ResponseWriter, r *http.Request
 		Method  string `json:"method"`
 		Params  struct {
 			Name      string         `json:"name"`
+			URI       string         `json:"uri"`
 			Arguments map[string]any `json:"arguments"`
 		} `json:"params"`
 	}
@@ -447,6 +449,16 @@ func (s *atomicAssignmentMailStub) handle(w http.ResponseWriter, r *http.Request
 		_ = json.NewEncoder(w).Encode(map[string]any{"jsonrpc": "2.0", "id": request.ID, "result": result})
 	}
 	if request.JSONRPC == "2.0" && request.Method == "resources/read" {
+		if writeAgentMailReadbackResource(w, request.ID, request.Params.URI, s.projectDir, func() []map[string]any {
+			s.mu.Lock()
+			defer s.mu.Unlock()
+			if strings.HasPrefix(request.Params.URI, "resource://file_reservations/") {
+				s.listCalls++
+			}
+			return append([]map[string]any(nil), s.active...)
+		}) {
+			return
+		}
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(map[string]any{
 			"jsonrpc": "2.0", "id": request.ID,
@@ -575,6 +587,56 @@ func (s *atomicAssignmentMailStub) handle(w http.ResponseWriter, r *http.Request
 	default:
 		http.Error(w, "unexpected Agent Mail tool "+request.Params.Name, http.StatusNotFound)
 	}
+}
+
+// writeAgentMailReadbackResource answers the read-only resources that Agent
+// Mail serves and that ntm reads to verify every reservation grant before it
+// trusts the receipt: resource://project/{key} (numeric identity) and
+// resource://file_reservations/{key}?... (the live rows, paginated with
+// limit/offset). active returns the rows the stub's list tool would return.
+// It reports false for any other resource URI.
+func writeAgentMailReadbackResource(w http.ResponseWriter, id any, uri, projectDir string, active func() []map[string]any) bool {
+	var payload any
+	switch {
+	case strings.HasPrefix(uri, "resource://project/"):
+		key, err := url.PathUnescape(strings.TrimPrefix(uri, "resource://project/"))
+		if err != nil || key != projectDir {
+			return false
+		}
+		payload = map[string]any{"id": 1, "slug": "atomic-e2e", "human_key": projectDir, "agents": []any{}}
+	case strings.HasPrefix(uri, "resource://file_reservations/"):
+		parsed, err := url.Parse(uri)
+		if err != nil {
+			return false
+		}
+		key, err := url.PathUnescape(strings.TrimPrefix(strings.SplitN(uri, "?", 2)[0], "resource://file_reservations/"))
+		if err != nil || key != projectDir {
+			return false
+		}
+		rows := active()
+		offset, _ := strconv.Atoi(parsed.Query().Get("offset"))
+		limit, _ := strconv.Atoi(parsed.Query().Get("limit"))
+		if limit <= 0 {
+			limit = 20
+		}
+		page := make([]map[string]any, 0, limit)
+		for index := offset; index >= 0 && index < len(rows) && len(page) < limit; index++ {
+			page = append(page, rows[index])
+		}
+		payload = page
+	default:
+		return false
+	}
+	text, err := json.Marshal(payload)
+	if err != nil {
+		return false
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]any{
+		"jsonrpc": "2.0", "id": id,
+		"result": map[string]any{"contents": []map[string]any{{"uri": uri, "mimeType": "application/json", "text": string(text)}}},
+	})
+	return true
 }
 
 func TestE2EAtomicAssignmentIsolatedEnvScrubsHostOverrides(t *testing.T) {
@@ -1088,6 +1150,7 @@ func TestE2EAtomicAssignmentReservationRecoveryBuiltProcess(t *testing.T) {
 			Method  string `json:"method"`
 			Params  struct {
 				Name      string         `json:"name"`
+				URI       string         `json:"uri"`
 				Arguments map[string]any `json:"arguments"`
 			} `json:"params"`
 		}
@@ -1096,6 +1159,17 @@ func TestE2EAtomicAssignmentReservationRecoveryBuiltProcess(t *testing.T) {
 			return
 		}
 		if request.JSONRPC == "2.0" && request.Method == "resources/read" {
+			if writeAgentMailReadbackResource(w, request.ID, request.Params.URI, fixture.projectDir, func() []map[string]any {
+				stubMu.Lock()
+				defer stubMu.Unlock()
+				var active []map[string]any
+				for _, reservations := range activeReservations {
+					active = append(active, reservations...)
+				}
+				return active
+			}) {
+				return
+			}
 			w.Header().Set("Content-Type", "application/json")
 			_ = json.NewEncoder(w).Encode(map[string]any{
 				"jsonrpc": "2.0", "id": request.ID,
@@ -3707,6 +3781,7 @@ esac
 			Method string `json:"method"`
 			Params struct {
 				Name      string         `json:"name"`
+				URI       string         `json:"uri"`
 				Arguments map[string]any `json:"arguments"`
 			} `json:"params"`
 		}
@@ -3731,6 +3806,13 @@ esac
 			})
 			return
 		}
+		if request.Method == "resources/read" && writeAgentMailReadbackResource(w, request.ID, request.Params.URI, fixture.projectDir, func() []map[string]any {
+			reservationMu.Lock()
+			defer reservationMu.Unlock()
+			return append([]map[string]any(nil), activeCoordinatorReservations...)
+		}) {
+			return
+		}
 		if request.Method != "tools/call" {
 			http.Error(w, "unexpected Agent Mail method", http.StatusNotFound)
 			return
@@ -3750,14 +3832,6 @@ esac
 			recipients, _ := request.Params.Arguments["to"].([]any)
 			if len(recipients) != 1 {
 				http.Error(w, "expected one recipient", http.StatusBadRequest)
-				return
-			}
-			if request.Method == "resources/read" {
-				w.Header().Set("Content-Type", "application/json")
-				_ = json.NewEncoder(w).Encode(map[string]any{
-					"jsonrpc": "2.0", "id": request.ID,
-					"error": map[string]any{"code": -32601, "message": "resource view not supported"},
-				})
 				return
 			}
 			recipient, _ := recipients[0].(string)
@@ -4383,11 +4457,19 @@ func TestE2EAtomicAssignmentEligibleBelowFormerPlanCapBuiltProcess(t *testing.T)
 	labelRows := make([]map[string]any, 0, 102)
 	gatedIDs := make(map[string]struct{}, 101)
 	for index := 0; index < 101; index++ {
-		beadID := fmt.Sprintf("ntm-e2e-gated-%03d", index)
+		// The gated rows must exist in the canonical tracker: candidates that
+		// are absent from .beads/issues.jsonl are excluded as source_missing
+		// before assignment (5c3aae2e) and would never reach the gate check.
+		title := fmt.Sprintf("Operator-gated plan row %03d", index)
+		output := fixture.mustBR(t, "create", title, "--type=task", "--priority=1", "--labels=operator-gated", "--silent")
+		beadID := strings.TrimSpace(string(output))
+		if beadID == "" || strings.ContainsAny(beadID, " \t\r\n") {
+			t.Fatalf("unexpected gated br create output %q", output)
+		}
 		gatedIDs[beadID] = struct{}{}
 		planItems = append(planItems, map[string]any{
 			"id":       beadID,
-			"title":    fmt.Sprintf("Operator-gated plan row %03d", index),
+			"title":    title,
 			"status":   "open",
 			"priority": 1,
 		})
@@ -6854,6 +6936,7 @@ func TestE2EAtomicAssignmentReassignTransfersReservation(t *testing.T) {
 			Method  string `json:"method"`
 			Params  struct {
 				Name      string         `json:"name"`
+				URI       string         `json:"uri"`
 				Arguments map[string]any `json:"arguments"`
 			} `json:"params"`
 		}
@@ -6866,6 +6949,13 @@ func TestE2EAtomicAssignmentReassignTransfersReservation(t *testing.T) {
 			_ = json.NewEncoder(w).Encode(map[string]any{"jsonrpc": "2.0", "id": request.ID, "result": result})
 		}
 		if request.Method == "resources/read" {
+			if writeAgentMailReadbackResource(w, request.ID, request.Params.URI, fixture.projectDir, func() []map[string]any {
+				reservationMu.Lock()
+				defer reservationMu.Unlock()
+				return append([]map[string]any(nil), activeReservations...)
+			}) {
+				return
+			}
 			w.Header().Set("Content-Type", "application/json")
 			_ = json.NewEncoder(w).Encode(map[string]any{
 				"jsonrpc": "2.0", "id": request.ID,
