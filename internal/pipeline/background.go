@@ -230,6 +230,10 @@ func launchBackgroundWorker(ctx context.Context, root, requestID string, req bac
 		var ready backgroundReady
 		if err := readBackgroundJSON(readyPath, 4096, &ready); err == nil && ready.Token == req.Token {
 			if ready.Error != "" {
+				// The worker publishes its refusal before it retires run
+				// ownership. Let it exit on its own: killing it here would
+				// strand an "active" owner record for a run nobody owns.
+				waitForRefusingWorker(ctx, exited)
 				return nil, backgroundStartupError(ready, logPath)
 			}
 			// Two-phase startup: the worker owns the run and has prepared its
@@ -260,6 +264,21 @@ func launchBackgroundWorker(ctx context.Context, root, requestID string, req bac
 			return nil, fmt.Errorf("background worker startup timed out; no execution authorized (log: %s): %w", logPath, ctx.Err())
 		case <-ticker.C:
 		}
+	}
+}
+
+// backgroundRefusalExitGrace bounds how long startup waits for a worker that
+// has published a refusal to finish retiring ownership and exit. A worker that
+// is still running afterwards is killed by the caller's cleanup as before.
+const backgroundRefusalExitGrace = 2 * time.Second
+
+func waitForRefusingWorker(ctx context.Context, exited <-chan error) {
+	timer := time.NewTimer(backgroundRefusalExitGrace)
+	defer timer.Stop()
+	select {
+	case <-exited:
+	case <-ctx.Done():
+	case <-timer.C:
 	}
 }
 

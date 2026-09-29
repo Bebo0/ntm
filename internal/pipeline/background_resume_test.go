@@ -302,7 +302,9 @@ func resumeRequestFixture(t *testing.T, root string, prior *ExecutionState, opts
 	t.Helper()
 	cfg := DefaultExecutorConfig("")
 	req := backgroundRequest{Version: backgroundRequestVersion, Token: strings.Repeat("a", 32), Resume: true, ExpiresAt: time.Now().Add(10 * time.Second), Config: backgroundExecutorConfig{
-		ProjectDir: root, RunID: prior.RunID, DefaultTimeout: cfg.DefaultTimeout,
+		// Launch requests carry the normalized root (as startDetachedResume
+		// writes it); on macOS t.TempDir() is behind /var -> /private/var.
+		ProjectDir: normalizeLockRoot(root), RunID: prior.RunID, DefaultTimeout: cfg.DefaultTimeout,
 		GlobalTimeout: cfg.GlobalTimeout, ProgressInterval: cfg.ProgressInterval, ResumeOptions: opts,
 	}}
 	id := "resume-" + req.Token
