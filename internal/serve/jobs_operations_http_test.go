@@ -1,7 +1,9 @@
 package serve
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -149,6 +151,9 @@ func TestJobSessionEnvelopeTargetsSpawnHTTP(t *testing.T) {
 	}
 }
 
+// Conflicting explicit sessions fail admission (docs/jobs-admission.md,
+// "Session-aware execution"): the POST is rejected with 400 before a job,
+// receipt, or engine call exists, rather than locking the wrong session.
 func TestJobSessionConflictFailsBeforeEveryEngineHTTP(t *testing.T) {
 	srv := NewHermeticServer("test")
 	defer srv.Stop()
@@ -157,15 +162,30 @@ func TestJobSessionConflictFailsBeforeEveryEngineHTTP(t *testing.T) {
 	for _, kind := range implementedJobTypes {
 		for _, session := range []string{`"different"`, `""`, `null`, `true`, `42`} {
 			body := fmt.Sprintf(`{"type":%q,"session":"requested","params":{"session":%s}}`, kind, session)
-			env := postJob(t, srv, body)
-			got := pollJobTerminal(t, srv, env.Job.ID)
+			req := httptest.NewRequest(http.MethodPost, "/api/v1/jobs", bytes.NewBufferString(body))
+			req.Header.Set("Content-Type", "application/json")
+			rec := httptest.NewRecorder()
+			srv.Router().ServeHTTP(rec, req)
 			want := "session conflict"
 			if session == `null` || session == `true` || session == `42` {
 				want = "params.session must be a string"
 			}
-			if got.Job.Status != string(JobStatusFailed) || !strings.Contains(got.Job.Error, want) || calls.Load() != 0 {
-				t.Fatalf("%s reached its engine before resolving the target: %+v", kind, got.Job)
+			var resp struct {
+				Error     string `json:"error"`
+				ErrorCode string `json:"error_code"`
+			}
+			if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+				t.Fatalf("%s session=%s: decode response: %v (body=%s)", kind, session, err, rec.Body.String())
+			}
+			if rec.Code != http.StatusBadRequest || resp.ErrorCode != ErrCodeBadRequest || !strings.Contains(resp.Error, want) {
+				t.Fatalf("%s session=%s: POST = %d %s, want 400 %q", kind, session, rec.Code, rec.Body.String(), want)
+			}
+			if calls.Load() != 0 {
+				t.Fatalf("%s reached its engine before resolving the target", kind)
 			}
 		}
+	}
+	if jobs := srv.jobStore.List(); len(jobs) != 0 {
+		t.Fatalf("rejected session conflicts still created %d job(s): %#v", len(jobs), jobs)
 	}
 }

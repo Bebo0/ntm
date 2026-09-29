@@ -65,7 +65,9 @@ func TestWorkflowSnapshotUsesYAMLSchemaMarshalers(t *testing.T) {
 	if err != nil || !validation.Valid {
 		t.Fatalf("native YAML snapshot rejected: %+v %v", validation, err)
 	}
-	if reloaded.Steps[0].Pane.Index != 1 || reloaded.Steps[0].OnFailure.Action != "retry" || reloaded.Steps[0].OnFailure.RetryCount != 2 {
+	// Normalize folds the on_failure retry alias into the canonical
+	// on_error/retry_count pair, so the policy survives in that form.
+	if step := reloaded.Steps[0]; step.Pane.Index != 1 || step.OnError != ErrorActionRetry || step.RetryCount != 2 {
 		t.Fatalf("schema marshalers lost selector or retry policy: %+v", reloaded.Steps[0])
 	}
 	data, err := os.ReadFile(path)

@@ -11494,23 +11494,21 @@ func TestHandleSwaggerUI_TLS(t *testing.T) {
 }
 
 // TestHandleListPipelines_WithFinishedAt exercises the FinishedAt != nil branch
-// in handleListPipelines (line 115-117 of pipelines.go).
+// in handleListPipelines. The list reads the configured project's durable run
+// state (02d7356f removed the unscoped process-registry fallback), so the run
+// is seeded as a persisted checkpoint rather than a registry entry.
 func TestHandleListPipelines_WithFinishedAt(t *testing.T) {
 	s, _ := setupTestServer(t)
 
-	// Register a pipeline with FinishedAt set
 	now := time.Now()
-	finished := now.Add(10 * time.Second)
-	exec := &pipeline.PipelineExecution{
+	exec := savePipelineStateForHandlerTest(t, s, &pipeline.ExecutionState{
 		RunID:      "test-run-finished-" + fmt.Sprintf("%d", now.UnixNano()),
 		WorkflowID: "test-workflow",
 		Session:    "test-session",
-		Status:     "completed",
+		Status:     pipeline.StatusCompleted,
 		StartedAt:  now,
-		FinishedAt: &finished,
-		Progress:   pipeline.PipelineProgress{Total: 3, Completed: 3, Percent: 100},
-	}
-	pipeline.RegisterPipeline(exec)
+		FinishedAt: now.Add(10 * time.Second),
+	})
 
 	req := httptest.NewRequest("GET", "/api/v1/pipelines", nil)
 	rec := httptest.NewRecorder()
@@ -11656,25 +11654,23 @@ func TestRoleHierarchy_UnknownRole(t *testing.T) {
 // =============================================================================
 
 // TestHandleGetPipeline_FoundWithFinishedAt exercises the success path
-// with FinishedAt and Error fields populated (lines 258-276 of pipelines.go).
+// with FinishedAt and Error fields populated, read from the project's durable
+// run state.
 func TestHandleGetPipeline_FoundWithFinishedAt(t *testing.T) {
 	s, _ := setupTestServer(t)
 
 	now := time.Now()
-	finished := now.Add(5 * time.Second)
 	runID := fmt.Sprintf("get-test-%d", now.UnixNano())
-	exec := &pipeline.PipelineExecution{
+	savePipelineStateForHandlerTest(t, s, &pipeline.ExecutionState{
 		RunID:       runID,
 		WorkflowID:  "wf-1",
 		Session:     "sess-1",
-		Status:      "failed",
+		Status:      pipeline.StatusFailed,
 		StartedAt:   now,
-		FinishedAt:  &finished,
+		FinishedAt:  now.Add(5 * time.Second),
 		CurrentStep: "step-2",
-		Error:       "step-2 timed out",
-		Progress:    pipeline.PipelineProgress{Total: 3, Completed: 1, Failed: 1},
-	}
-	pipeline.RegisterPipeline(exec)
+		Errors:      []pipeline.ExecutionError{{StepID: "step-2", Message: "step-2 timed out", Fatal: true, Timestamp: now}},
+	})
 
 	rctx := chi.NewRouteContext()
 	rctx.URLParams.Add("id", runID)
@@ -11719,20 +11715,20 @@ func TestHandleGetPipeline_NotFoundBranch(t *testing.T) {
 }
 
 // TestHandleCancelPipeline_CompletedConflict exercises the conflict path
-// in handleCancelPipeline (lines 300-306 of pipelines.go) — can't cancel completed.
+// in handleCancelPipeline — a completed run can't be cancelled.
 func TestHandleCancelPipeline_CompletedConflict(t *testing.T) {
 	s, _ := setupTestServer(t)
 
 	now := time.Now()
 	runID := fmt.Sprintf("cancel-conflict-%d", now.UnixNano())
-	exec := &pipeline.PipelineExecution{
+	savePipelineStateForHandlerTest(t, s, &pipeline.ExecutionState{
 		RunID:      runID,
 		WorkflowID: "wf-1",
 		Session:    "sess-1",
-		Status:     "completed",
+		Status:     pipeline.StatusCompleted,
 		StartedAt:  now,
-	}
-	pipeline.RegisterPipeline(exec)
+		FinishedAt: now,
+	})
 
 	rctx := chi.NewRouteContext()
 	rctx.URLParams.Add("id", runID)
@@ -11747,21 +11743,24 @@ func TestHandleCancelPipeline_CompletedConflict(t *testing.T) {
 	}
 }
 
-// TestHandleCancelPipeline_RunningSuccess exercises the success path
-// in handleCancelPipeline (lines 308-315 of pipelines.go) — cancel a running pipeline.
-func TestHandleCancelPipeline_RunningSuccess(t *testing.T) {
+// TestHandleCancelPipeline_RunningWithoutOwnerConflicts exercises the
+// cancellation path for a running checkpoint that no live owner acknowledges.
+// Cancellation is only reported after the owning process acknowledges it
+// (02d7356f); an orphaned "running" checkpoint must answer 409, never a
+// fabricated "cancelled". The acknowledged path is covered by
+// TestPipelineCancelRequiresAcknowledgingOwner.
+func TestHandleCancelPipeline_RunningWithoutOwnerConflicts(t *testing.T) {
 	s, _ := setupTestServer(t)
 
 	now := time.Now()
 	runID := fmt.Sprintf("cancel-ok-%d", now.UnixNano())
-	exec := &pipeline.PipelineExecution{
+	savePipelineStateForHandlerTest(t, s, &pipeline.ExecutionState{
 		RunID:      runID,
 		WorkflowID: "wf-1",
 		Session:    "sess-1",
-		Status:     "running",
+		Status:     pipeline.StatusRunning,
 		StartedAt:  now,
-	}
-	pipeline.RegisterPipeline(exec)
+	})
 
 	rctx := chi.NewRouteContext()
 	rctx.URLParams.Add("id", runID)
@@ -11771,14 +11770,34 @@ func TestHandleCancelPipeline_RunningSuccess(t *testing.T) {
 
 	s.handleCancelPipeline(rec, req)
 
-	if rec.Code != http.StatusOK {
-		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("expected 409 without an acknowledging owner, got %d: %s", rec.Code, rec.Body.String())
 	}
 	var resp map[string]interface{}
 	json.Unmarshal(rec.Body.Bytes(), &resp)
-	if resp["status"] != "cancelled" {
-		t.Errorf("status = %v, want cancelled", resp["status"])
+	if resp["status"] == "cancelled" || resp["status"] == "cancellation_requested" {
+		t.Errorf("unacknowledged cancellation reported status %v", resp["status"])
 	}
+	final, err := pipeline.LoadState(s.pipelineProjectDir(), runID)
+	if err != nil || final.Status != pipeline.StatusRunning {
+		t.Fatalf("rejected cancellation rewrote the checkpoint: %+v %v", final, err)
+	}
+}
+
+// savePipelineStateForHandlerTest persists a run checkpoint under the
+// server's configured project and returns the snapshot the handlers serve.
+func savePipelineStateForHandlerTest(t *testing.T, s *Server, state *pipeline.ExecutionState) *pipeline.ExecutionState {
+	t.Helper()
+	if state.Steps == nil {
+		state.Steps = map[string]pipeline.StepResult{}
+	}
+	if state.Variables == nil {
+		state.Variables = map[string]interface{}{}
+	}
+	if err := pipeline.SaveState(s.pipelineProjectDir(), state); err != nil {
+		t.Fatalf("save pipeline state: %v", err)
+	}
+	return state
 }
 
 // TestHandleResumePipeline_NoState exercises the 404 path when

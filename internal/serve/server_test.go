@@ -4627,7 +4627,7 @@ func TestExecPipelineInline_UsesServerProjectDir(t *testing.T) {
 	output := srv.execPipelineInline(context.Background(), &pipeline.Workflow{
 		SchemaVersion: pipeline.SchemaVersion,
 		Name:          "inline-project-dir",
-		Steps:         nil,
+		Steps:         []pipeline.Step{{ID: "noop", Command: "true"}},
 	}, "inline-session", nil, false)
 
 	if !output.Success {

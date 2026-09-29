@@ -743,7 +743,8 @@ case "$cmd1" in
       echo "stub close failure for ` + beadID + `" >&2
       exit 1
     fi
-    echo "{\"id\":\"` + beadID + `\"}"
+    # Real br close --json answers with the closed record (br 0.6.0).
+    echo "[{\"id\":\"` + beadID + `\",\"status\":\"closed\"}]"
     exit 0
     ;;
   show)

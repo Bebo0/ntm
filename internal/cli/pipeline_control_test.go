@@ -104,7 +104,10 @@ func TestPipelineResumeRejectsDamagedManagedWorkflow(t *testing.T) {
 	// Command-only workflow: no agent is driven. The session probe is a
 	// deterministic tmux fixture; the workflow loader and hash check are real.
 	fakeTmux := filepath.Join(t.TempDir(), "tmux")
-	if err := os.WriteFile(fakeTmux, []byte("#!/bin/sh\nif [ \"$1\" = -V ]; then echo 'tmux 3.4'; fi\nexit 0\n"), 0700); err != nil {
+	// Session resolution lists sessions before has-session, so the fixture
+	// must report the checkpoint's session in list-sessions' -F format.
+	fakeScript := "#!/bin/sh\ncase \"$1\" in\n  -V) echo 'tmux 3.4' ;;\n  list-sessions) echo 'snapshot-session" + tmux.FieldSeparator + "1" + tmux.FieldSeparator + "0" + tmux.FieldSeparator + "now' ;;\nesac\nexit 0\n"
+	if err := os.WriteFile(fakeTmux, []byte(fakeScript), 0700); err != nil {
 		t.Fatal(err)
 	}
 	t.Setenv("NTM_TMUX_BINARY", fakeTmux)

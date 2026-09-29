@@ -502,7 +502,7 @@ func TestNoSimulatorInProduction(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read package dir: %v", err)
 	}
-	re := regexp.MustCompile(`Simulate job execution|func \(s \*Server\) executeJob`)
+	re := regexp.MustCompile(`Simulate job execution|func \(s \*Server\) executeJob\(`)
 	for _, e := range entries {
 		name := e.Name()
 		if !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") {

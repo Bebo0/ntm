@@ -695,12 +695,10 @@ name: persist-workflow
 
 steps:
   - id: step1
-    agent: claude
-    prompt: First step
+    command: echo first
 
   - id: step2
-    agent: codex
-    prompt: Second step
+    command: echo second
     depends_on:
       - step1
 `
@@ -715,7 +713,8 @@ steps:
 	}
 
 	cfg := DefaultExecutorConfig("test-session")
-	cfg.DryRun = true
+	// Dry runs are write-free (82dda265), so persistence is exercised by a
+	// real run of shell-command steps that need no tmux panes.
 	cfg.ProjectDir = tmpDir
 	cfg.RunID = "test-persist-run"
 

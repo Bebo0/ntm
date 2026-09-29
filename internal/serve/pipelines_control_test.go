@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/go-chi/chi/v5"
+	"gopkg.in/yaml.v3"
 
 	"github.com/Dicklesworthstone/ntm/internal/pipeline"
 	"github.com/Dicklesworthstone/ntm/internal/tmux"
@@ -33,7 +34,7 @@ func TestPipelineResumeRejectsLiveOwnerBeforeCheckpointMutation(t *testing.T) {
 	dir := t.TempDir()
 	runID := pipeline.GenerateRunID()
 	workflowPath := filepath.Join(dir, "owned.yaml")
-	workflow, err := json.Marshal(&pipeline.Workflow{
+	workflow, err := yaml.Marshal(&pipeline.Workflow{
 		SchemaVersion: "2.0", Name: "owned",
 		Steps: []pipeline.Step{{ID: "work", Command: "true"}},
 	})
@@ -80,7 +81,7 @@ func TestPipelineResumeReloadsCheckpointInsideOwnership(t *testing.T) {
 	runID := pipeline.GenerateRunID()
 	marker := filepath.Join(dir, "must-not-repeat")
 	workflowPath := filepath.Join(dir, "resume.yaml")
-	workflow, err := json.Marshal(&pipeline.Workflow{
+	workflow, err := yaml.Marshal(&pipeline.Workflow{
 		SchemaVersion: "2.0", Name: "completed-work",
 		Steps: []pipeline.Step{{ID: "completed", Command: fmt.Sprintf("echo duplicate > %q", marker)}},
 	})

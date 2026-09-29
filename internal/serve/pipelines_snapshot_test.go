@@ -5,7 +5,6 @@ package serve
 import (
 	"bytes"
 	"context"
-	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -13,6 +12,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"gopkg.in/yaml.v3"
 
 	"github.com/Dicklesworthstone/ntm/internal/pipeline"
 )
@@ -32,7 +33,7 @@ func TestPipelineSnapshotMakesInlineAndFileRunsResumable(t *testing.T) {
 			var first pipeline.PipelineRunOutput
 			source := filepath.Join(dir, "source.yaml")
 			if fileBacked {
-				data, err := json.Marshal(workflow)
+				data, err := yaml.Marshal(workflow)
 				if err != nil {
 					t.Fatal(err)
 				}
@@ -140,7 +141,7 @@ func TestPipelineSnapshotFailureDoesNotDispatchOrLeakBackgroundOwner(t *testing.
 func TestPipelineDryRunDoesNotPublishSnapshot(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "preview.yaml")
-	data, err := json.Marshal(&pipeline.Workflow{SchemaVersion: "2.0", Name: "preview", Steps: []pipeline.Step{{ID: "work", Command: "true"}}})
+	data, err := yaml.Marshal(&pipeline.Workflow{SchemaVersion: "2.0", Name: "preview", Steps: []pipeline.Step{{ID: "work", Command: "true"}}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -160,7 +161,7 @@ func TestPipelineDryRunDoesNotPublishSnapshot(t *testing.T) {
 func TestPipelineResumeSnapshotSymlinkCannotBypassHashCheck(t *testing.T) {
 	dir := t.TempDir()
 	workflow := &pipeline.Workflow{SchemaVersion: "2.0", Name: "symlinked", Steps: []pipeline.Step{{ID: "work", Command: "true"}}}
-	data, err := json.Marshal(workflow)
+	data, err := yaml.Marshal(workflow)
 	if err != nil {
 		t.Fatal(err)
 	}
