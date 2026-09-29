@@ -300,7 +300,12 @@ func TestDaemonOwnershipPreparedCrashRequiresInspection(t *testing.T) {
 }
 
 func TestDaemonOwnershipControllerCrashDoesNotDuplicateOrKillOrphan(t *testing.T) {
-	dir := t.TempDir()
+	// Ownership records live under the canonical project path; resolve
+	// macOS's /var -> /private/var temp symlink before comparing paths.
+	dir, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
 	exe, err := os.Executable()
 	if err != nil {
 		t.Fatal(err)

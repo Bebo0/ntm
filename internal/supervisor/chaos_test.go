@@ -6,6 +6,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -246,7 +247,22 @@ func TestCleanShutdown(t *testing.T) {
 		t.Fatalf("failed to read pids dir: %v", err)
 	}
 	for _, entry := range entries {
-		t.Errorf("PID file not cleaned up: %s", entry.Name())
+		name := entry.Name()
+		// The cross-process ownership fence (.daemon-<hash>.lock) and its
+		// launch record (.daemon-<hash>.json) are retained by design
+		// (docs/supervisor-ownership.md); a clean stop leaves the record
+		// quiescent: phase "stopped" with no PID.
+		if strings.HasPrefix(name, ".daemon-") && strings.HasSuffix(name, ".lock") {
+			continue
+		}
+		if strings.HasPrefix(name, ".daemon-") && strings.HasSuffix(name, ".json") {
+			record, err := readDaemonOwnership(filepath.Join(pidsDir, name))
+			if err != nil || record == nil || record.Phase != "stopped" || record.PID != 0 {
+				t.Errorf("ownership record %s not quiescent after shutdown: %+v %v", name, record, err)
+			}
+			continue
+		}
+		t.Errorf("PID file not cleaned up: %s", name)
 	}
 }
 

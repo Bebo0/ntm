@@ -379,12 +379,13 @@ func restartTestSpec(t *testing.T) DaemonSpec {
 	if err != nil {
 		t.Fatal(err)
 	}
-	data, err := os.ReadFile(sleepPath)
-	if err != nil {
-		t.Fatal(err)
-	}
+	// An exec wrapper, not a copy of the sleep binary: multicall coreutils
+	// (uutils) dispatch on argv[0] and reject "daemon", and macOS refuses
+	// relocated platform binaries. exec keeps the wrapper's PID as the
+	// daemon's, so the fault injection below still targets the real process.
 	command := filepath.Join(t.TempDir(), "daemon")
-	if err := os.WriteFile(command, data, 0755); err != nil {
+	script := fmt.Sprintf("#!/bin/sh\nexec %q \"$@\"\n", sleepPath)
+	if err := os.WriteFile(command, []byte(script), 0755); err != nil {
 		t.Fatal(err)
 	}
 	return DaemonSpec{Name: "daemon", Command: command, Args: []string{"60"}}

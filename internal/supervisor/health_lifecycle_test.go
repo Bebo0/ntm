@@ -29,7 +29,12 @@ func healthSupervisor(t *testing.T, dir, owner string, restarts int, delay time.
 }
 
 func TestDaemonHealthCommandUsesLaunchScope(t *testing.T) {
-	dir := t.TempDir()
+	// The probe compares $PWD with the work directory; resolve macOS's
+	// /var -> /private/var temp symlink so both name the same path.
+	dir, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
 	work := filepath.Join(dir, "daemon-scope")
 	if err := os.Mkdir(work, 0700); err != nil {
 		t.Fatal(err)
