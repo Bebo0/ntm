@@ -179,8 +179,14 @@ type coordinatorMaintenanceCLIFixture struct {
 func newCoordinatorMaintenanceCLIFixture(t *testing.T, unobservableSibling bool) *coordinatorMaintenanceCLIFixture {
 	t.Helper()
 	isolateIdentityDirs(t)
+	// Canonical project path: the agent registry and pane topology resolve
+	// macOS's /var -> /private/var temp symlink, so the fixture must too.
+	project, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
 	f := &coordinatorMaintenanceCLIFixture{
-		session: "coordinator-maintenance", project: t.TempDir(), renewed: make(chan struct{}),
+		session: "coordinator-maintenance", project: project, renewed: make(chan struct{}),
 	}
 	if err := os.MkdirAll(filepath.Join(f.project, ".git"), 0700); err != nil {
 		t.Fatal(err)

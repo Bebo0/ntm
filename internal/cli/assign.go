@@ -6592,6 +6592,12 @@ func (w *WatchLoop) Run(ctx context.Context) error {
 	defer func() {
 		watchCancel()
 		w.wg.Wait()
+		// Join the detector's polling goroutine too: it closes eventsCh only
+		// after its last pass returns, and the forwarder may have stopped
+		// reading before then. Without this, Run could return while a detector
+		// pass is still capturing panes and writing assignment state.
+		for range eventsCh {
+		}
 		scanWG.Wait()
 		maintenanceWG.Wait()
 	}()
