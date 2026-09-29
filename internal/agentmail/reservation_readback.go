@@ -106,6 +106,13 @@ func activeReservationsURI(projectKey string) string {
 // surfaces as an error instead of extra tool calls. Inspection surfaces that
 // promise read-only resource access use it.
 func (c *Client) ReadActiveReservations(ctx context.Context, projectKey string) ([]FileReservation, error) {
+	if ctx == nil {
+		return nil, errors.New("reservation listing requires a context")
+	}
+	// Same overall bound as ListReservations, across every page and the
+	// project identity read.
+	ctx, cancel := context.WithTimeout(ctx, LongTimeout)
+	defer cancel()
 	return c.listActiveReservationsFromResource(ctx, projectKey)
 }
 
