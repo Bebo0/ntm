@@ -133,8 +133,10 @@ func TestNativeCompactionRequiresFreshAccountingAndCompletedInputState(t *testin
 			monitor.RegisterAgent("test__cc_1", expected.ID, before.Model)
 			monitor.UpdateFromRobotMode("test__cc_1", `{"context_used":199000,"context_limit":200000}`)
 			compactor := NewCompactor(monitor, DefaultCompactorConfig())
+			// The budget must cover several 1ms polls (busy_then_reduced needs
+			// four captures) even under -race on a loaded host; 25ms flaked.
 			result := runNativeCompaction(ctx, "test", expected, CompactionCommand{Command: "/compact"}, compactor,
-				25*time.Millisecond, time.Millisecond, list, capture, send, usage)
+				250*time.Millisecond, time.Millisecond, list, capture, send, usage)
 			wantSuccess := mode == "reduced" || mode == "busy_then_reduced"
 			if result.Success != wantSuccess {
 				t.Fatalf("native compaction = %+v, want success=%v", result, wantSuccess)
