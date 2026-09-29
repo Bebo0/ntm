@@ -1481,7 +1481,16 @@ exec "$NTM_E2E_REAL_TMUX" "$@"
 	})
 
 	t.Run("distribute_targets_duplicate_local_indexes_by_pane_id", func(t *testing.T) {
-		fixture.respawnUserShells(t, "")
+		// Run in an isolated project. The default shell cwd is the ntm
+		// checkout, whose real .beads/issues.jsonl is the canonical source
+		// that assignment verifies candidates against (5c3aae2e); the fake
+		// plan's bead IDs are absent there and would be excluded as
+		// source_missing. A project without a JSONL export uses the fakes.
+		distributeProject := filepath.Join(fixture.runtimeRoot, "distribute-project")
+		if err := os.MkdirAll(filepath.Join(distributeProject, ".git"), 0o700); err != nil {
+			t.Fatalf("create distribute project marker: %v", err)
+		}
+		fixture.respawnUserShells(t, distributeProject)
 		targets := []struct {
 			address string
 			title   string
