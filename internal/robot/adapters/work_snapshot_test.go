@@ -18,7 +18,12 @@ import (
 
 func snapshotSourceFixture(t *testing.T, text string) string {
 	t.Helper()
-	project := t.TempDir()
+	// Canonical like CollectDurableWork's project: on macOS t.TempDir() is
+	// under the /var -> /private/var symlink, which source stamping resolves.
+	project, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
 	if err := os.Mkdir(filepath.Join(project, ".beads"), 0700); err != nil {
 		t.Fatal(err)
 	}

@@ -13,7 +13,12 @@ import (
 
 func verifiedWorkFixture(t *testing.T) (string, string, *worksource.Snapshot) {
 	t.Helper()
-	project := t.TempDir()
+	// Canonical like CollectDurableWork's project: on macOS t.TempDir() is
+	// under the /var -> /private/var symlink, which source stamping resolves.
+	project, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
 	path := filepath.Join(project, ".beads", "issues.jsonl")
 	if err := os.Mkdir(filepath.Dir(path), 0o700); err != nil {
 		t.Fatal(err)

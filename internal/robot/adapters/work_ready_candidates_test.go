@@ -62,7 +62,8 @@ func TestWorkReadySourceWindowIncludesFullCandidateRead(t *testing.T) {
 				command = "printf '%s\\n' '{\"id\":\"changed\",\"status\":\"open\"}' >> .beads/issues.jsonl\n" + command
 			}
 			bin := t.TempDir()
-			script := "#!/bin/sh\n[ \"$1\" = ready ] && [ \"$3\" = --limit ] && [ \"$4\" = 100001 ] || exit 23\n" + command
+			// bv runs br with the global --lock-timeout flag before the verb.
+			script := "#!/bin/sh\n[ \"$1\" = --lock-timeout ] && shift 2\n[ \"$1\" = ready ] && [ \"$3\" = --limit ] && [ \"$4\" = 100001 ] || exit 23\n" + command
 			if err := os.WriteFile(filepath.Join(bin, "br"), []byte(script), 0o700); err != nil {
 				t.Fatal(err)
 			}

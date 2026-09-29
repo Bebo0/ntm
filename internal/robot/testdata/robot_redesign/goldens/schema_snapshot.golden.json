@@ -415,6 +415,33 @@
         },
         "type": "object"
       },
+      "Exclusion": {
+        "properties": {
+          "blocked_by": {
+            "description": "Blocked by",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "id": {
+            "description": "I d",
+            "type": "string"
+          },
+          "reasons": {
+            "description": "Reasons",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "id",
+          "reasons"
+        ],
+        "type": "object"
+      },
       "HandoffSummary": {
         "properties": {
           "active_beads": {
@@ -492,6 +519,27 @@
         "required": [
           "session"
         ],
+        "type": "object"
+      },
+      "Identity": {
+        "properties": {
+          "head_sha": {
+            "description": "Head s h a",
+            "type": "string"
+          },
+          "jsonl_path": {
+            "description": "J s o n l path",
+            "type": "string"
+          },
+          "jsonl_sha256": {
+            "description": "J s o n l s h a256",
+            "type": "string"
+          },
+          "project_dir": {
+            "description": "Project dir",
+            "type": "string"
+          }
+        },
         "type": "object"
       },
       "NextAction": {
@@ -1269,6 +1317,26 @@
         ],
         "type": "object"
       },
+      "StaleError": {
+        "properties": {
+          "expected": {
+            "$ref": "#/definitions/Identity",
+            "description": "Expected"
+          },
+          "observed": {
+            "$ref": "#/definitions/Identity",
+            "description": "Observed"
+          },
+          "reason": {
+            "description": "Reason",
+            "type": "string"
+          }
+        },
+        "required": [
+          "reason"
+        ],
+        "type": "object"
+      },
       "StatusSummary": {
         "properties": {
           "agents_by_state": {
@@ -1828,6 +1896,45 @@
         ],
         "type": "object"
       },
+      "WorkReservationVerification": {
+        "properties": {
+          "active": {
+            "description": "Active",
+            "type": "integer"
+          },
+          "mapped_beads": {
+            "description": "Mapped beads",
+            "type": "integer"
+          },
+          "observed_at": {
+            "description": "Observed at",
+            "type": "string"
+          },
+          "project_id": {
+            "description": "Project i d",
+            "type": "integer"
+          },
+          "reason": {
+            "description": "Reason",
+            "type": "string"
+          },
+          "state": {
+            "description": "State",
+            "type": "string"
+          },
+          "unmapped": {
+            "description": "Unmapped",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "state",
+          "active",
+          "mapped_beads",
+          "unmapped"
+        ],
+        "type": "object"
+      },
       "WorkSection": {
         "properties": {
           "available": {
@@ -1870,6 +1977,10 @@
           "triage": {
             "$ref": "#/definitions/WorkTriage",
             "description": "Triage"
+          },
+          "verification": {
+            "$ref": "#/definitions/WorkVerification",
+            "description": "Verification"
           }
         },
         "required": [
@@ -1940,6 +2051,87 @@
           "ready_count",
           "quick_wins_count",
           "blockers_count"
+        ],
+        "type": "object"
+      },
+      "WorkVerification": {
+        "properties": {
+          "cache_collected_at": {
+            "description": "Cache collected at",
+            "type": "string"
+          },
+          "cache_expires_at": {
+            "description": "Cache expires at",
+            "type": "string"
+          },
+          "candidates_observed": {
+            "description": "Candidates observed",
+            "type": "integer"
+          },
+          "count_scope": {
+            "description": "Count scope",
+            "type": "string"
+          },
+          "dirty": {
+            "description": "Dirty",
+            "type": "boolean"
+          },
+          "excluded": {
+            "description": "Excluded",
+            "items": {
+              "$ref": "#/definitions/Exclusion"
+            },
+            "type": "array"
+          },
+          "from_cache": {
+            "description": "From cache",
+            "type": "boolean"
+          },
+          "mismatch": {
+            "$ref": "#/definitions/StaleError",
+            "description": "Mismatch"
+          },
+          "preview_limit": {
+            "description": "Preview limit",
+            "type": "integer"
+          },
+          "preview_truncated": {
+            "description": "Preview truncated",
+            "type": "boolean"
+          },
+          "project_dir": {
+            "description": "Project dir",
+            "type": "string"
+          },
+          "reason_code": {
+            "description": "Reason code",
+            "type": "string"
+          },
+          "remediation": {
+            "description": "Remediation",
+            "type": "string"
+          },
+          "reported_ready": {
+            "description": "Reported ready",
+            "type": "integer"
+          },
+          "reservations": {
+            "$ref": "#/definitions/WorkReservationVerification",
+            "description": "Reservations"
+          },
+          "source": {
+            "$ref": "#/definitions/Identity",
+            "description": "Source"
+          },
+          "verified_ready": {
+            "description": "Verified ready",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "excluded",
+          "reported_ready",
+          "count_scope"
         ],
         "type": "object"
       }
