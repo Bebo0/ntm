@@ -428,7 +428,10 @@ func TestE2ERobotCapabilitiesBuiltBinaryBudgets(t *testing.T) {
 		}
 	}
 
-	full := run(t, 400_000, "--robot-capabilities", "--robot-format=json")
+	// The full catalog was ~431 KB when surfaces[] repeated every command
+	// entry; with surfaces[] carrying only surface-level metadata it is
+	// ~236 KB, so this budget now catches that duplication coming back.
+	full := run(t, 300_000, "--robot-capabilities", "--robot-format=json")
 	compact := run(t, 50_000, "--robot-capabilities", "--capability-compact")
 	exact := run(t, 4_000, "--robot-capabilities", "--capability-command=send", "--capability-compact")
 	search := run(t, 50_000, "--robot-capabilities", "--capability-search=interrupt", "--capability-compact")

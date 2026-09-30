@@ -166,8 +166,26 @@ func TestCapabilitiesProjectionsPreserveRegistryContracts(t *testing.T) {
 	if len(full.Commands) != len(registry.Surfaces) || len(compact.Commands) != len(registry.Surfaces) {
 		t.Fatalf("projection sizes = full:%d compact:%d registry:%d", len(full.Commands), len(compact.Commands), len(registry.Surfaces))
 	}
-	if !reflect.DeepEqual(full.Surfaces, registry.Surfaces) {
-		t.Fatal("full capabilities surfaces drifted from the robot registry")
+	// commands[] carries each surface's command-level fields and surfaces[]
+	// only the surface-level metadata; together they must reproduce the
+	// registry without loss (and without shipping any field twice).
+	if len(full.Surfaces) != len(registry.Surfaces) {
+		t.Fatalf("full capabilities surfaces = %d, registry = %d", len(full.Surfaces), len(registry.Surfaces))
+	}
+	for i, surface := range registry.Surfaces {
+		meta := full.Surfaces[i]
+		if meta.Name != surface.Name || !reflect.DeepEqual(meta.Paginated, surface.Paginated) ||
+			meta.PaginatedReason != surface.PaginatedReason ||
+			!reflect.DeepEqual(meta.ConsumerGuidance, surface.ConsumerGuidance) ||
+			!reflect.DeepEqual(meta.Boundedness, surface.Boundedness) ||
+			!reflect.DeepEqual(meta.FollowUp, surface.FollowUp) ||
+			!reflect.DeepEqual(meta.ActionHandoff, surface.ActionHandoff) ||
+			!reflect.DeepEqual(meta.RequestSemantics, surface.RequestSemantics) ||
+			!reflect.DeepEqual(meta.AttentionOps, surface.AttentionOps) ||
+			!reflect.DeepEqual(meta.Explainability, surface.Explainability) ||
+			!reflect.DeepEqual(meta.Lifecycle, surface.Lifecycle) {
+			t.Errorf("full capability surface metadata %q drifted from the registry\nmetadata: %+v\nsurface: %+v", surface.Name, meta, surface)
+		}
 	}
 
 	for i, surface := range registry.Surfaces {

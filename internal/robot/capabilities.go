@@ -13,16 +13,69 @@ import (
 // CapabilitiesOutput represents the output for --robot-capabilities
 type CapabilitiesOutput struct {
 	RobotResponse
-	Version    string                   `json:"version"`
-	Commands   []RobotCommandInfo       `json:"commands"`
-	Surfaces   []RobotSurfaceDescriptor `json:"surfaces,omitempty"`
-	Categories []string                 `json:"categories"`
-	Attention  *AttentionCapabilities   `json:"attention,omitempty"`
-	Filter     *CapabilitiesFilter      `json:"filter,omitempty"`
+	Version    string                      `json:"version"`
+	Commands   []RobotCommandInfo          `json:"commands"`
+	Surfaces   []CapabilitySurfaceMetadata `json:"surfaces,omitempty"`
+	Categories []string                    `json:"categories"`
+	Attention  *AttentionCapabilities      `json:"attention,omitempty"`
+	Filter     *CapabilitiesFilter         `json:"filter,omitempty"`
 	// PaginationContractViolations self-reports drift between the registry
 	// and the WS0-G6 single-declaration pagination flags (schema_pagination.go).
 	// Always empty on a healthy build; conformance tests enforce emptiness.
 	PaginationContractViolations []string `json:"pagination_contract_violations,omitempty"`
+}
+
+// CapabilitySurfaceMetadata is the registry metadata --robot-capabilities
+// publishes per surface in addition to its commands[] entry, joined by name.
+//
+// It deliberately omits every field the command entry already carries (flag,
+// category, summary, description, formats, schema binding, sections,
+// parameters, examples, transports). Surfaces used to be emitted as full
+// registry descriptors, which repeated each command in its entirety: about
+// 190 KB of the 431 KB full discovery payload was that second copy.
+type CapabilitySurfaceMetadata struct {
+	Name             string              `json:"name"`
+	Paginated        *bool               `json:"paginated,omitempty"`
+	PaginatedReason  string              `json:"paginated_reason,omitempty"`
+	ConsumerGuidance *ConsumerGuidance   `json:"consumer_guidance,omitempty"`
+	Boundedness      *BoundednessInfo    `json:"boundedness,omitempty"`
+	FollowUp         *FollowUpInfo       `json:"follow_up,omitempty"`
+	ActionHandoff    *ActionHandoffInfo  `json:"action_handoff,omitempty"`
+	RequestSemantics *RequestSemantics   `json:"request_semantics,omitempty"`
+	AttentionOps     *AttentionOpsInfo   `json:"attention_ops,omitempty"`
+	Explainability   *ExplainabilityInfo `json:"explainability,omitempty"`
+	Lifecycle        *LifecycleInfo      `json:"lifecycle,omitempty"`
+}
+
+// capabilitySurfaceMetadata projects registry descriptors onto the
+// surface-only metadata published next to the command catalog, in the
+// catalog's order.
+func capabilitySurfaceMetadata(surfaces []RobotSurfaceDescriptor, commands []RobotCommandInfo) []CapabilitySurfaceMetadata {
+	byName := make(map[string]RobotSurfaceDescriptor, len(surfaces))
+	for _, surface := range surfaces {
+		byName[surface.Name] = surface
+	}
+	metadata := make([]CapabilitySurfaceMetadata, 0, len(commands))
+	for _, command := range commands {
+		surface, ok := byName[command.Name]
+		if !ok {
+			continue
+		}
+		metadata = append(metadata, CapabilitySurfaceMetadata{
+			Name:             surface.Name,
+			Paginated:        surface.Paginated,
+			PaginatedReason:  surface.PaginatedReason,
+			ConsumerGuidance: surface.ConsumerGuidance,
+			Boundedness:      surface.Boundedness,
+			FollowUp:         surface.FollowUp,
+			ActionHandoff:    surface.ActionHandoff,
+			RequestSemantics: surface.RequestSemantics,
+			AttentionOps:     surface.AttentionOps,
+			Explainability:   surface.Explainability,
+			Lifecycle:        surface.Lifecycle,
+		})
+	}
+	return metadata
 }
 
 // CapabilitiesOptions limits the discovery payload to the catalog slice an
@@ -119,9 +172,10 @@ func GetCapabilitiesWithOptions(opts CapabilitiesOptions) (*CapabilitiesOutput, 
 	commands := buildCapabilitiesCommandCatalog(surfaces)
 	categories := capabilityCategories(registry.Categories, commands)
 	attention := DefaultAttentionCapabilities()
+	surfaceMetadata := capabilitySurfaceMetadata(surfaces, commands)
 	if normalized.Compact {
 		commands = compactCapabilitiesCommandCatalog(commands)
-		surfaces = nil
+		surfaceMetadata = nil
 		attention = nil
 	} else if hasCapabilitiesFilter(normalized) && !commandCatalogHasCategory(commands, "attention") {
 		attention = nil
@@ -131,7 +185,7 @@ func GetCapabilitiesWithOptions(opts CapabilitiesOptions) (*CapabilitiesOutput, 
 		RobotResponse:                NewRobotResponse(true),
 		Version:                      Version,
 		Commands:                     commands,
-		Surfaces:                     surfaces,
+		Surfaces:                     surfaceMetadata,
 		Categories:                   categories,
 		Attention:                    attention,
 		Filter:                       capabilitiesFilter(normalized),
@@ -1224,6 +1278,7 @@ func buildCommandRegistry() []RobotCommandInfo {
 				{Name: "spawn-agy", Flag: "--spawn-agy", Type: "string", Required: false, Description: "Antigravity (agy) agents: count (model is pinned by config)"},
 				{Name: "spawn-grok", Flag: "--spawn-grok", Type: "string", Required: false, Description: "Grok Build agents: count[:model[:effort]]"},
 				{Name: "spawn-omp", Flag: "--spawn-omp", Type: "string", Required: false, Description: "Oh My Pi (omp) agents: count[:model[:effort]] (effort maps to omp --thinking; no model = omp's own configured default)"},
+				{Name: "spawn-oc", Flag: "--spawn-oc", Type: "string", Required: false, Description: "OpenCode (oc) agents: count[:model], model as provider/model (no model = OpenCode's own default; no effort knob)"},
 				{Name: "spawn-preset", Flag: "--spawn-preset", Type: "string", Required: false, Description: "Use recipe preset instead of counts"},
 				{Name: "spawn-no-user", Flag: "--spawn-no-user", Type: "bool", Required: false, Description: "Skip user pane creation"},
 				{Name: "spawn-wait", Flag: "--spawn-wait", Type: "bool", Required: false, Description: "Wait for agents to show ready state before returning"},
@@ -1239,6 +1294,7 @@ func buildCommandRegistry() []RobotCommandInfo {
 				"ntm --robot-spawn=myproject --spawn-cod=8:gpt-5.3-codex:high",
 				"ntm --robot-spawn=myproject --spawn-grok=1",
 				"ntm --robot-spawn=myproject --spawn-omp=8 --spawn-no-user --spawn-wait",
+				"ntm --robot-spawn=myproject --spawn-oc=2:opencode/big-pickle --spawn-wait",
 				"ntm --robot-spawn=myproject --spawn-preset=standard",
 				"ntm --robot-spawn=myproject --spawn-label=frontend --spawn-cc=3",
 				"ntm --robot-spawn=myproject --spawn-assign-work --strategy=dependency-aware",
