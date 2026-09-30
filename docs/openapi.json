@@ -270,6 +270,16 @@
               }
             }
           },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
           "500": {
             "description": "Internal server error",
             "content": {
@@ -333,6 +343,16 @@
               }
             }
           },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
           "500": {
             "description": "Internal server error",
             "content": {
@@ -388,6 +408,16 @@
           },
           "401": {
             "description": "Unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
             "content": {
               "application/json": {
                 "schema": {
@@ -893,6 +923,16 @@
               }
             }
           },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
           "500": {
             "description": "Internal server error",
             "content": {
@@ -958,6 +998,16 @@
           },
           "401": {
             "description": "Unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
             "content": {
               "application/json": {
                 "schema": {
@@ -1195,6 +1245,16 @@
               }
             }
           },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
           "500": {
             "description": "Internal server error",
             "content": {
@@ -1268,6 +1328,16 @@
               }
             }
           },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
           "500": {
             "description": "Internal server error",
             "content": {
@@ -1333,6 +1403,16 @@
           },
           "401": {
             "description": "Unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
             "content": {
               "application/json": {
                 "schema": {
@@ -1510,6 +1590,16 @@
           },
           "401": {
             "description": "Unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
             "content": {
               "application/json": {
                 "schema": {
@@ -2275,6 +2365,16 @@
               }
             }
           },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
           "500": {
             "description": "Internal server error",
             "content": {
@@ -2338,6 +2438,16 @@
           },
           "401": {
             "description": "Unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
             "content": {
               "application/json": {
                 "schema": {
@@ -2419,6 +2529,16 @@
               }
             }
           },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
           "500": {
             "description": "Internal server error",
             "content": {
@@ -2492,6 +2612,16 @@
               }
             }
           },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
           "500": {
             "description": "Internal server error",
             "content": {
@@ -2547,6 +2677,16 @@
           },
           "401": {
             "description": "Unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
             "content": {
               "application/json": {
                 "schema": {
@@ -2626,6 +2766,16 @@
               }
             }
           },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
           "500": {
             "description": "Internal server error",
             "content": {
@@ -2690,6 +2840,16 @@
           },
           "401": {
             "description": "Unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
             "content": {
               "application/json": {
                 "schema": {
@@ -3588,8 +3748,8 @@
           }
         },
         "responses": {
-          "200": {
-            "description": "Successful operation",
+          "202": {
+            "description": "Job accepted for asynchronous execution",
             "content": {
               "application/json": {
                 "schema": {
@@ -3620,6 +3780,26 @@
           },
           "500": {
             "description": "Internal server error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "501": {
+            "description": "Job type not implemented",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Job admission closed, queue full, or receipt could not be checkpointed",
             "content": {
               "application/json": {
                 "schema": {
@@ -3673,6 +3853,16 @@
           },
           "401": {
             "description": "Unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
             "content": {
               "application/json": {
                 "schema": {
@@ -3742,8 +3932,38 @@
               }
             }
           },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Job is not cancellable in its current state",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
           "500": {
             "description": "Internal server error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Cancellation signalled but its receipt could not be checkpointed",
             "content": {
               "application/json": {
                 "schema": {
@@ -3909,6 +4129,16 @@
           },
           "401": {
             "description": "Unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
             "content": {
               "application/json": {
                 "schema": {
@@ -4384,6 +4614,16 @@
               }
             }
           },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
           "500": {
             "description": "Internal server error",
             "content": {
@@ -4449,6 +4689,16 @@
           },
           "401": {
             "description": "Unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
             "content": {
               "application/json": {
                 "schema": {
@@ -4530,6 +4780,16 @@
               }
             }
           },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
           "500": {
             "description": "Internal server error",
             "content": {
@@ -4595,6 +4855,16 @@
           },
           "401": {
             "description": "Unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
             "content": {
               "application/json": {
                 "schema": {
@@ -4762,6 +5032,16 @@
           },
           "401": {
             "description": "Unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
             "content": {
               "application/json": {
                 "schema": {
@@ -5701,6 +5981,16 @@
               }
             }
           },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
           "500": {
             "description": "Internal server error",
             "content": {
@@ -5754,6 +6044,16 @@
           },
           "401": {
             "description": "Unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
             "content": {
               "application/json": {
                 "schema": {
@@ -5835,6 +6135,16 @@
               }
             }
           },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
           "500": {
             "description": "Internal server error",
             "content": {
@@ -5900,6 +6210,16 @@
           },
           "401": {
             "description": "Unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
             "content": {
               "application/json": {
                 "schema": {
@@ -6533,6 +6853,16 @@
               }
             }
           },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
           "500": {
             "description": "Internal server error",
             "content": {
@@ -6598,6 +6928,16 @@
           },
           "401": {
             "description": "Unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
             "content": {
               "application/json": {
                 "schema": {
@@ -6679,6 +7019,16 @@
               }
             }
           },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
           "500": {
             "description": "Internal server error",
             "content": {
@@ -6744,6 +7094,16 @@
           },
           "401": {
             "description": "Unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
             "content": {
               "application/json": {
                 "schema": {
@@ -7781,6 +8141,16 @@
               }
             }
           },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
           "500": {
             "description": "Internal server error",
             "content": {
@@ -7854,6 +8224,16 @@
               }
             }
           },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
           "500": {
             "description": "Internal server error",
             "content": {
@@ -7919,6 +8299,16 @@
           },
           "401": {
             "description": "Unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
             "content": {
               "application/json": {
                 "schema": {
@@ -8268,6 +8658,16 @@
               }
             }
           },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
           "500": {
             "description": "Internal server error",
             "content": {
@@ -8341,6 +8741,16 @@
               }
             }
           },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
           "500": {
             "description": "Internal server error",
             "content": {
@@ -8404,6 +8814,16 @@
               }
             }
           },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
           "500": {
             "description": "Internal server error",
             "content": {
@@ -8459,6 +8879,16 @@
           },
           "401": {
             "description": "Unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
             "content": {
               "application/json": {
                 "schema": {
@@ -8540,6 +8970,16 @@
               }
             }
           },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
           "500": {
             "description": "Internal server error",
             "content": {
@@ -8613,6 +9053,16 @@
               }
             }
           },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
           "500": {
             "description": "Internal server error",
             "content": {
@@ -8668,6 +9118,16 @@
           },
           "401": {
             "description": "Unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
             "content": {
               "application/json": {
                 "schema": {
@@ -8749,6 +9209,16 @@
               }
             }
           },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
           "500": {
             "description": "Internal server error",
             "content": {
@@ -8814,6 +9284,16 @@
           },
           "401": {
             "description": "Unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
             "content": {
               "application/json": {
                 "schema": {
@@ -8895,6 +9375,16 @@
               }
             }
           },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
           "500": {
             "description": "Internal server error",
             "content": {
@@ -8968,6 +9458,16 @@
               }
             }
           },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
           "500": {
             "description": "Internal server error",
             "content": {
@@ -9023,6 +9523,16 @@
           },
           "401": {
             "description": "Unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
             "content": {
               "application/json": {
                 "schema": {
@@ -9095,6 +9605,16 @@
           },
           "401": {
             "description": "Unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
             "content": {
               "application/json": {
                 "schema": {
@@ -9185,6 +9705,16 @@
               }
             }
           },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
           "500": {
             "description": "Internal server error",
             "content": {
@@ -9267,6 +9797,16 @@
               }
             }
           },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
           "500": {
             "description": "Internal server error",
             "content": {
@@ -9331,6 +9871,16 @@
           },
           "401": {
             "description": "Unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
             "content": {
               "application/json": {
                 "schema": {
@@ -9421,6 +9971,16 @@
               }
             }
           },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
           "500": {
             "description": "Internal server error",
             "content": {
@@ -9483,6 +10043,16 @@
           },
           "401": {
             "description": "Unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
             "content": {
               "application/json": {
                 "schema": {
@@ -9555,6 +10125,16 @@
           },
           "401": {
             "description": "Unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
             "content": {
               "application/json": {
                 "schema": {
@@ -9643,6 +10223,16 @@
               }
             }
           },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
           "500": {
             "description": "Internal server error",
             "content": {
@@ -9698,6 +10288,16 @@
           },
           "401": {
             "description": "Unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
             "content": {
               "application/json": {
                 "schema": {
@@ -9769,6 +10369,16 @@
           },
           "401": {
             "description": "Unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
             "content": {
               "application/json": {
                 "schema": {
@@ -9850,6 +10460,16 @@
               }
             }
           },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
           "500": {
             "description": "Internal server error",
             "content": {
@@ -9922,6 +10542,16 @@
               }
             }
           },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
           "500": {
             "description": "Internal server error",
             "content": {
@@ -9984,6 +10614,16 @@
           },
           "401": {
             "description": "Unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
             "content": {
               "application/json": {
                 "schema": {
@@ -10064,6 +10704,16 @@
               }
             }
           },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
           "500": {
             "description": "Internal server error",
             "content": {
@@ -10136,6 +10786,16 @@
           },
           "401": {
             "description": "Unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
             "content": {
               "application/json": {
                 "schema": {
@@ -10226,6 +10886,16 @@
               }
             }
           },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
           "500": {
             "description": "Internal server error",
             "content": {
@@ -10290,6 +10960,16 @@
           },
           "401": {
             "description": "Unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
             "content": {
               "application/json": {
                 "schema": {
@@ -10363,6 +11043,16 @@
           },
           "401": {
             "description": "Unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
             "content": {
               "application/json": {
                 "schema": {
@@ -11944,6 +12634,10 @@
           "tokens_added": {
             "type": "integer",
             "description": "Tokens added"
+          },
+          "workspace": {
+            "type": "string",
+            "description": "Workspace"
           }
         },
         "required": [
@@ -12018,6 +12712,13 @@
             "type": "string",
             "description": "Output format"
           },
+          "pagination_contract_violations": {
+            "type": "array",
+            "description": "Pagination contract violations",
+            "items": {
+              "type": "string"
+            }
+          },
           "structured_error": {
             "description": "Structured error",
             "$ref": "#/components/schemas/StructuredError"
@@ -12030,7 +12731,7 @@
             "type": "array",
             "description": "Surfaces",
             "items": {
-              "$ref": "#/components/schemas/RobotSurfaceDescriptor"
+              "$ref": "#/components/schemas/CapabilitySurfaceMetadata"
             }
           },
           "timestamp": {
@@ -12064,6 +12765,58 @@
         },
         "required": [
           "status"
+        ]
+      },
+      "CapabilitySurfaceMetadata": {
+        "type": "object",
+        "properties": {
+          "action_handoff": {
+            "description": "Action handoff",
+            "$ref": "#/components/schemas/ActionHandoffInfo"
+          },
+          "attention_ops": {
+            "description": "Attention ops",
+            "$ref": "#/components/schemas/AttentionOpsInfo"
+          },
+          "boundedness": {
+            "description": "Boundedness",
+            "$ref": "#/components/schemas/BoundednessInfo"
+          },
+          "consumer_guidance": {
+            "description": "Consumer guidance",
+            "$ref": "#/components/schemas/ConsumerGuidance"
+          },
+          "explainability": {
+            "description": "Explainability",
+            "$ref": "#/components/schemas/ExplainabilityInfo"
+          },
+          "follow_up": {
+            "description": "Follow up",
+            "$ref": "#/components/schemas/FollowUpInfo"
+          },
+          "lifecycle": {
+            "description": "Lifecycle",
+            "$ref": "#/components/schemas/LifecycleInfo"
+          },
+          "name": {
+            "type": "string",
+            "description": "Name"
+          },
+          "paginated": {
+            "type": "boolean",
+            "description": "Paginated"
+          },
+          "paginated_reason": {
+            "type": "string",
+            "description": "Paginated reason"
+          },
+          "request_semantics": {
+            "description": "Request semantics",
+            "$ref": "#/components/schemas/RequestSemantics"
+          }
+        },
+        "required": [
+          "name"
         ]
       },
       "Conflict": {
@@ -12547,6 +13300,33 @@
           "error",
           "error_code",
           "timestamp"
+        ]
+      },
+      "Exclusion": {
+        "type": "object",
+        "properties": {
+          "blocked_by": {
+            "type": "array",
+            "description": "Blocked by",
+            "items": {
+              "type": "string"
+            }
+          },
+          "id": {
+            "type": "string",
+            "description": "I d"
+          },
+          "reasons": {
+            "type": "array",
+            "description": "Reasons",
+            "items": {
+              "type": "string"
+            }
+          }
+        },
+        "required": [
+          "id",
+          "reasons"
         ]
       },
       "ExplainabilityInfo": {
@@ -13243,6 +14023,27 @@
           "TopBottleneck",
           "BottleneckCount"
         ]
+      },
+      "Identity": {
+        "type": "object",
+        "properties": {
+          "head_sha": {
+            "type": "string",
+            "description": "Head s h a"
+          },
+          "jsonl_path": {
+            "type": "string",
+            "description": "J s o n l path"
+          },
+          "jsonl_sha256": {
+            "type": "string",
+            "description": "J s o n l s h a256"
+          },
+          "project_dir": {
+            "type": "string",
+            "description": "Project dir"
+          }
+        }
       },
       "InProgressInfo": {
         "type": "object",
@@ -14483,140 +15284,6 @@
           "level"
         ]
       },
-      "RobotSurfaceDescriptor": {
-        "type": "object",
-        "properties": {
-          "action_handoff": {
-            "description": "Action handoff",
-            "$ref": "#/components/schemas/ActionHandoffInfo"
-          },
-          "attention_ops": {
-            "description": "Attention ops",
-            "$ref": "#/components/schemas/AttentionOpsInfo"
-          },
-          "boundedness": {
-            "description": "Boundedness",
-            "$ref": "#/components/schemas/BoundednessInfo"
-          },
-          "category": {
-            "type": "string",
-            "description": "Category"
-          },
-          "consumer_guidance": {
-            "description": "Consumer guidance",
-            "$ref": "#/components/schemas/ConsumerGuidance"
-          },
-          "default_output_format": {
-            "type": "string",
-            "description": "Default output format"
-          },
-          "description": {
-            "type": "string",
-            "description": "Description"
-          },
-          "examples": {
-            "type": "array",
-            "description": "Examples",
-            "items": {
-              "type": "string"
-            }
-          },
-          "explainability": {
-            "description": "Explainability",
-            "$ref": "#/components/schemas/ExplainabilityInfo"
-          },
-          "flag": {
-            "type": "string",
-            "description": "Flag"
-          },
-          "follow_up": {
-            "description": "Follow up",
-            "$ref": "#/components/schemas/FollowUpInfo"
-          },
-          "lifecycle": {
-            "description": "Lifecycle",
-            "$ref": "#/components/schemas/LifecycleInfo"
-          },
-          "name": {
-            "type": "string",
-            "description": "Name"
-          },
-          "note": {
-            "type": "string",
-            "description": "Note"
-          },
-          "output_formats": {
-            "type": "array",
-            "description": "Output formats",
-            "items": {
-              "type": "string"
-            }
-          },
-          "parameters": {
-            "type": "array",
-            "description": "Parameters",
-            "items": {
-              "$ref": "#/components/schemas/RobotParameter"
-            }
-          },
-          "request_semantics": {
-            "description": "Request semantics",
-            "$ref": "#/components/schemas/RequestSemantics"
-          },
-          "schema_id": {
-            "type": "string",
-            "description": "Schema i d"
-          },
-          "schema_source": {
-            "type": "string",
-            "description": "Schema source"
-          },
-          "schema_type": {
-            "type": "string",
-            "description": "Schema type"
-          },
-          "schema_unavailable_reason": {
-            "type": "string",
-            "description": "Schema unavailable reason"
-          },
-          "sections": {
-            "type": "array",
-            "description": "Sections",
-            "items": {
-              "type": "string"
-            }
-          },
-          "summary": {
-            "type": "string",
-            "description": "Summary"
-          },
-          "transports": {
-            "type": "array",
-            "description": "Transports",
-            "items": {
-              "$ref": "#/components/schemas/RobotTransportInfo"
-            }
-          },
-          "unavailable": {
-            "type": "boolean",
-            "description": "Unavailable"
-          },
-          "unavailable_reason": {
-            "type": "string",
-            "description": "Unavailable reason"
-          }
-        },
-        "required": [
-          "name",
-          "flag",
-          "category",
-          "summary",
-          "description",
-          "output_formats",
-          "default_output_format",
-          "schema_source"
-        ]
-      },
       "RobotTransportInfo": {
         "type": "object",
         "properties": {
@@ -14781,6 +15448,10 @@
             "type": "integer",
             "description": "Commits in window"
           },
+          "evidence_complete": {
+            "type": "boolean",
+            "description": "Evidence complete"
+          },
           "last_commit_at": {
             "type": "string",
             "description": "Last commit at"
@@ -14808,7 +15479,8 @@
           "commits_in_window",
           "claims_in_window",
           "last_commit_at",
-          "window_seconds"
+          "window_seconds",
+          "evidence_complete"
         ]
       },
       "SendAdmission": {
@@ -15694,6 +16366,32 @@
           "event_count"
         ]
       },
+      "SnapshotService": {
+        "type": "object",
+        "properties": {
+          "command": {
+            "type": "string",
+            "description": "Command"
+          },
+          "manager": {
+            "type": "string",
+            "description": "Manager"
+          },
+          "name": {
+            "type": "string",
+            "description": "Name"
+          },
+          "pane": {
+            "type": "string",
+            "description": "Pane"
+          }
+        },
+        "required": [
+          "pane",
+          "name",
+          "manager"
+        ]
+      },
       "SnapshotSession": {
         "type": "object",
         "properties": {
@@ -15711,6 +16409,13 @@
           "name": {
             "type": "string",
             "description": "Name"
+          },
+          "services": {
+            "type": "array",
+            "description": "Services",
+            "items": {
+              "$ref": "#/components/schemas/SnapshotService"
+            }
           }
         },
         "required": [
@@ -15987,6 +16692,10 @@
             "type": "string",
             "description": "Agent type"
           },
+          "assign_reason": {
+            "type": "string",
+            "description": "Assign reason"
+          },
           "bead_id": {
             "type": "string",
             "description": "Bead i d"
@@ -16110,6 +16819,13 @@
           "mode": {
             "type": "string",
             "description": "Mode"
+          },
+          "model_hints": {
+            "type": "array",
+            "description": "Model hints",
+            "items": {
+              "type": "string"
+            }
           },
           "monitor_error": {
             "type": "string",
@@ -16258,6 +16974,26 @@
           "title",
           "ready",
           "startup_ms"
+        ]
+      },
+      "StaleError": {
+        "type": "object",
+        "properties": {
+          "expected": {
+            "description": "Expected",
+            "$ref": "#/components/schemas/Identity"
+          },
+          "observed": {
+            "description": "Observed",
+            "$ref": "#/components/schemas/Identity"
+          },
+          "reason": {
+            "type": "string",
+            "description": "Reason"
+          }
+        },
+        "required": [
+          "reason"
         ]
       },
       "StatusAlert": {
@@ -17120,6 +17856,10 @@
               "type": "string"
             }
           },
+          "disabled": {
+            "type": "boolean",
+            "description": "Disabled"
+          },
           "health": {
             "description": "Health",
             "$ref": "#/components/schemas/ToolHealthOutput"
@@ -17754,6 +18494,45 @@
           "unblocks"
         ]
       },
+      "WorkReservationVerification": {
+        "type": "object",
+        "properties": {
+          "active": {
+            "type": "integer",
+            "description": "Active"
+          },
+          "mapped_beads": {
+            "type": "integer",
+            "description": "Mapped beads"
+          },
+          "observed_at": {
+            "type": "string",
+            "description": "Observed at"
+          },
+          "project_id": {
+            "type": "integer",
+            "description": "Project i d"
+          },
+          "reason": {
+            "type": "string",
+            "description": "Reason"
+          },
+          "state": {
+            "type": "string",
+            "description": "State"
+          },
+          "unmapped": {
+            "type": "integer",
+            "description": "Unmapped"
+          }
+        },
+        "required": [
+          "state",
+          "active",
+          "mapped_beads",
+          "unmapped"
+        ]
+      },
       "WorkSection": {
         "type": "object",
         "properties": {
@@ -17797,6 +18576,10 @@
           "triage": {
             "description": "Triage",
             "$ref": "#/components/schemas/WorkTriage"
+          },
+          "verification": {
+            "description": "Verification",
+            "$ref": "#/components/schemas/WorkVerification"
           }
         },
         "required": [
@@ -17867,6 +18650,87 @@
           "ready_count",
           "quick_wins_count",
           "blockers_count"
+        ]
+      },
+      "WorkVerification": {
+        "type": "object",
+        "properties": {
+          "cache_collected_at": {
+            "type": "string",
+            "description": "Cache collected at"
+          },
+          "cache_expires_at": {
+            "type": "string",
+            "description": "Cache expires at"
+          },
+          "candidates_observed": {
+            "type": "integer",
+            "description": "Candidates observed"
+          },
+          "count_scope": {
+            "type": "string",
+            "description": "Count scope"
+          },
+          "dirty": {
+            "type": "boolean",
+            "description": "Dirty"
+          },
+          "excluded": {
+            "type": "array",
+            "description": "Excluded",
+            "items": {
+              "$ref": "#/components/schemas/Exclusion"
+            }
+          },
+          "from_cache": {
+            "type": "boolean",
+            "description": "From cache"
+          },
+          "mismatch": {
+            "description": "Mismatch",
+            "$ref": "#/components/schemas/StaleError"
+          },
+          "preview_limit": {
+            "type": "integer",
+            "description": "Preview limit"
+          },
+          "preview_truncated": {
+            "type": "boolean",
+            "description": "Preview truncated"
+          },
+          "project_dir": {
+            "type": "string",
+            "description": "Project dir"
+          },
+          "reason_code": {
+            "type": "string",
+            "description": "Reason code"
+          },
+          "remediation": {
+            "type": "string",
+            "description": "Remediation"
+          },
+          "reported_ready": {
+            "type": "integer",
+            "description": "Reported ready"
+          },
+          "reservations": {
+            "description": "Reservations",
+            "$ref": "#/components/schemas/WorkReservationVerification"
+          },
+          "source": {
+            "description": "Source",
+            "$ref": "#/components/schemas/Identity"
+          },
+          "verified_ready": {
+            "type": "integer",
+            "description": "Verified ready"
+          }
+        },
+        "required": [
+          "excluded",
+          "reported_ready",
+          "count_scope"
         ]
       }
     },
