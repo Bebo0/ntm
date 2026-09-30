@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -1431,5 +1432,179 @@ func TestAvailabilityProbeBudgetHonorsEnvOverride(t *testing.T) {
 		if got := availabilityProbeBudget(); got != defaultAvailabilityProbeBudget {
 			t.Fatalf("budget with %q = %v, want the default %v", bad, got, defaultAvailabilityProbeBudget)
 		}
+	}
+}
+
+// statefulMCPServer mimics the Python Agent Mail server's stateful /mcp
+// endpoint (FastMCP streamable HTTP with stateless_http=False), verified live
+// against it for GH #333: a request without a session is answered HTTP 400
+// with a JSON-RPC "Missing session ID" error, an unknown session HTTP 400 with
+// a plain-text body, and initialize issues the id in an Mcp-Session-Id header.
+type statefulMCPServer struct {
+	mu            sync.Mutex
+	sessions      map[string]bool
+	next          int
+	initializes   int
+	notifications int
+	toolCalls     int
+	omitSessionID bool
+}
+
+func (s *statefulMCPServer) forgetSessions() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.sessions = map[string]bool{}
+}
+
+func (s *statefulMCPServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	var req JSONRPCRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "bad json", http.StatusBadRequest)
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.sessions == nil {
+		s.sessions = map[string]bool{}
+	}
+	sid := r.Header.Get("Mcp-Session-Id")
+	w.Header().Set("Content-Type", "application/json")
+	switch {
+	case req.Method == "initialize":
+		s.initializes++
+		s.next++
+		id := fmt.Sprintf("sess-%d", s.next)
+		s.sessions[id] = true
+		if !s.omitSessionID {
+			w.Header().Set("Mcp-Session-Id", id)
+		}
+		_ = json.NewEncoder(w).Encode(JSONRPCResponse{JSONRPC: "2.0", ID: req.ID, Result: json.RawMessage(`{"protocolVersion":"2025-03-26"}`)})
+	case sid == "":
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = io.WriteString(w, `{"jsonrpc":"2.0","id":"server-error","error":{"code":-32600,"message":"Bad Request: Missing session ID"}}`)
+	case !s.sessions[sid]:
+		w.Header().Set("Content-Type", "text/plain")
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = io.WriteString(w, "Bad Request: No valid session ID provided")
+	case req.Method == "notifications/initialized":
+		s.notifications++
+		w.WriteHeader(http.StatusAccepted)
+	case req.Method == "tools/call":
+		s.toolCalls++
+		_ = json.NewEncoder(w).Encode(JSONRPCResponse{JSONRPC: "2.0", ID: req.ID, Result: json.RawMessage(`{"id":1,"slug":"proj","human_key":"/data/projects/proj"}`)})
+	default:
+		_ = json.NewEncoder(w).Encode(JSONRPCResponse{JSONRPC: "2.0", ID: req.ID, Error: &JSONRPCError{Code: -32601, Message: "unknown method"}})
+	}
+}
+
+// A stateful MCP endpoint rejected every sessionless ntm call with HTTP 400,
+// so spawn reported "ensure_project failed (HTTP 400)" (GH #333). The client
+// now performs the handshake once and reuses the session.
+func TestCallToolEstablishesMCPSessionWhenServerRequiresOne(t *testing.T) {
+	t.Parallel()
+	state := &statefulMCPServer{}
+	server := httptest.NewServer(state)
+	defer server.Close()
+
+	c := NewClient(WithBaseURL(server.URL + "/mcp/"))
+	for i := 0; i < 3; i++ {
+		project, err := c.EnsureProject(context.Background(), "/data/projects/proj")
+		if err != nil {
+			t.Fatalf("EnsureProject #%d: %v", i+1, err)
+		}
+		if project.Slug != "proj" {
+			t.Fatalf("slug = %q, want proj", project.Slug)
+		}
+	}
+	state.mu.Lock()
+	defer state.mu.Unlock()
+	if state.initializes != 1 || state.notifications != 1 {
+		t.Fatalf("handshake ran initialize=%d notified=%d times, want exactly once each", state.initializes, state.notifications)
+	}
+	if state.toolCalls != 3 {
+		t.Fatalf("tool calls reaching the server = %d, want 3", state.toolCalls)
+	}
+}
+
+// A server restart invalidates the held session; the next call re-handshakes
+// instead of failing with the plain-text 400.
+func TestCallToolReestablishesExpiredMCPSession(t *testing.T) {
+	t.Parallel()
+	state := &statefulMCPServer{}
+	server := httptest.NewServer(state)
+	defer server.Close()
+
+	c := NewClient(WithBaseURL(server.URL + "/mcp/"))
+	if _, err := c.EnsureProject(context.Background(), "/data/projects/proj"); err != nil {
+		t.Fatalf("first EnsureProject: %v", err)
+	}
+	state.forgetSessions()
+	if _, err := c.EnsureProject(context.Background(), "/data/projects/proj"); err != nil {
+		t.Fatalf("EnsureProject after session loss: %v", err)
+	}
+	if got := c.mcpSessionID(); got != "sess-2" {
+		t.Fatalf("session after re-handshake = %q, want sess-2", got)
+	}
+}
+
+func TestCallToolFailsClearlyWhenInitializeIssuesNoSession(t *testing.T) {
+	t.Parallel()
+	state := &statefulMCPServer{omitSessionID: true}
+	server := httptest.NewServer(state)
+	defer server.Close()
+
+	c := NewClient(WithBaseURL(server.URL + "/mcp/"))
+	_, err := c.EnsureProject(context.Background(), "/data/projects/proj")
+	if err == nil || !strings.Contains(err.Error(), "Mcp-Session-Id") {
+		t.Fatalf("EnsureProject error = %v, want missing Mcp-Session-Id explanation", err)
+	}
+}
+
+// A 400 that is not about sessions must not trigger a handshake, and its
+// error must carry the server's own explanation instead of a bare status.
+func TestCallToolNonSessionHTTPErrorQuotesServerDetail(t *testing.T) {
+	t.Parallel()
+	var initializes atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req JSONRPCRequest
+		_ = json.NewDecoder(r.Body).Decode(&req)
+		if req.Method == "initialize" {
+			initializes.Add(1)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = io.WriteString(w, `{"jsonrpc":"2.0","id":null,"error":{"code":-32600,"message":"unknown field `+"`extra`"+`"}}`)
+	}))
+	defer server.Close()
+
+	c := NewClient(WithBaseURL(server.URL + "/mcp/"))
+	_, err := c.EnsureProject(context.Background(), "/data/projects/proj")
+	var apiErr *APIError
+	if !errors.As(err, &apiErr) || apiErr.StatusCode != http.StatusBadRequest {
+		t.Fatalf("error = %v, want APIError with HTTP 400", err)
+	}
+	if !strings.Contains(err.Error(), "unknown field `extra`") {
+		t.Fatalf("error %q does not quote the server's detail", err)
+	}
+	if initializes.Load() != 0 {
+		t.Fatalf("non-session 400 triggered %d initialize handshakes", initializes.Load())
+	}
+}
+
+func TestReadResourceEstablishesMCPSession(t *testing.T) {
+	t.Parallel()
+	state := &statefulMCPServer{}
+	server := httptest.NewServer(state)
+	defer server.Close()
+
+	c := NewClient(WithBaseURL(server.URL + "/mcp/"))
+	_, err := c.ReadResource(context.Background(), "resource://projects")
+	// The fake answers resources/read with method-not-found; reaching that
+	// JSON-RPC error proves the request got past the session gate.
+	if err == nil || !strings.Contains(err.Error(), "unknown method") {
+		t.Fatalf("ReadResource error = %v, want the post-handshake JSON-RPC error", err)
+	}
+	if c.mcpSessionID() == "" {
+		t.Fatal("ReadResource did not establish an MCP session")
 	}
 }

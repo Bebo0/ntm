@@ -75,6 +75,12 @@ type Client struct {
 	projectKey  string // Cached project path
 	requestID   atomic.Int64
 
+	// MCP session id issued by a stateful server (the Python Agent Mail
+	// server's /mcp endpoint). Empty until a server rejects a sessionless
+	// request; see postJSONRPC.
+	mcpSessionMu sync.Mutex
+	mcpSession   string
+
 	// Per-agent registration tokens. Server-side mcp-agent-mail >=2.13
 	// requires identity-scoped tool calls (fetch_inbox, send_message,
 	// acknowledge_message, …) to include the agent's `registration_token`
@@ -678,65 +684,12 @@ type ToolCallParams struct {
 
 // callTool makes a JSON-RPC call to the Agent Mail server.
 func (c *Client) callTool(ctx context.Context, toolName string, args map[string]interface{}) (json.RawMessage, error) {
-	reqID := c.requestID.Add(1)
-
-	rpcReq := JSONRPCRequest{
-		JSONRPC: "2.0",
-		ID:      reqID,
-		Method:  "tools/call",
-		Params: ToolCallParams{
-			Name:      toolName,
-			Arguments: args,
-		},
-	}
-
-	body, err := json.Marshal(rpcReq)
+	rpcResp, err := c.postJSONRPC(ctx, toolName, "tools/call", ToolCallParams{
+		Name:      toolName,
+		Arguments: args,
+	})
 	if err != nil {
-		return nil, NewAPIError(toolName, 0, err)
-	}
-
-	req, err := http.NewRequestWithContext(ctx, "POST", c.baseURL, bytes.NewReader(body))
-	if err != nil {
-		return nil, NewAPIError(toolName, 0, err)
-	}
-
-	req.Header.Set("Content-Type", "application/json")
-	if c.bearerToken != "" {
-		req.Header.Set("Authorization", "Bearer "+c.bearerToken)
-	}
-
-	resp, err := c.httpClient.Do(req)
-	if err != nil {
-		if ctx.Err() != nil {
-			return nil, NewAPIError(toolName, 0, ErrTimeout)
-		}
-		return nil, NewAPIError(toolName, 0, ErrServerUnavailable)
-	}
-	defer resp.Body.Close()
-
-	// Read response body (limit to 10MB to prevent DoS/OOM)
-	respBody, err := io.ReadAll(io.LimitReader(resp.Body, 10<<20))
-	if err != nil {
-		return nil, responseBodyReadError(ctx, toolName, err)
-	}
-
-	// Check HTTP status
-	if resp.StatusCode == http.StatusUnauthorized {
-		return nil, NewAPIError(toolName, resp.StatusCode, ErrUnauthorized)
-	}
-	if resp.StatusCode != http.StatusOK {
-		return nil, NewAPIError(toolName, resp.StatusCode, fmt.Errorf("unexpected status: %s", resp.Status))
-	}
-
-	// Parse JSON-RPC response
-	var rpcResp JSONRPCResponse
-	if err := json.Unmarshal(respBody, &rpcResp); err != nil {
-		return nil, NewAPIError(toolName, 0, err)
-	}
-
-	// Check for JSON-RPC error
-	if rpcResp.Error != nil {
-		return nil, NewAPIError(toolName, 0, mapJSONRPCError(rpcResp.Error))
+		return nil, err
 	}
 
 	// Extract actual content from MCP envelope
@@ -746,6 +699,212 @@ func (c *Client) callTool(ctx context.Context, toolName string, args map[string]
 	}
 
 	return content, nil
+}
+
+// mcpSessionProtocolVersion is the MCP revision ntm offers when a server
+// demands a session handshake. 2025-03-26 is the first revision with
+// Streamable HTTP sessions and does not yet require the MCP-Protocol-Version
+// header on every later request.
+const mcpSessionProtocolVersion = "2025-03-26"
+
+// mcpSessionHeader carries the server-issued MCP session id.
+const mcpSessionHeader = "Mcp-Session-Id"
+
+// maxErrorDetailLen bounds how much of a non-200 response body is quoted
+// back in an error message.
+const maxErrorDetailLen = 200
+
+// postJSONRPC sends one JSON-RPC request to the MCP endpoint and returns the
+// decoded response, mapping transport, HTTP, and JSON-RPC failures to
+// APIErrors labeled with operation.
+//
+// ntm normally skips the MCP initialize handshake: the Rust Agent Mail server
+// and the Python server's /api endpoint answer one-shot requests. The Python
+// server's /mcp endpoint (ntm's default path) is stateful, though, and answers
+// a sessionless request with HTTP 400 "Missing session ID" — which is how
+// every spawn against it failed Agent Mail registration (GH #333). When a
+// server rejects the request for want of a session, ntm performs the
+// handshake once, keeps the issued session id for later calls, and retries.
+func (c *Client) postJSONRPC(ctx context.Context, operation, method string, params interface{}) (*JSONRPCResponse, error) {
+	body, err := json.Marshal(JSONRPCRequest{
+		JSONRPC: "2.0",
+		ID:      c.requestID.Add(1),
+		Method:  method,
+		Params:  params,
+	})
+	if err != nil {
+		return nil, NewAPIError(operation, 0, err)
+	}
+
+	for attempt := 0; ; attempt++ {
+		sessionID := c.mcpSessionID()
+		resp, respBody, err := c.postMCP(ctx, operation, body, sessionID)
+		if err != nil {
+			return nil, err
+		}
+		if attempt == 0 && mcpSessionRejected(resp.StatusCode, respBody) {
+			if err := c.establishMCPSession(ctx, operation, sessionID); err != nil {
+				// Keep the server's own rejection as the primary error: the
+				// handshake was only an inference from its wording.
+				_, rejection := decodeJSONRPCResponse(operation, resp, respBody)
+				return nil, fmt.Errorf("%w (MCP session handshake failed: %v)", rejection, err)
+			}
+			continue
+		}
+		return decodeJSONRPCResponse(operation, resp, respBody)
+	}
+}
+
+// postMCP performs one POST of an already-encoded JSON-RPC body to the MCP
+// endpoint and returns the response with its (bounded) body read.
+func (c *Client) postMCP(ctx context.Context, operation string, body []byte, sessionID string) (*http.Response, []byte, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL, bytes.NewReader(body))
+	if err != nil {
+		return nil, nil, NewAPIError(operation, 0, err)
+	}
+
+	req.Header.Set("Content-Type", "application/json")
+	if c.bearerToken != "" {
+		req.Header.Set("Authorization", "Bearer "+c.bearerToken)
+	}
+	if sessionID != "" {
+		req.Header.Set(mcpSessionHeader, sessionID)
+	}
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		if ctx.Err() != nil {
+			return nil, nil, NewAPIError(operation, 0, ErrTimeout)
+		}
+		return nil, nil, NewAPIError(operation, 0, ErrServerUnavailable)
+	}
+	defer resp.Body.Close()
+
+	// Read response body (limit to 10MB to prevent DoS/OOM)
+	respBody, err := io.ReadAll(io.LimitReader(resp.Body, 10<<20))
+	if err != nil {
+		return nil, nil, responseBodyReadError(ctx, operation, err)
+	}
+	return resp, respBody, nil
+}
+
+// decodeJSONRPCResponse maps an MCP endpoint response to its JSON-RPC
+// envelope, turning HTTP and JSON-RPC failures into APIErrors.
+func decodeJSONRPCResponse(operation string, resp *http.Response, respBody []byte) (*JSONRPCResponse, error) {
+	if resp.StatusCode == http.StatusUnauthorized {
+		return nil, NewAPIError(operation, resp.StatusCode, ErrUnauthorized)
+	}
+	if resp.StatusCode != http.StatusOK {
+		statusErr := fmt.Errorf("unexpected status: %s", resp.Status)
+		if detail := httpErrorDetail(respBody); detail != "" {
+			statusErr = fmt.Errorf("unexpected status: %s: %s", resp.Status, detail)
+		}
+		return nil, NewAPIError(operation, resp.StatusCode, statusErr)
+	}
+
+	var rpcResp JSONRPCResponse
+	if err := json.Unmarshal(respBody, &rpcResp); err != nil {
+		return nil, NewAPIError(operation, 0, err)
+	}
+	if rpcResp.Error != nil {
+		return nil, NewAPIError(operation, 0, mapJSONRPCError(rpcResp.Error))
+	}
+	return &rpcResp, nil
+}
+
+// httpErrorDetail extracts the server's own explanation from a non-200 body:
+// the JSON-RPC error message when the body is a JSON-RPC envelope, otherwise
+// the trimmed text. A bare "unexpected status: 400 Bad Request" gave an
+// operator nothing to act on (GH #333).
+func httpErrorDetail(respBody []byte) string {
+	var envelope JSONRPCResponse
+	detail := ""
+	if err := json.Unmarshal(respBody, &envelope); err == nil && envelope.Error != nil {
+		detail = envelope.Error.Message
+	} else {
+		detail = string(respBody)
+	}
+	detail = strings.Join(strings.Fields(detail), " ")
+	if runes := []rune(detail); len(runes) > maxErrorDetailLen {
+		detail = string(runes[:maxErrorDetailLen]) + "…"
+	}
+	return detail
+}
+
+// mcpSessionRejected reports whether a response rejects the request because
+// it carried no (or no longer a valid) MCP session: HTTP 400 or 404 whose body
+// names the session. Stateful Streamable HTTP servers answer a sessionless
+// request with 400 ("Missing session ID") and an unknown or expired one with
+// 400 or 404, depending on the implementation.
+func mcpSessionRejected(status int, respBody []byte) bool {
+	if status != http.StatusBadRequest && status != http.StatusNotFound {
+		return false
+	}
+	return strings.Contains(strings.ToLower(string(respBody)), "session")
+}
+
+// mcpSessionID returns the MCP session id this client holds, if any.
+func (c *Client) mcpSessionID() string {
+	c.mcpSessionMu.Lock()
+	defer c.mcpSessionMu.Unlock()
+	return c.mcpSession
+}
+
+// establishMCPSession performs the MCP initialize handshake and stores the
+// session id the server issues. stale is the session id the rejected request
+// carried: when another goroutine has already replaced it, that new session
+// is reused instead of opening a second one.
+func (c *Client) establishMCPSession(ctx context.Context, operation, stale string) error {
+	c.mcpSessionMu.Lock()
+	defer c.mcpSessionMu.Unlock()
+	if c.mcpSession != stale {
+		return nil
+	}
+
+	initBody, err := json.Marshal(JSONRPCRequest{
+		JSONRPC: "2.0",
+		ID:      c.requestID.Add(1),
+		Method:  "initialize",
+		Params: map[string]interface{}{
+			"protocolVersion": mcpSessionProtocolVersion,
+			"capabilities":    map[string]interface{}{},
+			"clientInfo":      map[string]string{"name": "ntm", "version": "1"},
+		},
+	})
+	if err != nil {
+		return NewAPIError(operation, 0, err)
+	}
+	resp, respBody, err := c.postMCP(ctx, operation, initBody, "")
+	if err != nil {
+		return err
+	}
+	if _, err := decodeJSONRPCResponse(operation, resp, respBody); err != nil {
+		return fmt.Errorf("mcp session initialize: %w", err)
+	}
+	sessionID := strings.TrimSpace(resp.Header.Get(mcpSessionHeader))
+	if sessionID == "" {
+		return NewAPIError(operation, 0, errors.New("server requires an MCP session but its initialize response carried no Mcp-Session-Id"))
+	}
+
+	// The initialized notification completes the handshake. It has no id, so
+	// the server acknowledges it without a JSON-RPC body (202 Accepted).
+	notifyBody, err := json.Marshal(map[string]string{
+		"jsonrpc": "2.0",
+		"method":  "notifications/initialized",
+	})
+	if err != nil {
+		return NewAPIError(operation, 0, err)
+	}
+	resp, _, err = c.postMCP(ctx, operation, notifyBody, sessionID)
+	if err != nil {
+		return err
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return NewAPIError(operation, resp.StatusCode, fmt.Errorf("mcp session initialized notification: unexpected status: %s", resp.Status))
+	}
+
+	c.mcpSession = sessionID
+	return nil
 }
 
 // callToolWithTimeout calls a tool with a specific timeout.
@@ -787,66 +946,12 @@ func (c *Client) callToolWithBusyRetry(ctx context.Context, toolName string, arg
 
 // ReadResource reads a resource from the Agent Mail server.
 func (c *Client) ReadResource(ctx context.Context, uri string) (json.RawMessage, error) {
-	reqID := c.requestID.Add(1)
-
-	rpcReq := JSONRPCRequest{
-		JSONRPC: "2.0",
-		ID:      reqID,
-		Method:  "resources/read",
-		Params: map[string]string{
-			"uri": uri,
-		},
-	}
-
-	body, err := json.Marshal(rpcReq)
+	rpcResp, err := c.postJSONRPC(ctx, "resources/read", "resources/read", map[string]string{
+		"uri": uri,
+	})
 	if err != nil {
-		return nil, NewAPIError("resources/read", 0, err)
+		return nil, err
 	}
-
-	req, err := http.NewRequestWithContext(ctx, "POST", c.baseURL, bytes.NewReader(body))
-	if err != nil {
-		return nil, NewAPIError("resources/read", 0, err)
-	}
-
-	req.Header.Set("Content-Type", "application/json")
-	if c.bearerToken != "" {
-		req.Header.Set("Authorization", "Bearer "+c.bearerToken)
-	}
-
-	resp, err := c.httpClient.Do(req)
-	if err != nil {
-		if ctx.Err() != nil {
-			return nil, NewAPIError("resources/read", 0, ErrTimeout)
-		}
-		return nil, NewAPIError("resources/read", 0, ErrServerUnavailable)
-	}
-	defer resp.Body.Close()
-
-	// Read response body (limit to 10MB to prevent DoS/OOM)
-	respBody, err := io.ReadAll(io.LimitReader(resp.Body, 10<<20))
-	if err != nil {
-		return nil, responseBodyReadError(ctx, "resources/read", err)
-	}
-
-	// Check HTTP status
-	if resp.StatusCode == http.StatusUnauthorized {
-		return nil, NewAPIError("resources/read", resp.StatusCode, ErrUnauthorized)
-	}
-	if resp.StatusCode != http.StatusOK {
-		return nil, NewAPIError("resources/read", resp.StatusCode, fmt.Errorf("unexpected status: %s", resp.Status))
-	}
-
-	// Parse JSON-RPC response
-	var rpcResp JSONRPCResponse
-	if err := json.Unmarshal(respBody, &rpcResp); err != nil {
-		return nil, NewAPIError("resources/read", 0, err)
-	}
-
-	// Check for JSON-RPC error
-	if rpcResp.Error != nil {
-		return nil, NewAPIError("resources/read", 0, mapJSONRPCError(rpcResp.Error))
-	}
-
 	return rpcResp.Result, nil
 }
 

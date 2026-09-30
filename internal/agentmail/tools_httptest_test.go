@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -1617,5 +1618,74 @@ func TestRegistrationOmitsNonBarePaneBinding(t *testing.T) {
 			t.Errorf("paneID %q: pane_id argument = %v, want absent", paneID, got)
 		}
 		mu.Unlock()
+	}
+}
+
+// GH #333: the Python Agent Mail server has no pane-binding contract and
+// rejects the whole registration over pane_id ("Unexpected keyword
+// argument"). Registration retries once without the optional binding.
+func TestCreateAgentIdentityRetriesWithoutUnsupportedPaneBinding(t *testing.T) {
+	t.Parallel()
+
+	var mu sync.Mutex
+	var calls []map[string]interface{}
+	server := httptest.NewServer(mockMCPHandler(t, map[string]func(args map[string]interface{}) (interface{}, *JSONRPCError){
+		"create_agent_identity": func(args map[string]interface{}) (interface{}, *JSONRPCError) {
+			mu.Lock()
+			calls = append(calls, args)
+			mu.Unlock()
+			if _, ok := args["pane_id"]; ok {
+				return MCPToolResult{IsError: true, Content: []MCPContentBlock{{Type: "text", Text: "1 validation error for call[create_agent_identity]\npane_id\n  Unexpected keyword argument [type=unexpected_keyword_argument, input_value='%1', input_type=str]"}}}, nil
+			}
+			return Agent{Name: "SwiftBarn", Program: "opencode", Model: "opencode/big-pickle"}, nil
+		},
+	}))
+	defer server.Close()
+
+	c := NewClient(WithBaseURL(server.URL + "/"))
+	agent, err := c.CreateAgentIdentity(context.Background(), RegisterAgentOptions{
+		ProjectKey: "/data/projects/proj", Program: "opencode", Model: "opencode/big-pickle", PaneID: "%1",
+	})
+	if err != nil {
+		t.Fatalf("CreateAgentIdentity: %v", err)
+	}
+	if agent.Name != "SwiftBarn" {
+		t.Fatalf("agent = %+v", agent)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if len(calls) != 2 {
+		t.Fatalf("registration calls = %d, want the bound call and one retry", len(calls))
+	}
+	if calls[0]["pane_id"] != "%1" {
+		t.Fatalf("first call did not carry the pane binding: %+v", calls[0])
+	}
+	if _, ok := calls[1]["pane_id"]; ok {
+		t.Fatalf("retry still carried pane_id: %+v", calls[1])
+	}
+}
+
+// Other rejections are not retried: only an unsupported pane_id argument is.
+func TestRegisterAgentDoesNotRetryUnrelatedRejection(t *testing.T) {
+	t.Parallel()
+
+	var calls atomic.Int32
+	server := httptest.NewServer(mockMCPHandler(t, map[string]func(args map[string]interface{}) (interface{}, *JSONRPCError){
+		"register_agent": func(args map[string]interface{}) (interface{}, *JSONRPCError) {
+			calls.Add(1)
+			return MCPToolResult{IsError: true, Content: []MCPContentBlock{{Type: "text", Text: "program: unexpected keyword argument"}}}, nil
+		},
+	}))
+	defer server.Close()
+
+	c := NewClient(WithBaseURL(server.URL + "/"))
+	_, err := c.RegisterAgent(context.Background(), RegisterAgentOptions{
+		ProjectKey: "/data/projects/proj", Program: "opencode", Model: "m", PaneID: "%1",
+	})
+	if err == nil {
+		t.Fatal("RegisterAgent succeeded, want the rejection")
+	}
+	if calls.Load() != 1 {
+		t.Fatalf("register_agent calls = %d, want 1", calls.Load())
 	}
 }

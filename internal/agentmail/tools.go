@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -83,6 +84,37 @@ func attachPaneBinding(args map[string]interface{}, paneID string) {
 	}
 }
 
+// callRegistrationTool runs an identity registration tool call. Servers
+// without the pane-binding contract — the Python Agent Mail server, whose
+// strict argument validation answers "pane_id: Unexpected keyword argument" —
+// reject the whole registration over the optional pane_id, leaving every
+// spawned pane without an identity (GH #333). Registration works without a
+// pane binding, so such a rejection is retried once without it.
+func (c *Client) callRegistrationTool(ctx context.Context, toolName string, args map[string]interface{}) (json.RawMessage, error) {
+	result, err := c.callToolWithBusyRetry(ctx, toolName, args, 3*time.Second, busyMaxRetries())
+	if err == nil || !paneBindingUnsupported(err) {
+		return result, err
+	}
+	if _, bound := args["pane_id"]; !bound {
+		return result, err
+	}
+	delete(args, "pane_id")
+	return c.callToolWithBusyRetry(ctx, toolName, args, 3*time.Second, busyMaxRetries())
+}
+
+// paneBindingUnsupported reports whether a registration failed because the
+// server does not accept the pane_id argument at all.
+func paneBindingUnsupported(err error) bool {
+	var rejection *ToolRejectionError
+	if !errors.As(err, &rejection) {
+		return false
+	}
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "pane_id") &&
+		(strings.Contains(msg, "unexpected keyword") || strings.Contains(msg, "unexpected argument") ||
+			strings.Contains(msg, "unknown argument") || strings.Contains(msg, "unknown field"))
+}
+
 // RegisterAgent registers an agent in a project.
 func (c *Client) RegisterAgent(ctx context.Context, opts RegisterAgentOptions) (*Agent, error) {
 	args := map[string]interface{}{
@@ -104,7 +136,7 @@ func (c *Client) RegisterAgent(ctx context.Context, opts RegisterAgentOptions) (
 	// server returns a fresh token in the response.
 	c.attachTokenFromField(args, "registration_token", "name")
 
-	result, err := c.callToolWithBusyRetry(ctx, "register_agent", args, 3*time.Second, busyMaxRetries())
+	result, err := c.callRegistrationTool(ctx, "register_agent", args)
 	if err != nil {
 		return nil, err
 	}
@@ -133,7 +165,7 @@ func (c *Client) CreateAgentIdentity(ctx context.Context, opts RegisterAgentOpti
 	}
 	attachPaneBinding(args, opts.PaneID)
 
-	result, err := c.callToolWithBusyRetry(ctx, "create_agent_identity", args, 3*time.Second, busyMaxRetries())
+	result, err := c.callRegistrationTool(ctx, "create_agent_identity", args)
 	if err != nil {
 		return nil, err
 	}
