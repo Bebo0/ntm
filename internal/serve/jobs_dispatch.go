@@ -314,6 +314,7 @@ type jobSwarmSpawnParams struct {
 	GrokReasoningEffort string   `json:"grok_reasoning_effort,omitempty"`
 	OmpModel            string   `json:"omp_model,omitempty"`
 	OmpReasoningEffort  string   `json:"omp_reasoning_effort,omitempty"`
+	OcModel             string   `json:"oc_model,omitempty"`
 	AssignWork          bool     `json:"assign_work,omitempty"`
 	AssignStrategy      string   `json:"assign_strategy,omitempty"`
 	CustomNames         []string `json:"custom_names,omitempty"`
@@ -380,6 +381,7 @@ func (s *Server) jobSwarmSpawn(ctx context.Context, params map[string]interface{
 		AgyCount:            req.AgyCount,
 		GrokCount:           req.GrokCount,
 		OmpCount:            req.OmpCount,
+		OcCount:             req.OcCount,
 		Preset:              req.Preset,
 		WaitReady:           req.WaitReady,
 		WorkingDir:          req.WorkingDir,
@@ -396,6 +398,7 @@ func (s *Server) jobSwarmSpawn(ctx context.Context, params map[string]interface{
 		GrokReasoningEffort: req.GrokReasoningEffort,
 		OmpModel:            req.OmpModel,
 		OmpReasoningEffort:  req.OmpReasoningEffort,
+		OcModel:             req.OcModel,
 		AssignWork:          req.AssignWork,
 		AssignStrategy:      req.AssignStrategy,
 		CustomNames:         req.CustomNames,

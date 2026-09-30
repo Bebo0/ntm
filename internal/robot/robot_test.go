@@ -3812,6 +3812,29 @@ func TestGetUsageLevel(t *testing.T) {
 	}
 }
 
+// GH #333: an `--oc=1:MODEL` pane reported model "unknown" in
+// --robot-context because only title substrings were consulted. The recorded
+// launch model now wins; panes without one keep the title heuristic.
+func TestContextPaneModelPrefersRecordedLaunchModel(t *testing.T) {
+	orig := paneLaunchModel
+	t.Cleanup(func() { paneLaunchModel = orig })
+	launched := map[string]string{"%1": "opencode/space-bunny-free"}
+	paneLaunchModel = func(paneID string) string { return launched[paneID] }
+
+	oc := tmux.Pane{ID: "%1", Title: "flywheel__oc_1_opencode/space-bunny-free"}
+	if got := contextPaneModel(oc, "oc"); got != "opencode/space-bunny-free" {
+		t.Fatalf("oc pane model = %q, want the launch model", got)
+	}
+	legacy := tmux.Pane{ID: "%2", Title: "flywheel__cc_1 opus"}
+	if got := contextPaneModel(legacy, "claude"); got != "opus" {
+		t.Fatalf("pane without launch record model = %q, want title heuristic opus", got)
+	}
+	unrecorded := tmux.Pane{ID: "%3", Title: "flywheel__oc_2"}
+	if got := contextPaneModel(unrecorded, "oc"); got != "unknown" {
+		t.Fatalf("oc pane delegating its model = %q, want unknown", got)
+	}
+}
+
 func TestDetectModel(t *testing.T) {
 	tests := []struct {
 		name      string

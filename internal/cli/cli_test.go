@@ -358,6 +358,8 @@ func resetFlags() {
 	robotSpawnGmi = ""
 	robotSpawnAgy = ""
 	robotSpawnGrok = ""
+	robotSpawnOmp = ""
+	robotSpawnOc = ""
 	robotSpawnPreset = ""
 	robotSpawnNoUser = false
 	robotSpawnWait = false
@@ -7793,5 +7795,21 @@ func TestShouldInitializeRobotPersistenceForActivity(t *testing.T) {
 	}
 	if !robotPersistenceRefreshesProjection(&cobra.Command{Use: "status"}) {
 		t.Fatal("other commands must keep the projection refresh")
+	}
+}
+
+// GH #333: --spawn-oc reaches the robot spawn engine with its count and model.
+func TestRobotSpawnOptionsFromFlagsCarriesOpencode(t *testing.T) {
+	resetFlags()
+	t.Cleanup(resetFlags)
+
+	robotSpawn = "oc-spawn"
+	robotSpawnOc = "2:opencode/space-bunny-free"
+	opts, err := robotSpawnOptionsFromFlags(nil, 30*time.Second, nil, true)
+	if err != nil {
+		t.Fatalf("robotSpawnOptionsFromFlags: %v", err)
+	}
+	if opts.OcCount != 2 || opts.OcModel != "opencode/space-bunny-free" {
+		t.Fatalf("oc options = count:%d model:%q, want 2 opencode/space-bunny-free", opts.OcCount, opts.OcModel)
 	}
 }

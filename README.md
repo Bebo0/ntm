@@ -244,6 +244,64 @@ across its nerd, unicode and ascii symbol presets):
   booted when it is idle, or when it received a spawn prompt (recovery context,
   CASS context, or your prompt) and is working on it.
 
+#### OpenCode (`oc`)
+
+[OpenCode](https://opencode.ai) panes are named `session__oc_N`. The model is
+OpenCode's `provider/model` form; with no model, OpenCode uses its own default.
+
+```bash
+ntm spawn swarm --oc=2                          # OpenCode picks its default model
+ntm spawn swarm --oc=2:opencode/big-pickle      # pins the model
+ntm add swarm --oc=1
+ntm --robot-spawn=swarm --spawn-oc=2:opencode/big-pickle --spawn-wait
+ntm send swarm --oc "Run the test suite and report failures"
+```
+
+The launch command is `opencode --model <model>`. There is no effort knob: the
+TUI has no `--variant` flag (only `opencode run` does), so an effort in the
+spec is ignored. Override the command with `[agents] oc = "..."` (a template;
+keep `{{if .Model}} --model {{shellQuote .Model}}{{end}}` if you want model
+specs honoured), and set `[models] default_opencode` or `[models.opencode]`
+aliases. Prompts are delivered with bracketed paste and verified against the
+composer: a prompt the TUI drops fails the send instead of reporting success.
+
+**Unattended panes and permissions.** OpenCode asks before actions its
+permission config marks `ask` (by default this includes paths outside the
+project, `external_directory`). With nobody at the pane, the request is
+auto-rejected and the turn stops. Two ways to pre-approve:
+
+- Launch with `--auto` (OpenCode 1.18.0+), which approves every request that
+  is not explicitly denied, for that pane only:
+
+  ```toml
+  [agents]
+  oc = "opencode --auto{{if .Model}} --model {{shellQuote .Model}}{{end}}"
+  ```
+
+  `deny` rules still apply, so you can pair `--auto` with deny rules for
+  anything a pane must never do.
+- Set OpenCode's own `"permission"` config. It is global for every OpenCode
+  session that reads it, not per pane: `~/.config/opencode/opencode.json`, a
+  project `opencode.json`, or the `OPENCODE_CONFIG` /
+  `OPENCODE_CONFIG_CONTENT` environment variables. Each key takes `allow`,
+  `ask` or `deny`, and `"permission": "allow"` sets them all at once:
+
+  ```json
+  {
+    "$schema": "https://opencode.ai/config.json",
+    "permission": {
+      "edit": "allow",
+      "bash": "allow",
+      "external_directory": { "~/shared/fixtures/**": "allow" }
+    }
+  }
+  ```
+
+  Path patterns support `*`, `?` and a leading `~`. Use `**` to cover a
+  directory tree: OpenCode may check the parent directory's glob rather than
+  the exact path it touches, so a pattern for one leaf directory can still be
+  rejected.
+
 Use labels when you want multiple coordinated swarms on the same project while
 keeping a shared project directory:
 

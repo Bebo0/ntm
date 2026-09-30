@@ -3853,6 +3853,7 @@ var (
 	robotSpawnAgy        string // Antigravity agents: count (model pinned)
 	robotSpawnGrok       string // Grok Build agents: count[:model[:effort]]
 	robotSpawnOmp        string // Oh My Pi (omp) agents: count[:model[:effort]]
+	robotSpawnOc         string // OpenCode (oc) agents: count[:model]
 	robotSpawnPreset     string // recipe/preset name
 	robotSpawnNoUser     bool   // don't create user pane
 	robotSpawnWait       bool   // wait for agents to be ready
@@ -4533,6 +4534,7 @@ func init() {
 	rootCmd.Flags().StringVar(&robotSpawnAgy, "spawn-agy", "", "Antigravity CLI agents to spawn: count (model is pinned to Gemini 3.8 Flash (High)). Use with --robot-spawn. Example: --spawn-agy=1")
 	rootCmd.Flags().StringVar(&robotSpawnGrok, "spawn-grok", "", "Grok Build agents to spawn: count[:model[:effort]] (effort also as model@effort). Use with --robot-spawn. Example: --spawn-grok=1")
 	rootCmd.Flags().StringVar(&robotSpawnOmp, "spawn-omp", "", "Oh My Pi (omp) agents to spawn: count[:model[:effort]] (effort maps to omp --thinking; no model = omp's own default). Use with --robot-spawn. Example: --spawn-omp=8 or --spawn-omp=2:opus:high")
+	rootCmd.Flags().StringVar(&robotSpawnOc, "spawn-oc", "", "OpenCode (oc) agents to spawn: count[:model] (model is OpenCode's provider/model; no model = OpenCode's own default). Use with --robot-spawn. Example: --spawn-oc=2 or --spawn-oc=1:opencode/big-pickle")
 	rootCmd.Flags().StringVar(&robotSpawnPreset, "spawn-preset", "", "Use recipe preset instead of counts. See --robot-recipes. Example: --spawn-preset=standard")
 	rootCmd.Flags().BoolVar(&robotSpawnNoUser, "spawn-no-user", false, "Skip user pane creation. Optional with --robot-spawn. For headless/automation")
 	rootCmd.Flags().BoolVar(&robotSpawnWait, "spawn-wait", false, "Wait for agents to show ready state before returning. Recommended for automation")
@@ -5467,6 +5469,7 @@ func parseRobotSpawnAgentSpecs() (map[AgentType]AgentSpec, error) {
 		{name: "--spawn-agy", value: robotSpawnAgy, agentType: AgentTypeAntigravity},
 		{name: "--spawn-grok", value: robotSpawnGrok, agentType: AgentTypeGrok},
 		{name: "--spawn-omp", value: robotSpawnOmp, agentType: AgentTypeOmp},
+		{name: "--spawn-oc", value: robotSpawnOc, agentType: AgentTypeOpencode},
 	}
 	specs := make(map[AgentType]AgentSpec, len(flags))
 	for _, flag := range flags {
@@ -5495,12 +5498,13 @@ func robotSpawnOptionsFromFlags(cmd *cobra.Command, readyTimeout time.Duration, 
 		AgyCount:      specs[AgentTypeAntigravity].Count,
 		GrokCount:     specs[AgentTypeGrok].Count,
 		OmpCount:      specs[AgentTypeOmp].Count,
+		OcCount:       specs[AgentTypeOpencode].Count,
 		// Model/effort overrides from the count[:model[:effort]] specs. agy is
 		// intentionally absent: its model is hard-pinned by config, and parsing
 		// rejects any --spawn-agy model override before options are built.
 		// Efforts flow only for the types whose
 		// launch command consumes them (cc/cod/grok/omp), mirroring the CLI spawn
-		// path where other types drop the hint at template-render time.
+		// path where other types (gmi, oc) drop the hint at template-render time.
 		CCModel:             specs[AgentTypeClaude].Model,
 		CCReasoningEffort:   specs[AgentTypeClaude].ReasoningEffort,
 		CodModel:            specs[AgentTypeCodex].Model,
@@ -5510,6 +5514,7 @@ func robotSpawnOptionsFromFlags(cmd *cobra.Command, readyTimeout time.Duration, 
 		GrokReasoningEffort: specs[AgentTypeGrok].ReasoningEffort,
 		OmpModel:            specs[AgentTypeOmp].Model,
 		OmpReasoningEffort:  specs[AgentTypeOmp].ReasoningEffort,
+		OcModel:             specs[AgentTypeOpencode].Model,
 		Preset:              robotSpawnPreset,
 		NoUserPane:          robotSpawnNoUser,
 		WorkingDir:          robotSpawnDir,

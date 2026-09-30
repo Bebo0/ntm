@@ -3813,6 +3813,34 @@ func ResolveAgentType(t string) string {
 	}
 }
 
+// paneLaunchModel returns the model ntm launched a pane with, read from the
+// pane's recorded launch specification, or "" when the pane has no record or
+// was launched without an explicit/configured model. It is authoritative
+// where detectModel only guesses from title substrings: an `--oc=1:MODEL`
+// pane's title matched none of detectModel's patterns, so --robot-context
+// reported model "unknown" for a model the operator had named (GH #333).
+var paneLaunchModel = func(paneID string) string {
+	if paneID == "" {
+		return ""
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	spec, err := tmux.ReadPaneLaunchSpecContext(ctx, paneID)
+	if err != nil || spec == nil {
+		return ""
+	}
+	return strings.TrimSpace(spec.Model)
+}
+
+// contextPaneModel is the model --robot-context reports for a pane: the
+// recorded launch model when there is one, else detectModel's title guess.
+func contextPaneModel(pane tmux.Pane, agentType string) string {
+	if model := paneLaunchModel(pane.ID); model != "" {
+		return model
+	}
+	return detectModel(agentType, pane.Title)
+}
+
 // detectModel attempts to detect the model from agent type and pane title.
 func detectModel(agentType, title string) string {
 	titleLower := strings.ToLower(title)
@@ -10660,7 +10688,7 @@ func GetContext(session string, lines int) (*ContextOutput, error) {
 			continue // Skip non-agent panes
 		}
 
-		model := detectModel(agentType, pane.Title)
+		model := contextPaneModel(pane, agentType)
 
 		scrollback, _ := tmux.CapturePaneOutput(pane.ID, lines)
 		cleanText := stripANSI(scrollback)

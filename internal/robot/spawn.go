@@ -65,6 +65,7 @@ type SpawnOptions struct {
 	AgyCount      int    // Antigravity agents
 	GrokCount     int    // Grok Build agents
 	OmpCount      int    // Oh My Pi (omp) agents
+	OcCount       int    // OpenCode (oc) agents
 	// Per-type model/effort overrides parsed from the CLI's
 	// `count[:model[:effort]]` spawn flag grammar (bd-rr8gn). Empty means the
 	// configured default. Efforts exist only for the agent types whose launch
@@ -80,6 +81,7 @@ type SpawnOptions struct {
 	GrokReasoningEffort string        // Grok Build reasoning-effort override
 	OmpModel            string        // Oh My Pi model override (omp fuzzy-matches it); empty = omp's own default
 	OmpReasoningEffort  string        // Oh My Pi --thinking level override
+	OcModel             string        // OpenCode provider/model override; empty = OpenCode's own default (no effort knob: the TUI has no --variant)
 	Preset              string        // Recipe/preset name
 	NoUserPane          bool          // Don't create user pane
 	WorkingDir          string        // Override working directory
@@ -228,6 +230,7 @@ func validateSpawnRequest(opts SpawnOptions) (string, error) {
 		{flag: "--spawn-agy", value: opts.AgyCount},
 		{flag: "--spawn-grok", value: opts.GrokCount},
 		{flag: "--spawn-omp", value: opts.OmpCount},
+		{flag: "--spawn-oc", value: opts.OcCount},
 	}
 	for _, count := range counts {
 		if count.value < 0 {
@@ -235,7 +238,7 @@ func validateSpawnRequest(opts SpawnOptions) (string, error) {
 		}
 	}
 	if opts.totalAgentCount() <= 0 {
-		return "", errors.New("no agents specified (use cc, cod, gmi, agy, grok, or omp counts)")
+		return "", errors.New("no agents specified (use cc, cod, gmi, agy, grok, omp, or oc counts)")
 	}
 	if opts.GrokCount > 0 && opts.WaitReady {
 		return "", errGrokSpawnWaitUnavailable
@@ -267,7 +270,7 @@ func spawnAgentPaneRange(opts SpawnOptions) (start, count int) {
 // totalAgentCount is the number of agent panes a robot spawn requests across
 // every supported type.
 func (opts SpawnOptions) totalAgentCount() int {
-	return opts.CCCount + opts.CodCount + opts.GmiCount + opts.AgyCount + opts.GrokCount + opts.OmpCount
+	return opts.CCCount + opts.CodCount + opts.GmiCount + opts.AgyCount + opts.GrokCount + opts.OmpCount + opts.OcCount
 }
 
 // validateSpawnPaneBaselines preflights every agent pane of the final
@@ -831,6 +834,17 @@ func GetSpawn(ctx context.Context, opts SpawnOptions, cfg *config.Config) (*Spaw
 			paneIdx++
 		}
 
+		for i := 0; i < opts.OcCount; i++ {
+			ocPane := fmt.Sprintf("0.%d", paneIdx)
+			output.WouldCreate = append(output.WouldCreate, SpawnedAgent{
+				Pane:  ocPane,
+				Name:  dryRunNameMap.AssignNew(string(tmux.AgentOpencode), ocPane),
+				Type:  string(tmux.AgentOpencode),
+				Title: fmt.Sprintf("%s__oc_%d", opts.Session, i+1),
+			})
+			paneIdx++
+		}
+
 		output.Layout = "tiled"
 		return output, nil
 	}
@@ -1016,6 +1030,7 @@ func GetSpawn(ctx context.Context, opts SpawnOptions, cfg *config.Config) (*Spaw
 		{agentType: "antigravity", count: opts.AgyCount},
 		{agentType: "grok", count: opts.GrokCount},
 		{agentType: "omp", count: opts.OmpCount},
+		{agentType: string(tmux.AgentOpencode), count: opts.OcCount},
 	} {
 		for i := 0; i < spec.count; i++ {
 			launchRequests = append(launchRequests, launchRequest{agentType: spec.agentType, number: i + 1})
@@ -1028,13 +1043,20 @@ func GetSpawn(ctx context.Context, opts SpawnOptions, cfg *config.Config) (*Spaw
 	// live pane IDs, so the manifest must carry "%N", never the physical
 	// address (W1 gate finding on bd-ws1-truth-safety-l5ddi.8).
 	monitorPaneIDs := make(map[string]string, len(launchRequests))
+	launch := deps.LaunchAgent
+	if opts.LifecycleDeps == nil || opts.LifecycleDeps.LaunchAgent == nil {
+		launchModels := spawnLaunchModels(cfg, opts)
+		launch = func(ctx context.Context, pane tmux.Pane, session, agentType string, num int, dir, command string) (SpawnedAgent, error) {
+			return launchAgentWithModel(ctx, pane, session, agentType, num, dir, command, launchModels[agentType])
+		}
+	}
 	for i, request := range launchRequests {
 		if err := ctx.Err(); err != nil {
 			setSpawnCancellation(output, err)
 			return output, nil
 		}
 		pane := panes[startIdx+i]
-		agent, launchErr := deps.LaunchAgent(
+		agent, launchErr := launch(
 			ctx, pane, opts.Session, request.agentType, request.number, dir, agentCommands[request.agentType],
 		)
 		if agent.Pane == "" {
@@ -1249,8 +1271,16 @@ func PrintSpawn(ctx context.Context, opts SpawnOptions, cfg *config.Config) erro
 	return encodeTerminalRobotOutput(output, output.RobotResponse, "robot spawn failed")
 }
 
-// launchAgent launches a single agent and returns its info.
+// launchAgent launches a single agent and returns its info. Its launch
+// specification records no model; GetSpawn launches through
+// launchAgentWithModel so production panes record theirs.
 func launchAgent(ctx context.Context, pane tmux.Pane, session, agentType string, num int, dir, command string) (SpawnedAgent, error) {
+	return launchAgentWithModel(ctx, pane, session, agentType, num, dir, command, spawnLaunchModel{})
+}
+
+// launchAgentWithModel launches a single agent, recording model in the pane's
+// launch specification.
+func launchAgentWithModel(ctx context.Context, pane tmux.Pane, session, agentType string, num int, dir, command string, model spawnLaunchModel) (SpawnedAgent, error) {
 	startTime := time.Now()
 
 	title := fmt.Sprintf("%s__%s_%d", session, agentTypeShort(agentType), num)
@@ -1308,9 +1338,12 @@ func launchAgent(ctx context.Context, pane tmux.Pane, session, agentType string,
 		return agent, fmt.Errorf("launch canceled: %w", err)
 	}
 	launchSpec := tmux.AgentLaunchSpec{
-		Version:   tmux.AgentLaunchSpecVersion,
-		AgentType: tmux.AgentType(agentType).Canonical(),
-		Command:   safeCommand,
+		Version:         tmux.AgentLaunchSpecVersion,
+		AgentType:       tmux.AgentType(agentType).Canonical(),
+		Command:         safeCommand,
+		Model:           model.Model,
+		ModelAlias:      model.ModelAlias,
+		ReasoningEffort: model.ReasoningEffort,
 	}
 	if binding := resilience.CaptureLaunchBinding(agentType); binding != nil {
 		launchSpec.CAAMProfile = binding.Identifier
@@ -1459,7 +1492,8 @@ func waitForAgentsReadyWithCapture(
 }
 
 // isAgentReady checks if agent output indicates ready state. Most agent types
-// use the shared indicator substrings below; omp is decided structurally.
+// use the shared indicator substrings below; omp and OpenCode are decided by
+// their composers.
 func isAgentReady(output, agentType string) bool {
 	if tmux.AgentType(agentType).Canonical() == tmux.AgentOmp {
 		// omp paints nothing for ~1s after launch, then draws its banner and
@@ -1467,6 +1501,13 @@ func isAgentReady(output, agentType string) bool {
 		// banner substring such as "Welcome back!") is the signal that a
 		// typed prompt will land in the composer.
 		return agentpkg.ParseOmpComposer(output).Found
+	}
+	if tmux.AgentType(agentType).Canonical() == tmux.AgentOpencode {
+		// OpenCode draws its bar-framed composer (with the "Ask anything"
+		// hint while empty) once the TUI accepts input. The generic
+		// indicators below would also fire on the launching shell's prompt
+		// or on the "OpenCode" splash, before the composer exists.
+		return tmux.OpencodeComposerVisible(output) || strings.Contains(strings.ToLower(output), "ask anything")
 	}
 	lower := strings.ToLower(output)
 
@@ -1566,6 +1607,7 @@ func spawnModelHints(cfg *config.Config, opts SpawnOptions) []string {
 		{"gemini", opts.GmiModel},
 		{"grok", opts.GrokModel},
 		{"omp", opts.OmpModel},
+		{"oc", opts.OcModel},
 	}
 	var hints []string
 	for _, req := range requested {
@@ -1593,6 +1635,7 @@ func getAgentCommandsWithOverrides(cfg *config.Config, opts SpawnOptions) (map[s
 		"antigravity": "agy",
 		"grok":        "grok --always-approve",
 		"omp":         config.DefaultOmpCommand,
+		"oc":          config.DefaultOpencodeCommand,
 	}
 
 	if cfg != nil && cfg.Agents.Claude != "" {
@@ -1613,38 +1656,23 @@ func getAgentCommandsWithOverrides(cfg *config.Config, opts SpawnOptions) (map[s
 	if cfg != nil {
 		defaults["omp"] = config.OmpCommandOrDefault(cfg.Agents.Omp)
 	}
-
-	overrides := map[string]struct{ model, effort string }{
-		"claude": {opts.CCModel, opts.CCReasoningEffort},
-		"codex":  {opts.CodModel, opts.CodReasoningEffort},
-		"gemini": {opts.GmiModel, ""},
-		"grok":   {opts.GrokModel, opts.GrokReasoningEffort},
-		"omp":    {opts.OmpModel, opts.OmpReasoningEffort},
+	if cfg != nil && cfg.Agents.Opencode != "" {
+		defaults["oc"] = cfg.Agents.Opencode
 	}
 
+	launchModels := spawnLaunchModels(cfg, opts)
 	for agentType, cmdTemplate := range defaults {
-		override := overrides[agentType]
+		launch := launchModels[agentType]
 		vars := config.AgentTemplateVars{
 			AgentType:       agentType,
-			ModelAlias:      override.model,
-			ModelRequested:  override.model != "",
-			ReasoningEffort: override.effort,
-		}
-		if cfg != nil {
-			// Resolve the requested (or default) model for every agent type,
-			// exactly as the interactive spawn path does via ResolveModel.
-			// Limiting this to grok left the others rendering with an empty
-			// Model: harmless for the templates that guard with {{if .Model}},
-			// but agy's template injects --model unconditionally because its
-			// model is hard-pinned, so a robot-spawned agy pane launched as
-			// `--model ''` and never started.
-			vars.Model = cfg.Models.GetModelName(agentType, override.model)
-		} else if override.model != "" {
-			vars.Model = override.model
+			Model:           launch.Model,
+			ModelAlias:      launch.ModelAlias,
+			ModelRequested:  launch.ModelAlias != "",
+			ReasoningEffort: launch.ReasoningEffort,
 		}
 		rendered, err := config.GenerateAgentCommand(cmdTemplate, vars)
 		if err != nil {
-			if override.model != "" || override.effort != "" {
+			if launch.ModelAlias != "" || launch.ReasoningEffort != "" {
 				// An explicit override must not be silently dropped
 				// (GenerateAgentCommand's guard errors describe exactly that).
 				return nil, fmt.Errorf("rendering %s launch command: %w", agentType, err)
@@ -1657,6 +1685,49 @@ func getAgentCommandsWithOverrides(cfg *config.Config, opts SpawnOptions) (map[s
 	}
 
 	return defaults, nil
+}
+
+// spawnLaunchModel is the model a robot-spawned agent type launches with:
+// the resolved model name, the alias the request named (empty when the
+// configured default applies), and the requested reasoning effort.
+type spawnLaunchModel struct {
+	Model           string
+	ModelAlias      string
+	ReasoningEffort string
+}
+
+// spawnLaunchModels resolves the launch model of every robot-spawnable agent
+// type from the request's per-type overrides. The launch command is rendered
+// from it and the pane's launch specification records it, so a robot-spawned
+// pane reports the same model as an `ntm spawn` pane (--robot-context, GH #333).
+func spawnLaunchModels(cfg *config.Config, opts SpawnOptions) map[string]spawnLaunchModel {
+	overrides := map[string]struct{ model, effort string }{
+		"claude":      {opts.CCModel, opts.CCReasoningEffort},
+		"codex":       {opts.CodModel, opts.CodReasoningEffort},
+		"gemini":      {opts.GmiModel, ""},
+		"antigravity": {"", ""},
+		"grok":        {opts.GrokModel, opts.GrokReasoningEffort},
+		"omp":         {opts.OmpModel, opts.OmpReasoningEffort},
+		"oc":          {opts.OcModel, ""},
+	}
+	launches := make(map[string]spawnLaunchModel, len(overrides))
+	for agentType, override := range overrides {
+		launch := spawnLaunchModel{ModelAlias: override.model, ReasoningEffort: override.effort}
+		if cfg != nil {
+			// Resolve the requested (or default) model for every agent type,
+			// exactly as the interactive spawn path does via ResolveModel.
+			// Limiting this to grok left the others rendering with an empty
+			// Model: harmless for the templates that guard with {{if .Model}},
+			// but agy's template injects --model unconditionally because its
+			// model is hard-pinned, so a robot-spawned agy pane launched as
+			// `--model ''` and never started.
+			launch.Model = cfg.Models.GetModelName(agentType, override.model)
+		} else if override.model != "" {
+			launch.Model = override.model
+		}
+		launches[agentType] = launch
+	}
+	return launches
 }
 
 // loadLatestHandoff loads the most recent handoff for a session and returns recovery context.

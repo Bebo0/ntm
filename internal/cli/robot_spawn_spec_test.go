@@ -32,6 +32,9 @@ func TestParseRobotSpawnAgentFlag(t *testing.T) {
 		// gmi has no effort knob, so '@' stays a literal model character —
 		// identical to `ntm spawn --gmi` (agentTypeSupportsEffortSuffix).
 		{name: "gmi at stays in model", flag: "--spawn-gmi", value: "1:provider/model@tag", agentType: AgentTypeGemini, wantCount: 1, wantModel: "provider/model@tag"},
+		// oc has no effort knob either; OpenCode models are provider/model.
+		{name: "oc provider model", flag: "--spawn-oc", value: "1:opencode/space-bunny-free", agentType: AgentTypeOpencode, wantCount: 1, wantModel: "opencode/space-bunny-free"},
+		{name: "oc at stays in model", flag: "--spawn-oc", value: "2:provider/model@tag", agentType: AgentTypeOpencode, wantCount: 2, wantModel: "provider/model@tag"},
 		{name: "agy model override rejected", flag: "--spawn-agy", value: "1:gemini-3.1-pro-high", agentType: AgentTypeAntigravity, wantErr: "model is pinned"},
 		{name: "invalid count", flag: "--spawn-cod", value: "x:gpt-5.3-codex", agentType: AgentTypeCodex, wantErr: "invalid count"},
 		{name: "zero count with model rejected", flag: "--spawn-cod", value: "0:gpt-5.3-codex", agentType: AgentTypeCodex, wantErr: "count must be at least 1"},

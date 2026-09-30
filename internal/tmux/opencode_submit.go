@@ -83,6 +83,13 @@ func opencodeComposerDraft(capture string) (draft string, found bool) {
 	return strings.Join(input, "\n"), true
 }
 
+// OpencodeComposerVisible reports whether an OpenCode capture shows the
+// composer (empty or not), i.e. the TUI is up and will accept a prompt.
+func OpencodeComposerVisible(capture string) bool {
+	_, found := opencodeComposerDraft(capture)
+	return found
+}
+
 // opencodeComposerHoldsPayload reports whether an OpenCode capture shows the
 // delivered message still sitting unsubmitted in the composer: either a
 // collapsed "[Pasted ~N lines]" token (what OpenCode shows for the pasted

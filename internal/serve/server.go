@@ -4283,6 +4283,7 @@ type AgentSpawnRequest struct {
 	AgyCount  int    `json:"agy_count,omitempty"`
 	GrokCount int    `json:"grok_count,omitempty"`
 	OmpCount  int    `json:"omp_count,omitempty"`
+	OcCount   int    `json:"oc_count,omitempty"`
 	Preset    string `json:"preset,omitempty"`
 	WaitReady bool   `json:"wait_ready,omitempty"`
 	Label     string `json:"label,omitempty"` // Goal label for multi-session support
@@ -4292,12 +4293,12 @@ type AgentSpawnRequest struct {
 // to spawn (by count for any supported type, or through a preset).
 func (req AgentSpawnRequest) hasAgentCountOrPreset() bool {
 	return req.CCCount != 0 || req.CodCount != 0 || req.GmiCount != 0 || req.AgyCount != 0 ||
-		req.GrokCount != 0 || req.OmpCount != 0 || req.Preset != ""
+		req.GrokCount != 0 || req.OmpCount != 0 || req.OcCount != 0 || req.Preset != ""
 }
 
 // agentSpawnCountRequiredMessage is the shared validation error for a spawn
 // request that names no agents.
-const agentSpawnCountRequiredMessage = "at least one agent count (cc_count, cod_count, gmi_count, agy_count, grok_count, omp_count) or preset required"
+const agentSpawnCountRequiredMessage = "at least one agent count (cc_count, cod_count, gmi_count, agy_count, grok_count, omp_count, oc_count) or preset required"
 
 // handleAgentSpawnV1 handles POST /api/v1/sessions/{sessionId}/agents/spawn.
 func (s *Server) handleAgentSpawnV1(w http.ResponseWriter, r *http.Request) {
@@ -4329,6 +4330,7 @@ func (s *Server) handleAgentSpawnV1(w http.ResponseWriter, r *http.Request) {
 		AgyCount:  req.AgyCount,
 		GrokCount: req.GrokCount,
 		OmpCount:  req.OmpCount,
+		OcCount:   req.OcCount,
 		Preset:    req.Preset,
 		WaitReady: req.WaitReady,
 	}

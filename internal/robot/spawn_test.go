@@ -188,6 +188,7 @@ func TestValidateSpawnRequestRejectsInvalidCountsAndEmptySpawn(t *testing.T) {
 		{name: "negative gemini", opts: SpawnOptions{Session: "invalid-gmi", CCCount: 1, GmiCount: -1}, want: "--spawn-gmi"},
 		{name: "negative antigravity", opts: SpawnOptions{Session: "invalid-agy", CCCount: 1, AgyCount: -1}, want: "--spawn-agy"},
 		{name: "negative grok", opts: SpawnOptions{Session: "invalid-grok", CCCount: 1, GrokCount: -1}, want: "--spawn-grok"},
+		{name: "negative opencode", opts: SpawnOptions{Session: "invalid-oc", CCCount: 1, OcCount: -1}, want: "--spawn-oc"},
 		{name: "zero total", opts: SpawnOptions{Session: "invalid-zero"}, want: "no agents specified"},
 	}
 
@@ -1207,7 +1208,7 @@ func TestSpawnOptions_NoAgentsSpecified(t *testing.T) {
 	if resp.Error == "" {
 		t.Error("[E2E-SPAWN] Expected error for no agents specified")
 	}
-	if resp.Error != "no agents specified (use cc, cod, gmi, agy, grok, or omp counts)" {
+	if resp.Error != "no agents specified (use cc, cod, gmi, agy, grok, omp, or oc counts)" {
 		t.Errorf("[E2E-SPAWN] Unexpected error message: %s", resp.Error)
 	}
 
@@ -2945,5 +2946,75 @@ func TestSpawnModelHints(t *testing.T) {
 	// Completely custom model IDs stay silent so self-hosted models work.
 	if hints := spawnModelHints(cfg, SpawnOptions{CodModel: "totally-custom-model-xyz-42"}); len(hints) != 0 {
 		t.Fatalf("custom-model hints = %v, want none", hints)
+	}
+}
+
+// GH #333: --robot-spawn had no OpenCode flag, so an agent trusting the
+// capabilities document concluded oc panes were unsupported. --spawn-oc
+// launches them through the same template as `ntm spawn --oc`.
+func TestGetAgentCommandsWithOverridesOpencode(t *testing.T) {
+	cfg := config.Default()
+	commands, err := getAgentCommandsWithOverrides(cfg, SpawnOptions{OcCount: 1, OcModel: "opencode/big-pickle"})
+	if err != nil {
+		t.Fatalf("getAgentCommandsWithOverrides: %v", err)
+	}
+	if got, want := commands["oc"], "opencode --model 'opencode/big-pickle'"; got != want {
+		t.Fatalf("oc command = %q, want %q", got, want)
+	}
+
+	commands, err = getAgentCommandsWithOverrides(cfg, SpawnOptions{OcCount: 1})
+	if err != nil {
+		t.Fatalf("getAgentCommandsWithOverrides without model: %v", err)
+	}
+	if got := commands["oc"]; got != "opencode" {
+		t.Fatalf("oc command without model = %q, want bare opencode (OpenCode picks its own default)", got)
+	}
+
+	cfg.Agents.Opencode = `opencode --print-logs{{if .Model}} --model {{shellQuote .Model}}{{end}}`
+	commands, err = getAgentCommandsWithOverrides(cfg, SpawnOptions{OcCount: 1, OcModel: "anthropic/claude-x"})
+	if err != nil {
+		t.Fatalf("getAgentCommandsWithOverrides with [agents] oc: %v", err)
+	}
+	if got, want := commands["oc"], "opencode --print-logs --model 'anthropic/claude-x'"; got != want {
+		t.Fatalf("configured oc command = %q, want %q", got, want)
+	}
+}
+
+func TestSpawnDryRunPlansOpencodePanes(t *testing.T) {
+	opts := SpawnOptions{Session: "oc_dryrun", CCCount: 1, OcCount: 2, NoUserPane: true, DryRun: true}
+	out, err := GetSpawn(t.Context(), opts, config.Default())
+	if err != nil {
+		t.Fatalf("GetSpawn: %v", err)
+	}
+	if !out.Success {
+		t.Fatalf("dry run failed: %s", out.Error)
+	}
+	var titles []string
+	for _, agent := range out.WouldCreate {
+		if agent.Type == "oc" {
+			titles = append(titles, agent.Title)
+		}
+	}
+	if want := []string{"oc_dryrun__oc_1", "oc_dryrun__oc_2"}; !reflect.DeepEqual(titles, want) {
+		t.Fatalf("oc panes planned = %v, want %v (all: %+v)", titles, want, out.WouldCreate)
+	}
+}
+
+func TestIsAgentReadyOpencodeWaitsForComposer(t *testing.T) {
+	composer := strings.Join([]string{
+		"",
+		"  ┃",
+		"  ┃  Ask anything… \"Fix a TODO in the codebase\"",
+		"  ┃",
+		"  ┃  Build · Big Pickle OpenCode Zen",
+		"  ╹▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀",
+	}, "\n")
+	if !isAgentReady(composer, "oc") {
+		t.Fatal("OpenCode composer not recognized as ready")
+	}
+	// The launching shell's prompt satisfies the generic prompt patterns,
+	// but the OpenCode TUI is not up until its composer is drawn.
+	if isAgentReady("user@host:~/proj$ opencode --model 'x/y'\n$ ", "oc") {
+		t.Fatal("bare shell prompt reported an OpenCode pane ready")
 	}
 }
