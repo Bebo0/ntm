@@ -1608,3 +1608,79 @@ func TestReadResourceEstablishesMCPSession(t *testing.T) {
 		t.Fatal("ReadResource did not establish an MCP session")
 	}
 }
+
+// Concurrent first calls on one client (spawn registers every pane in
+// parallel) must share a single handshake: the goroutines that lose the race
+// reuse the session the winner established instead of opening their own.
+func TestCallToolConcurrentCallsShareOneMCPSession(t *testing.T) {
+	t.Parallel()
+	state := &statefulMCPServer{}
+	server := httptest.NewServer(state)
+	defer server.Close()
+
+	c := NewClient(WithBaseURL(server.URL + "/mcp/"))
+	const callers = 16
+	var wg sync.WaitGroup
+	errs := make(chan error, callers)
+	for i := 0; i < callers; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if _, err := c.EnsureProject(context.Background(), "/data/projects/proj"); err != nil {
+				errs <- err
+			}
+		}()
+	}
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		t.Errorf("concurrent EnsureProject: %v", err)
+	}
+	state.mu.Lock()
+	defer state.mu.Unlock()
+	if state.initializes != 1 || state.notifications != 1 {
+		t.Fatalf("concurrent callers ran initialize=%d notified=%d times, want exactly once each", state.initializes, state.notifications)
+	}
+	if state.toolCalls != callers {
+		t.Fatalf("tool calls reaching the server = %d, want %d", state.toolCalls, callers)
+	}
+}
+
+// A server that keeps rejecting the session even right after a successful
+// handshake must not drive the client into a handshake loop: one handshake
+// per call, then the server's rejection is returned.
+func TestCallToolPersistentSessionRejectionDoesNotLoop(t *testing.T) {
+	t.Parallel()
+	var initializes, requests atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests.Add(1)
+		var req JSONRPCRequest
+		_ = json.NewDecoder(r.Body).Decode(&req)
+		switch req.Method {
+		case "initialize":
+			initializes.Add(1)
+			w.Header().Set("Mcp-Session-Id", fmt.Sprintf("sess-%d", initializes.Load()))
+			_ = json.NewEncoder(w).Encode(JSONRPCResponse{JSONRPC: "2.0", ID: req.ID, Result: json.RawMessage(`{}`)})
+		case "notifications/initialized":
+			w.WriteHeader(http.StatusAccepted)
+		default:
+			w.WriteHeader(http.StatusNotFound)
+			_, _ = io.WriteString(w, "Session not found")
+		}
+	}))
+	defer server.Close()
+
+	c := NewClient(WithBaseURL(server.URL + "/mcp/"))
+	_, err := c.callTool(context.Background(), "ensure_project", map[string]interface{}{"human_key": "/p"})
+	var apiErr *APIError
+	if !errors.As(err, &apiErr) || apiErr.StatusCode != http.StatusNotFound {
+		t.Fatalf("error = %v, want the server's HTTP 404 session rejection", err)
+	}
+	if got := initializes.Load(); got != 1 {
+		t.Fatalf("initialize handshakes = %d, want 1", got)
+	}
+	// original request + initialize + initialized notification + one retry
+	if got := requests.Load(); got != 4 {
+		t.Fatalf("requests = %d, want 4", got)
+	}
+}
