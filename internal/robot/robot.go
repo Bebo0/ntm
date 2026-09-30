@@ -3841,6 +3841,20 @@ func contextPaneModel(pane tmux.Pane, agentType string) string {
 	return detectModel(agentType, pane.Title)
 }
 
+// contextPaneLimit is the context window --robot-context budgets a pane
+// against. A recorded launch model the model registry does not know (agy's
+// pinned "Gemini 3.8 Flash (High)", an `opus[1m]` alias, an OpenCode
+// provider/model) would otherwise fall to the registry's generic default
+// rather than the family limit detectModel's guess resolves to: an agy pane
+// dropped from gemini's 1M window to 128K and read as nearly eight times
+// fuller than before the launch model was consulted.
+func contextPaneLimit(model string, pane tmux.Pane, agentType string) int {
+	if models.KnownModel(model) {
+		return getContextLimit(model)
+	}
+	return getContextLimit(detectModel(agentType, pane.Title))
+}
+
 // detectModel attempts to detect the model from agent type and pane title.
 func detectModel(agentType, title string) string {
 	titleLower := strings.ToLower(title)
@@ -10699,7 +10713,7 @@ func GetContext(session string, lines int) (*ContextOutput, error) {
 		estTokens := charCount / 4
 		// Add overhead for system prompts and other context (2.5x multiplier)
 		withOverhead := int(float64(estTokens) * 2.5)
-		contextLimit := getContextLimit(model)
+		contextLimit := contextPaneLimit(model, pane, agentType)
 		// A non-positive limit would yield NaN or +Inf, which json.Encode rejects
 		// outright — the whole response would be replaced by an empty stdout and a
 		// nonzero exit. Treat an unusable limit as fully consumed instead, which

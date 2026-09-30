@@ -3812,6 +3812,25 @@ func TestGetUsageLevel(t *testing.T) {
 	}
 }
 
+// Reading the recorded launch model (GH #333) must not shrink a pane's
+// context budget: agy records its pinned display name, which the model
+// registry does not know, so budgeting against it fell to the 128K default
+// instead of gemini's 1M window. Unknown recorded models keep the family
+// limit of the title heuristic; known ones use their own.
+func TestContextPaneLimitKeepsFamilyLimitForUnknownLaunchModel(t *testing.T) {
+	agy := tmux.Pane{ID: "%1", Title: "flywheel__agy_1"}
+	if got, want := contextPaneLimit("Gemini 3.8 Flash (High)", agy, "antigravity"), getContextLimit("gemini"); got != want {
+		t.Fatalf("agy pane limit = %d, want gemini family limit %d", got, want)
+	}
+	cc := tmux.Pane{ID: "%2", Title: "flywheel__cc_1"}
+	if got, want := contextPaneLimit("opus[1m]", cc, "claude"), getContextLimit("sonnet"); got != want {
+		t.Fatalf("unregistered claude alias limit = %d, want claude family limit %d", got, want)
+	}
+	if got, want := contextPaneLimit("gpt-5.3-codex", tmux.Pane{ID: "%3"}, "codex"), getContextLimit("gpt-5.3-codex"); got != want {
+		t.Fatalf("known recorded model limit = %d, want its registry limit %d", got, want)
+	}
+}
+
 // GH #333: an `--oc=1:MODEL` pane reported model "unknown" in
 // --robot-context because only title substrings were consulted. The recorded
 // launch model now wins; panes without one keep the title heuristic.
