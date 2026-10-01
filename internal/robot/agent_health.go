@@ -172,15 +172,26 @@ const (
 // AgentHealthOutput is the response for --robot-agent-health.
 type AgentHealthOutput struct {
 	RobotResponse
-	Session         string                      `json:"session"`
-	Query           AgentHealthQuery            `json:"query"`
-	CautAvailable   bool                        `json:"caut_available"`
-	PTAvailable     bool                        `json:"pt_available"` // True only when PT observations are available.
-	PTStatus        PTAvailability              `json:"pt_status"`
-	Panes           map[string]PaneHealthStatus `json:"panes"`
-	ProviderSummary map[string]ProviderStats    `json:"provider_summary"`
-	PTSummary       *PTHealthSummary            `json:"pt_summary,omitempty"`
-	FleetHealth     FleetHealthSummary          `json:"fleet_health"`
+	Session       string                      `json:"session"`
+	Query         AgentHealthQuery            `json:"query"`
+	CautAvailable bool                        `json:"caut_available"`
+	PTAvailable   bool                        `json:"pt_available"` // True only when PT observations are available.
+	PTStatus      PTAvailability              `json:"pt_status"`
+	Panes         map[string]PaneHealthStatus `json:"panes"`
+	// NonAgentPanes lists selected panes that run no agent: a plain user
+	// shell, or a pane ntm cannot attribute to an agent CLI. They carry no
+	// agent health, so they are kept out of Panes and FleetHealth instead of
+	// being graded F for lacking an agent prompt (ntm#335).
+	NonAgentPanes   map[string]NonAgentPane  `json:"non_agent_panes,omitempty"`
+	ProviderSummary map[string]ProviderStats `json:"provider_summary"`
+	PTSummary       *PTHealthSummary         `json:"pt_summary,omitempty"`
+	FleetHealth     FleetHealthSummary       `json:"fleet_health"`
+}
+
+// NonAgentPane is a selected pane that is not running an agent.
+type NonAgentPane struct {
+	AgentType string `json:"agent_type"`
+	Reason    string `json:"reason"`
 }
 
 // PrintAgentHealth outputs the health state for specified panes in a session
@@ -294,6 +305,14 @@ func GetAgentHealth(opts AgentHealthOptions) (*AgentHealthOutput, error) {
 	// Step 3: Build health status for each pane
 	totalScore := 0
 	for paneStr, workStatus := range isWorkingResult.Panes {
+		if nonAgent, ok := nonAgentPaneFor(workStatus); ok {
+			if output.NonAgentPanes == nil {
+				output.NonAgentPanes = make(map[string]NonAgentPane)
+			}
+			output.NonAgentPanes[paneStr] = nonAgent
+			continue
+		}
+
 		// Convert IsWorking result to our local state structure
 		localState := LocalStateInfo{
 			IsWorking:             workStatus.IsWorking,
@@ -392,6 +411,21 @@ func GetAgentHealth(opts AgentHealthOptions) (*AgentHealthOutput, error) {
 	}
 
 	return output, nil
+}
+
+// nonAgentPaneFor reports whether a pane is a non-agent pane by its
+// tmux-recorded type. A pane missing from the observation has no recorded
+// type and is not exempted: it keeps the "observation unavailable" grade.
+func nonAgentPaneFor(workStatus PaneWorkStatus) (NonAgentPane, bool) {
+	if workStatus.paneType == "" || !isNonAgentPaneType(workStatus.paneType) {
+		return NonAgentPane{}, false
+	}
+	paneType := normalizeAgentType(workStatus.paneType)
+	reason := "pane runs a user shell, not an agent"
+	if paneType != "user" {
+		reason = "no agent CLI detected in this pane"
+	}
+	return NonAgentPane{AgentType: paneType, Reason: reason}, true
 }
 
 func ptAvailability(enabled, binaryAvailable, monitorRunning bool) (PTAvailability, bool) {

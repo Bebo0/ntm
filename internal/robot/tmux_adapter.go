@@ -234,6 +234,10 @@ func (a *TmuxAdapter) NormalizeAgents(sessionName string, agents []Agent, output
 // canonical detector that backs --robot-is-working, decides instead. A pane
 // with neither a clock nor a decisive tail is reported unknown, never busy.
 func (a *TmuxAdapter) classifyAgentState(agent *Agent, outputTail string) state.AgentState {
+	if isNonAgentPaneType(agent.Type) {
+		return a.classifyNonAgentPaneState(agent, outputTail)
+	}
+
 	// Check for error conditions
 	if agent.RateLimitDetected {
 		return state.AgentStateError
@@ -302,6 +306,45 @@ func (a *TmuxAdapter) classifyAgentState(agent *Agent, outputTail string) state.
 
 	// Recent output (older than the busy window, younger than the idle
 	// threshold) without a decisive tail: active.
+	return state.AgentStateActive
+}
+
+// isNonAgentPaneType reports whether a pane's type says it is not running an
+// agent: a plain user shell, or a pane ntm could not attribute to any agent
+// CLI. The same rule --robot-health already applies (ntm#335).
+func isNonAgentPaneType(agentType string) bool {
+	switch normalizeAgentType(agentType) {
+	case "user", "unknown":
+		return true
+	default:
+		return false
+	}
+}
+
+// classifyNonAgentPaneState reports the activity of a non-agent pane without
+// any of the agent error heuristics (ntm#335). A shell that has printed
+// nothing for a while is simply idle: its prompt is whatever the user
+// configured, so "quiet and no recognised agent prompt" proves nothing, and
+// a rate-limit phrase in its scrollback is text the user was looking at, not
+// an agent being throttled. Non-agent panes therefore never enter the error
+// state that turns a session critical.
+func (a *TmuxAdapter) classifyNonAgentPaneState(agent *Agent, outputTail string) state.AgentState {
+	hasOutputClock := !agent.LastOutputTS.IsZero() && agent.SecondsSinceOutput >= 0
+	if hasOutputClock && agent.SecondsSinceOutput < 5 && agent.OutputLinesSinceLast > 0 {
+		return state.AgentStateBusy
+	}
+	switch a.classifyTailState(agent, outputTail) {
+	case status.StateIdle:
+		return state.AgentStateIdle
+	case status.StateWorking:
+		return state.AgentStateBusy
+	}
+	if !hasOutputClock {
+		return state.AgentStateUnknown
+	}
+	if agent.SecondsSinceOutput > a.config.IdleThreshold {
+		return state.AgentStateIdle
+	}
 	return state.AgentStateActive
 }
 
@@ -385,16 +428,25 @@ func (a *TmuxAdapter) computeSessionHealth(sess *tmux.Session, agents []Agent, e
 	}
 
 	if errorCount > 0 {
-		if errorCount == len(agents) {
+		// Only agent panes can be in error (ntm#335), so they are the
+		// denominator: a user shell beside one failed agent must not hide
+		// that every agent has failed.
+		agentPanes := 0
+		for _, agent := range agents {
+			if !isNonAgentPaneType(agent.Type) {
+				agentPanes++
+			}
+		}
+		if errorCount >= agentPanes {
 			return state.HealthStatusCritical, fmt.Sprintf("all %d agents in error state", errorCount)
 		}
-		return state.HealthStatusWarning, fmt.Sprintf("%d/%d agents in error state", errorCount, len(agents))
+		return state.HealthStatusWarning, fmt.Sprintf("%d/%d agents in error state", errorCount, agentPanes)
 	}
 
 	// Check for rate limiting
 	rateLimited := 0
 	for _, agent := range agents {
-		if agent.RateLimitDetected {
+		if agent.RateLimitDetected && !isNonAgentPaneType(agent.Type) {
 			rateLimited++
 		}
 	}
@@ -421,8 +473,8 @@ func (a *TmuxAdapter) computeAgentHealth(agent *Agent, agentState state.AgentSta
 		return state.HealthStatusUnknown, "state unknown"
 
 	default:
-		// Check context usage
-		if agent.ContextPercent > 80 {
+		// Check context usage. A non-agent pane has no context window.
+		if agent.ContextPercent > 80 && !isNonAgentPaneType(agent.Type) {
 			return state.HealthStatusWarning, fmt.Sprintf("context at %.0f%%", agent.ContextPercent)
 		}
 		return state.HealthStatusHealthy, ""

@@ -122,6 +122,12 @@ type PaneWorkStatus struct {
 	// present only under --semantic and omitted entirely otherwise. It is
 	// advisory: it never changes IsWorking/IsIdle/Recommendation above.
 	SemanticProgress *SemanticProgress `json:"semantic_progress,omitempty"`
+
+	// paneType is the pane's tmux-recorded agent type (paneAgentType), or ""
+	// when the pane was not observed. Unlike AgentType it is never rewritten
+	// by output parsing, so it can tell a user shell from an agent whose
+	// type the parser could not confirm (ntm#335). Not serialized.
+	paneType string
 }
 
 // IsWorkingSummary provides aggregate statistics across all panes.
@@ -637,6 +643,9 @@ func paneWorkStatusFromObservation(observation statuspkg.PaneObservation) PaneWo
 				result.AgentUptimeSeconds = uptime
 			}
 		}
+	}
+	if strings.TrimSpace(observation.Metadata.ID) != "" {
+		result.paneType = paneAgentType(observation.Metadata)
 	}
 	result.PanePID = observation.Metadata.PID
 	result.PaneCurrentCommand = observation.Metadata.Command
