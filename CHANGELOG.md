@@ -11,6 +11,31 @@ NTM is a tmux session management tool for orchestrating multiple AI coding agent
 
 ---
 
+## [v1.36.1] -- 2026-10-01 [GitHub Release]
+
+**ntm now registers with the Python Agent Mail server, `--robot-spawn` can launch OpenCode panes, and `--robot-capabilities` is about half its former size.** Follow-up to GitHub issue [#333](https://github.com/Dicklesworthstone/ntm/issues/333).
+
+### Upgrade notes
+
+- **`--robot-capabilities` `surfaces[]` entries are slimmer.** Each entry now carries only the surface-level metadata that `commands[]` lacks (`paginated`, `paginated_reason`, `consumer_guidance`, `boundedness`, `follow_up`, `action_handoff`, `request_semantics`, `attention_ops`, `explainability`, `lifecycle`) and joins to `commands[]` by `name`. Flags, descriptions, parameters, examples and transports are no longer repeated there. A consumer that read those fields from `surfaces[]` should read them from the matching `commands[]` entry. The full document drops from 431 KB to 236 KB; nothing was removed from the document as a whole ([2af3ec36](https://github.com/Dicklesworthstone/ntm/commit/2af3ec36), [ee589e7e](https://github.com/Dicklesworthstone/ntm/commit/ee589e7e)).
+
+### Added
+
+- **`--robot-spawn --spawn-oc=N[:model]`** launches OpenCode panes through the same command template as `ntm spawn --oc` (the built-in default or `[agents] oc`); REST spawn takes `oc_count`, and jobs take `oc_model`. There is no effort setting, since the OpenCode TUI has none. `--spawn-wait` waits for OpenCode's own composer rather than a shell prompt. The capabilities document lists the flag with an example ([a6d454a8](https://github.com/Dicklesworthstone/ntm/commit/a6d454a8), [2af3ec36](https://github.com/Dicklesworthstone/ntm/commit/2af3ec36)).
+- The README documents OpenCode panes and how to let them run unattended (OpenCode 1.18+ `--auto` via `[agents] oc`, or OpenCode's own `permission` config) ([a6d454a8](https://github.com/Dicklesworthstone/ntm/commit/a6d454a8)).
+
+### Fixed
+
+- **`ntm spawn` failed with `ensure_project failed (HTTP 400)` against the Python Agent Mail server** (GH #333). That server's `/mcp` endpoint, ntm's default, is a stateful MCP endpoint that rejects any request without a session ID, and ntm never ran the MCP `initialize` handshake. When a server rejects a request for lack of a session, ntm now runs the handshake once, keeps the session ID for later calls, and retries. Concurrent first calls share one handshake, and a server that keeps rejecting the session gets one handshake per call, not a loop. Servers that answer one-shot requests (the Rust server, `/api`) never see a handshake. Error messages now quote the server's own text instead of a bare status line. The same server also rejected agent registration over the optional `pane_id` argument; ntm retries once without the pane binding in exactly that case ([2916aa5c](https://github.com/Dicklesworthstone/ntm/commit/2916aa5c), [bb2d57f0](https://github.com/Dicklesworthstone/ntm/commit/bb2d57f0)).
+- **`--robot-context` reported `model: unknown` for panes started with an explicit model** such as `--oc=1:MODEL`, because it guessed from the pane title. It now reports the model recorded in the pane's launch spec and guesses only for panes without one. Robot-spawned panes of every type now record their resolved model, alias and effort, as `ntm spawn` panes already did. The context budget uses the recorded model only when the model registry knows it; otherwise it keeps the agent family's limit, so an agy pane keeps gemini's 1M window and `opus[1m]` keeps claude's ([a6d454a8](https://github.com/Dicklesworthstone/ntm/commit/a6d454a8), [a43f4a82](https://github.com/Dicklesworthstone/ntm/commit/a43f4a82)).
+- `docs/openapi.json` is regenerated for the slimmer capabilities surfaces and picks up routes and responses added since 2026-09-17 ([ee589e7e](https://github.com/Dicklesworthstone/ntm/commit/ee589e7e)).
+
+### Changed
+
+- The full `--robot-capabilities` document is 236 KB, down from 431 KB, and the e2e size budget is now 300 KB so the duplication cannot come back unnoticed ([2af3ec36](https://github.com/Dicklesworthstone/ntm/commit/2af3ec36)).
+
+---
+
 ## [v1.36.0] -- 2026-09-29 [GitHub Release]
 
 **Oh My Pi (`omp`) becomes a built-in agent type; pipelines, REST jobs and checkpoint restores become durable across process exits and crashes; work assignment verifies candidates against the tracker, Agent Mail reservations and mutex groups before dispatch. Also fixes the three issues filed against v1.35.x** (GitHub issues [#332](https://github.com/Dicklesworthstone/ntm/issues/332), [#333](https://github.com/Dicklesworthstone/ntm/issues/333), [#334](https://github.com/Dicklesworthstone/ntm/issues/334)).
