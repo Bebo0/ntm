@@ -2439,8 +2439,11 @@ func GetBeadStatusContext(ctx context.Context, dir, beadID string) (string, erro
 // Unlike triage output, br show is keyed by the requested ID and is not capped
 // or ranking-dependent.
 type BeadAssignmentDetails struct {
-	ID                   string
-	Title                string
+	ID    string
+	Title string
+	// Description is the bead body. Assignment reads the paths it must
+	// reserve from it as well as from the title (ntm#336).
+	Description          string
 	IssueType            string
 	Status               string
 	Priority             int
@@ -2566,6 +2569,7 @@ type beadShowDependency struct {
 type beadShowAssignmentRow struct {
 	ID           string               `json:"id"`
 	Title        string               `json:"title"`
+	Description  string               `json:"description"`
 	IssueType    string               `json:"issue_type"`
 	Status       string               `json:"status"`
 	Priority     int                  `json:"priority"`
@@ -2688,7 +2692,7 @@ func parseBeadAssignmentDetailsOutput(output string) (*BeadAssignmentDetails, er
 	sort.Strings(labels)
 
 	return &BeadAssignmentDetails{
-		ID: row.ID, Title: row.Title, IssueType: row.IssueType, Status: row.Status, Priority: row.Priority,
+		ID: row.ID, Title: row.Title, Description: row.Description, IssueType: row.IssueType, Status: row.Status, Priority: row.Priority,
 		Assignee: row.Assignee, DeferUntil: row.DeferUntil, Pinned: row.Pinned, Ephemeral: row.Ephemeral,
 		Template: row.Template, Wisp: strings.Contains(strings.ToLower(row.ID), "-wisp-"), Labels: labels,
 		BlockedBy: blockedBy, BlockingDependencies: dependencyStates,

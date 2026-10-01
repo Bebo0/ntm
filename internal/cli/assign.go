@@ -2713,6 +2713,21 @@ func executeAssignmentsEnhanced(ctx context.Context, session string, out *Assign
 		item.BeadTitle = forcedRedactedAssignmentText(liveDetails.Title)
 		rawBeadTitle := liveDetails.Title
 
+		// Resolve the reservation surface from the live title AND description
+		// before anything is claimed (ntm#336). Discovery inside the atomic
+		// coordinator only sees the title, so a bead whose paths live in its
+		// description used to be claimed and then fail its reservation. A
+		// bead with no discoverable paths now fails here, unclaimed.
+		requestedPaths, reservationErr := assignmentReservationPaths(liveDetails, opts.ReserveFiles)
+		if reservationErr != nil {
+			out.Errors = append(out.Errors, fmt.Sprintf("%s: reserve files: %v", item.BeadID, reservationErr))
+			if !opts.Quiet {
+				fmt.Printf("  Not assigning %s: %v\n", item.BeadID, reservationErr)
+			}
+			failCount++
+			continue
+		}
+
 		// Build the prompt using template
 		prompt := expandPromptTemplate(item.BeadID, rawBeadTitle, opts.Template, opts.TemplateFile)
 
@@ -2776,19 +2791,19 @@ func executeAssignmentsEnhanced(ctx context.Context, session string, out *Assign
 		}
 		assignmentCtx, cancel := context.WithTimeout(ctx, resolveAssignTimeout(opts.Timeout))
 		atomicResult, assignErr := atomicCoordinator.Execute(assignmentCtx, assignment.AtomicRequest{
-			BeadID:                    item.BeadID,
-			BeadTitle:                 rawBeadTitle,
-			Target:                    paneID,
-			OccupancyKey:              paneID,
-			Pane:                      item.Pane,
-			AgentType:                 item.AgentType,
-			AgentName:                 handoffAgent,
-			Actor:                     actor,
-			Prompt:                    promptForPane,
-			IdempotencyKey:            idempotencyKey,
-			RequireReservation:        opts.ReserveFiles,
-			AllowReservationDiscovery: opts.ReserveFiles,
-			ReservationTTL:            time.Hour,
+			BeadID:             item.BeadID,
+			BeadTitle:          rawBeadTitle,
+			Target:             paneID,
+			OccupancyKey:       paneID,
+			Pane:               item.Pane,
+			AgentType:          item.AgentType,
+			AgentName:          handoffAgent,
+			Actor:              actor,
+			Prompt:             promptForPane,
+			IdempotencyKey:     idempotencyKey,
+			RequireReservation: opts.ReserveFiles,
+			RequestedPaths:     requestedPaths,
+			ReservationTTL:     time.Hour,
 		})
 		cancel()
 		if err := ctx.Err(); err != nil {
@@ -2876,7 +2891,7 @@ func newCLIAtomicAssignmentCoordinator(store *assignment.AssignmentStore, projec
 
 	var reservationPort assignment.ReservationPort
 	if reservationMgr != nil {
-		reservationPort = &cliAtomicReservationPort{manager: reservationMgr}
+		reservationPort = &cliAtomicReservationPort{manager: reservationMgr, projectDir: projectDir}
 	}
 
 	redactionConfig := config.Default().Redaction.ToRedactionLibConfig()
@@ -2987,18 +3002,61 @@ func normalizedAssignmentReleasePaths(paths []string) []string {
 	return normalized
 }
 
+// errNoReservationPaths rejects a reservation-required assignment whose bead
+// names no files, before the bead is claimed (ntm#336).
+var errNoReservationPaths = errors.New("no file paths to reserve in the bead title or description; " +
+	"list the files it will change (for example under an \"## Owned outputs\" heading) or pass --reserve-files=false")
+
+// assignmentReservationPaths resolves the files an assignment must reserve
+// from the live bead's title and description. It returns nil when
+// reservations are off, and errNoReservationPaths when they are required but
+// the bead names no files.
+func assignmentReservationPaths(details *bv.BeadAssignmentDetails, reserve bool) ([]string, error) {
+	if !reserve || details == nil {
+		return nil, nil
+	}
+	paths := assign.ReservationPathsForBead(details.Title, details.Description)
+	if len(paths) == 0 {
+		return nil, errNoReservationPaths
+	}
+	return paths, nil
+}
+
 type cliAtomicReservationPort struct {
-	manager *assign.FileReservationManager
+	manager    *assign.FileReservationManager
+	projectDir string
+}
+
+// discoverPaths finds the reservation surface for a request that names no
+// paths. It reads the live bead so paths listed only in the description
+// count, not just those in the title (ntm#336). Reserve and
+// ReconcileReservation share it so both see the same path set.
+func (p *cliAtomicReservationPort) discoverPaths(ctx context.Context, req assignment.ReservationRequest) []string {
+	title := req.BeadTitle
+	description := ""
+	if p.projectDir != "" {
+		if details, err := getBeadAssignmentDetailsForAssignment(ctx, p.projectDir, req.BeadID); err == nil && details != nil {
+			if strings.TrimSpace(title) == "" {
+				title = details.Title
+			}
+			description = details.Description
+		}
+	}
+	return assign.ReservationPathsForBead(title, description)
 }
 
 func (p *cliAtomicReservationPort) Reserve(ctx context.Context, req assignment.ReservationRequest) (assignment.LeaseReceipt, error) {
 	if p == nil || p.manager == nil {
 		return assignment.LeaseReceipt{AgentName: req.AgentName, Target: req.Target}, assignment.GuaranteeNoReservation(errors.New("file reservation manager is not configured"))
 	}
+	paths := req.RequestedPaths
+	if len(paths) == 0 {
+		paths = p.discoverPaths(ctx, req)
+	}
 	var result *assign.FileReservationResult
 	var err error
-	if len(req.RequestedPaths) > 0 {
-		result, err = p.manager.ReservePathsForBead(ctx, req.BeadID, req.AgentName, req.RequestedPaths)
+	if len(paths) > 0 {
+		result, err = p.manager.ReservePathsForBead(ctx, req.BeadID, req.AgentName, paths)
 	} else {
 		result, err = p.manager.ReserveForBead(ctx, req.BeadID, req.BeadTitle, "", req.AgentName)
 	}
@@ -3007,8 +3065,8 @@ func (p *cliAtomicReservationPort) Reserve(ctx context.Context, req assignment.R
 
 func (p *cliAtomicReservationPort) ReconcileReservation(ctx context.Context, req assignment.ReservationRequest, _ assignment.LeaseReceipt) (assignment.ReservationReconciliation, error) {
 	requested := append([]string(nil), req.RequestedPaths...)
-	if len(requested) == 0 {
-		requested = assign.ExtractFilePaths(req.BeadTitle, "")
+	if len(requested) == 0 && p != nil {
+		requested = p.discoverPaths(ctx, req)
 	}
 	if p == nil || p.manager == nil {
 		return assignment.ReservationReconciliation{State: assignment.ReservationReconciliationUnknown}, errors.New("file reservation manager is not configured")

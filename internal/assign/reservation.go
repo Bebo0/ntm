@@ -66,11 +66,13 @@ func (m *FileReservationManager) SetTTL(seconds int) {
 
 // Pre-compiled regexes for file path extraction (avoid recompilation per call).
 // Use lookahead-like logic by not consuming the trailing boundary to avoid overlap.
+// A path may open after a line start, whitespace, an opening bracket or quote,
+// or a Markdown code-span backtick (ntm#336).
 var (
-	filePathRegex = regexp.MustCompile(`(?m)(?:^|\s|[(\["'])([a-zA-Z0-9_./-]+(?:\.[a-zA-Z0-9]+)+)(?:\:\d+(?::\d+)?)?`)
-	dotfileRegex  = regexp.MustCompile(`(?m)(?:^|\s|[(\["'])(\.[a-zA-Z][a-zA-Z0-9_]*(?:\.[a-zA-Z0-9]+)*)`)
-	dirPathRegex  = regexp.MustCompile(`(?m)(?:^|\s|[(\["'])([a-zA-Z0-9_-]+(?:/[a-zA-Z0-9_-]+)+)`)
-	globRegex     = regexp.MustCompile(`(?m)(?:^|\s|[(\["'])([a-zA-Z0-9_./*-]+\*[a-zA-Z0-9_./*-]*)`)
+	filePathRegex = regexp.MustCompile("(?m)(?:^|\\s|[(\\[\"'`])([a-zA-Z0-9_./-]+(?:\\.[a-zA-Z0-9]+)+)(?:\\:\\d+(?::\\d+)?)?")
+	dotfileRegex  = regexp.MustCompile("(?m)(?:^|\\s|[(\\[\"'`])(\\.[a-zA-Z][a-zA-Z0-9_]*(?:\\.[a-zA-Z0-9]+)*)")
+	dirPathRegex  = regexp.MustCompile("(?m)(?:^|\\s|[(\\[\"'`])([a-zA-Z0-9_-]+(?:/[a-zA-Z0-9_-]+)+)")
+	globRegex     = regexp.MustCompile("(?m)(?:^|\\s|[(\\[\"'`])([a-zA-Z0-9_./*-]+\\*[a-zA-Z0-9_./*-]*)")
 	// isValidPath regexes - pre-compiled for performance
 	versionLikeRegex = regexp.MustCompile(`^\d+\.\d+`)
 	validExtRegex    = regexp.MustCompile(`^[a-zA-Z][a-zA-Z0-9]{0,9}$`)
@@ -103,10 +105,15 @@ func ExtractFilePaths(title, description string) []string {
 		}
 	}
 
-	// Extract directory paths
-	for _, match := range dirPathRegex.FindAllStringSubmatch(combined, -1) {
-		if len(match) > 1 {
-			dir := match[1]
+	// Extract directory paths. A match that runs straight into ".ext" is the
+	// directory part of a file name (docs/notes.md), not a directory the
+	// bead names, so it must not widen into a docs/notes/**/* glob.
+	for _, loc := range dirPathRegex.FindAllStringSubmatchIndex(combined, -1) {
+		if len(loc) >= 4 && loc[2] >= 0 {
+			if end := loc[3]; end+1 < len(combined) && combined[end] == '.' && isPathWordByte(combined[end+1]) {
+				continue
+			}
+			dir := combined[loc[2]:loc[3]]
 			// Trim trailing slash if present
 			dir = strings.TrimSuffix(dir, "/")
 			if isValidPath(dir) && !seen[dir] {
@@ -129,6 +136,88 @@ func ExtractFilePaths(title, description string) []string {
 	}
 
 	return paths
+}
+
+func isPathWordByte(b byte) bool {
+	return b == '_' || (b >= '0' && b <= '9') || (b >= 'a' && b <= 'z') || (b >= 'A' && b <= 'Z')
+}
+
+// Owned-files sections in a bead description (ntm#336). A section starts at
+// a Markdown ATX heading or a standalone label line ("Owned outputs:",
+// "**Files to modify**") and runs to the next heading or label line.
+var (
+	markdownHeadingRegex   = regexp.MustCompile(`^\s{0,3}#{1,6}\s+(.+?)[\s#]*$`)
+	markdownLabelTextRegex = regexp.MustCompile(`^[A-Za-z][A-Za-z /()-]{0,60}$`)
+	ownedSectionTitleRegex = regexp.MustCompile(`(?i)^(?:owned\b.*|.*\bowned (?:outputs?|files|paths)\b.*|outputs?|output files|deliverables|files to (?:edit|change|modify|create|touch|write)|write set|edit surface)$`)
+)
+
+// ReservationPathsForBead returns the paths an assignment should reserve for
+// a bead. When the description declares the bead's owned files under a
+// heading such as "## Owned outputs" (or a "Files to modify:" label line),
+// only the paths in that section are returned: inputs the bead merely reads
+// must not become exclusive reservations. Otherwise every path in the title
+// and description is returned, as ExtractFilePaths finds them. A declared
+// section that names no path yields nil, so a reservation-required
+// assignment fails closed instead of reserving the wrong files (ntm#336).
+func ReservationPathsForBead(title, description string) []string {
+	if section, declared := ownedPathsSection(description); declared {
+		return ExtractFilePaths("", section)
+	}
+	return ExtractFilePaths(title, description)
+}
+
+// ownedPathsSection returns the text of every owned-files section in a
+// Markdown description. A section runs from its heading or label line to the
+// next heading or label line.
+func ownedPathsSection(description string) (string, bool) {
+	var (
+		section  []string
+		declared bool
+		inside   bool
+	)
+	for _, line := range strings.Split(description, "\n") {
+		if title, isHeading := sectionTitle(line); isHeading {
+			inside = ownedSectionTitleRegex.MatchString(title)
+			declared = declared || inside
+			continue
+		}
+		if inside {
+			section = append(section, line)
+		}
+	}
+	return strings.Join(section, "\n"), declared
+}
+
+// sectionTitle reports whether line is a Markdown ATX heading or a
+// standalone label line, returning its text without emphasis markers or a
+// trailing colon. A label line is bold, or ends in a colon, and holds only
+// words: list items and sentences are never labels.
+func sectionTitle(line string) (string, bool) {
+	if m := markdownHeadingRegex.FindStringSubmatch(line); m != nil {
+		return cleanSectionTitle(m[1]), true
+	}
+	trimmed := strings.TrimSpace(line)
+	bold := len(trimmed) > 4 && (strings.HasPrefix(trimmed, "**") || strings.HasPrefix(trimmed, "__"))
+	colon := strings.HasSuffix(strings.TrimRight(trimmed, "*_ "), ":")
+	if !bold && !colon {
+		return "", false
+	}
+	title := cleanSectionTitle(trimmed)
+	if !markdownLabelTextRegex.MatchString(title) {
+		return "", false
+	}
+	return title, true
+}
+
+func cleanSectionTitle(text string) string {
+	text = strings.TrimSpace(text)
+	for {
+		trimmed := strings.TrimSpace(strings.TrimSuffix(strings.Trim(text, "*_ "), ":"))
+		if trimmed == text {
+			return text
+		}
+		text = trimmed
+	}
 }
 
 // isValidPath checks if a path looks valid (not a URL, version, etc.)

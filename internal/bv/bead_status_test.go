@@ -68,6 +68,7 @@ func TestParseBeadAssignmentDetailsOutput(t *testing.T) {
 	details, err := parseBeadAssignmentDetailsOutput(`[{
 		"id":"ntm-target",
 		"title":"Exact assignment target",
+		"description":"## Owned outputs\n- ` + "`docs/out.md`" + `\n",
 		"status":"open",
 		"priority":2,
 		"assignee":"  ExactActor  ",
@@ -87,6 +88,10 @@ func TestParseBeadAssignmentDetailsOutput(t *testing.T) {
 	}
 	if details.ID != "ntm-target" || details.Title != "Exact assignment target" || details.Status != "open" || details.Priority != 2 || details.Assignee != "ExactActor" {
 		t.Fatalf("details=%+v", details)
+	}
+	// ntm#336: reservation discovery reads paths from the description.
+	if want := "## Owned outputs\n- `docs/out.md`\n"; details.Description != want {
+		t.Fatalf("description=%q, want %q", details.Description, want)
 	}
 	if want := []string{"ntm-conditional", "ntm-open-a", "ntm-open-b", "ntm-wait"}; !reflect.DeepEqual(details.BlockedBy, want) {
 		t.Fatalf("blocked_by=%v, want %v", details.BlockedBy, want)
