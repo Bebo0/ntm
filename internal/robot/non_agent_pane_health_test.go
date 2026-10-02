@@ -145,3 +145,20 @@ func TestPaneWorkStatusRecordsTmuxPaneType(t *testing.T) {
 		t.Errorf("unobserved pane paneType = %q, want empty", got)
 	}
 }
+
+// Review of 97271c76: with the shells moved to non_agent_panes, a shell-only
+// selection has no graded panes. Its fleet grade must not be the "F" of an
+// average over zero panes, the same verdict #335 removed per pane.
+func TestFinalizeFleetHealth_NoAgentPanesIsNotAFailingGrade(t *testing.T) {
+	var none FleetHealthSummary
+	finalizeFleetHealth(&none, 0, 0)
+	if none.TotalPanes != 0 || none.AvgHealthScore != 0 || none.OverallGrade != FleetGradeNoAgents {
+		t.Fatalf("no agent panes: %+v, want 0 panes, 0 avg, grade %q", none, FleetGradeNoAgents)
+	}
+
+	var two FleetHealthSummary
+	finalizeFleetHealth(&two, 2, 180)
+	if two.TotalPanes != 2 || two.AvgHealthScore != 90 || two.OverallGrade != "A" {
+		t.Fatalf("two agent panes: %+v, want 2 panes, avg 90, grade A", two)
+	}
+}

@@ -138,7 +138,10 @@ type ProviderStats struct {
 	PanesUsing     []string `json:"panes_using"`
 }
 
-// FleetHealthSummary contains overall health statistics across all panes.
+// FleetHealthSummary contains overall health statistics across the graded
+// agent panes. Non-agent panes (AgentHealthOutput.NonAgentPanes) are not
+// counted in TotalPanes; with no agent panes OverallGrade is
+// FleetGradeNoAgents rather than "F".
 type FleetHealthSummary struct {
 	TotalPanes     int     `json:"total_panes"`
 	HealthyCount   int     `json:"healthy_count"`
@@ -398,11 +401,7 @@ func GetAgentHealth(opts AgentHealthOptions) (*AgentHealthOutput, error) {
 	}
 
 	// Step 4: Calculate fleet health summary
-	output.FleetHealth.TotalPanes = len(output.Panes)
-	if output.FleetHealth.TotalPanes > 0 {
-		output.FleetHealth.AvgHealthScore = float64(totalScore) / float64(output.FleetHealth.TotalPanes)
-	}
-	output.FleetHealth.OverallGrade = HealthGrade(int(output.FleetHealth.AvgHealthScore))
+	finalizeFleetHealth(&output.FleetHealth, len(output.Panes), totalScore)
 	output.Query.PanesRequested = isWorkingResult.Query.PanesRequested
 
 	// Include PT summary if we have PT data
@@ -411,6 +410,23 @@ func GetAgentHealth(opts AgentHealthOptions) (*AgentHealthOutput, error) {
 	}
 
 	return output, nil
+}
+
+// FleetGradeNoAgents is the overall_grade of a selection with no graded agent
+// panes, such as a session of plain shells (ntm#335). An average over zero
+// panes is not a failing grade.
+const FleetGradeNoAgents = "N/A"
+
+// finalizeFleetHealth fills in the fleet totals from the graded agent panes.
+func finalizeFleetHealth(fleet *FleetHealthSummary, gradedPanes, totalScore int) {
+	fleet.TotalPanes = gradedPanes
+	if gradedPanes == 0 {
+		fleet.AvgHealthScore = 0
+		fleet.OverallGrade = FleetGradeNoAgents
+		return
+	}
+	fleet.AvgHealthScore = float64(totalScore) / float64(gradedPanes)
+	fleet.OverallGrade = HealthGrade(int(fleet.AvgHealthScore))
 }
 
 // nonAgentPaneFor reports whether a pane is a non-agent pane by its
