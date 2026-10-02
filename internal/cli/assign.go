@@ -3007,16 +3007,29 @@ func normalizedAssignmentReleasePaths(paths []string) []string {
 var errNoReservationPaths = errors.New("no file paths to reserve in the bead title or description; " +
 	"list the files it will change (for example under an \"## Owned outputs\" heading) or pass --reserve-files=false")
 
+// errOwnedSectionHasNoPaths rejects a bead whose description declares an
+// owned-files section ("## Owned outputs", "## Deliverables", "Files to
+// modify:") that names no file. Paths elsewhere in the description are read
+// as inputs, so "no file paths" alone would be misleading.
+var errOwnedSectionHasNoPaths = errors.New("the bead description has an owned-files section " +
+	"(such as \"## Owned outputs\", \"## Deliverables\" or \"Files to modify:\") that names no file paths; " +
+	"paths elsewhere in the description are treated as inputs and are not reserved. " +
+	"List the files it will change in that section or pass --reserve-files=false")
+
 // assignmentReservationPaths resolves the files an assignment must reserve
 // from the live bead's title and description. It returns nil when
-// reservations are off, and errNoReservationPaths when they are required but
-// the bead names no files.
+// reservations are off, and an error when they are required but no path
+// qualifies: errOwnedSectionHasNoPaths when an owned-files section is
+// declared but empty, errNoReservationPaths when the bead names no files.
 func assignmentReservationPaths(details *bv.BeadAssignmentDetails, reserve bool) ([]string, error) {
 	if !reserve || details == nil {
 		return nil, nil
 	}
 	paths := assign.ReservationPathsForBead(details.Title, details.Description)
 	if len(paths) == 0 {
+		if assign.DeclaresOwnedPaths(details.Description) {
+			return nil, errOwnedSectionHasNoPaths
+		}
 		return nil, errNoReservationPaths
 	}
 	return paths, nil
@@ -5643,6 +5656,7 @@ func runDirectPaneAssignment(ctx context.Context, opts *AssignCommandOptions) er
 	agentType := agentTypeForPane(targetPane)
 	agentName := assignmentAgentIdentityForPane(opts.ProjectDir, opts.Session, agentType, targetPane, multiWindow)
 	beadTitle := ""
+	var directRequestedPaths []string
 	if executeBeforePreflight {
 		beadTitle = prior.BeadTitle
 		if sameIntent {
@@ -5741,6 +5755,24 @@ func runDirectPaneAssignment(ctx context.Context, opts *AssignCommandOptions) er
 			}
 		}
 		prompt = intent.prompt(beadID, beadTitle)
+
+		// Work out the reservation surface from the live title and
+		// description before the claim, as assign --auto does (ntm#336): a
+		// bead that names no files is refused here, unclaimed. When the
+		// details cannot be read, the coordinator's discovery decides.
+		if opts.ReserveFiles {
+			if details, detailsErr := getBeadAssignmentDetailsForAssignment(ctx, projectDir, beadID); detailsErr == nil && details != nil {
+				paths, pathsErr := assignmentReservationPaths(details, true)
+				if pathsErr != nil {
+					errMsg := fmt.Sprintf("not assigning %s: %v", beadID, pathsErr)
+					if IsJSONOutput() {
+						return emitJSONFailureEnvelope(makeDirectAssignEnvelope(opts.Session, false, &DirectAssignData{Assignment: assignItem}, "RESERVATION_REQUIRED", errMsg, warnings))
+					}
+					return errors.New(errMsg)
+				}
+				directRequestedPaths = paths
+			}
+		}
 	}
 
 	request := assignment.AtomicRequest{
@@ -5755,6 +5787,7 @@ func runDirectPaneAssignment(ctx context.Context, opts *AssignCommandOptions) er
 		Prompt:                    prompt,
 		IdempotencyKey:            idempotencyKey,
 		RequireReservation:        opts.ReserveFiles,
+		RequestedPaths:            directRequestedPaths,
 		AllowReservationDiscovery: opts.ReserveFiles,
 		ReservationTTL:            time.Hour,
 	}

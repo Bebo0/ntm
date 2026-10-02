@@ -91,3 +91,26 @@ func TestCLIReservationPortDiscoversDescriptionPaths(t *testing.T) {
 		t.Fatalf("ReconcileReservation = %+v, want reserved with IDs [71 72]", recon)
 	}
 }
+
+// Review of 89b32d9a: a declared-but-empty owned section must say so rather
+// than claim the description names no files, and a bead whose files appear
+// only in prose still reserves them.
+func TestAssignmentReservationPathsExplainsEmptyOwnedSection(t *testing.T) {
+	declared := &bv.BeadAssignmentDetails{
+		ID: "ntm-d", Title: "Write the report",
+		Description: "Read internal/robot/robot.go.\n\n## Deliverables\n- A short written report\n",
+	}
+	_, err := assignmentReservationPaths(declared, true)
+	if !errors.Is(err, errOwnedSectionHasNoPaths) {
+		t.Fatalf("declared-but-empty owned section: err = %v, want errOwnedSectionHasNoPaths", err)
+	}
+
+	prose := &bv.BeadAssignmentDetails{
+		ID: "ntm-p", Title: "Stop grading shells",
+		Description: "The stall detector in internal/robot/tmux_adapter.go grades shells; fix it there.",
+	}
+	paths, err := assignmentReservationPaths(prose, true)
+	if err != nil || !reflect.DeepEqual(paths, []string{"internal/robot/tmux_adapter.go"}) {
+		t.Fatalf("prose-only paths = %v, err = %v; want the prose path reserved", paths, err)
+	}
+}

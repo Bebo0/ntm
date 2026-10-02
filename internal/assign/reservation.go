@@ -144,9 +144,13 @@ func isPathWordByte(b byte) bool {
 
 // Owned-files sections in a bead description (ntm#336). A section starts at
 // a Markdown ATX heading or a standalone label line ("Owned outputs:",
-// "**Files to modify**") and runs to the next heading or label line.
+// "**Files to modify**"). A section opened by a heading runs to the next
+// heading of the same or a higher level, so its own sub-labels ("Primary:",
+// "Tests:") and sub-headings stay inside it. A section opened by a label line
+// runs to the next heading or label line. Fenced code blocks are content,
+// never headings: a "# comment" in a shell snippet does not end a section.
 var (
-	markdownHeadingRegex   = regexp.MustCompile(`^\s{0,3}#{1,6}\s+(.+?)[\s#]*$`)
+	markdownHeadingRegex   = regexp.MustCompile(`^\s{0,3}(#{1,6})\s+(.+?)[\s#]*$`)
 	markdownLabelTextRegex = regexp.MustCompile(`^[A-Za-z][A-Za-z /()-]{0,60}$`)
 	ownedSectionTitleRegex = regexp.MustCompile(`(?i)^(?:owned\b.*|.*\bowned (?:outputs?|files|paths)\b.*|outputs?|output files|deliverables|files to (?:edit|change|modify|create|touch|write)|write set|edit surface)$`)
 )
@@ -158,7 +162,8 @@ var (
 // must not become exclusive reservations. Otherwise every path in the title
 // and description is returned, as ExtractFilePaths finds them. A declared
 // section that names no path yields nil, so a reservation-required
-// assignment fails closed instead of reserving the wrong files (ntm#336).
+// assignment fails closed instead of reserving the wrong files (ntm#336);
+// DeclaresOwnedPaths tells that case apart from a bead that names no files.
 func ReservationPathsForBead(title, description string) []string {
 	if section, declared := ownedPathsSection(description); declared {
 		return ExtractFilePaths("", section)
@@ -166,20 +171,54 @@ func ReservationPathsForBead(title, description string) []string {
 	return ExtractFilePaths(title, description)
 }
 
+// DeclaresOwnedPaths reports whether a bead description has an owned-files
+// section, whose paths ReservationPathsForBead then reserves exclusively.
+func DeclaresOwnedPaths(description string) bool {
+	_, declared := ownedPathsSection(description)
+	return declared
+}
+
 // ownedPathsSection returns the text of every owned-files section in a
-// Markdown description. A section runs from its heading or label line to the
-// next heading or label line.
+// Markdown description, including the text of each opening heading so a path
+// written on it ("## Owned outputs: `a.go`") counts.
 func ownedPathsSection(description string) (string, bool) {
 	var (
-		section  []string
-		declared bool
-		inside   bool
+		section   []string
+		declared  bool
+		inside    bool
+		openLevel int // ATX level of the heading that opened the section; 0 for a label line
+		fence     string
 	)
 	for _, line := range strings.Split(description, "\n") {
-		if title, isHeading := sectionTitle(line); isHeading {
-			inside = ownedSectionTitleRegex.MatchString(title)
-			declared = declared || inside
+		if marker := codeFenceMarker(line); marker != "" {
+			switch {
+			case fence == "":
+				fence = marker
+			case strings.HasPrefix(marker, fence):
+				fence = ""
+			}
+			if inside {
+				section = append(section, line)
+			}
 			continue
+		}
+		if fence == "" {
+			if title, level, isHeading := sectionTitle(line); isHeading {
+				if inside && openLevel > 0 && (level == 0 || level > openLevel) {
+					// A sub-label or deeper heading inside the open
+					// heading-level owned section belongs to it. Its text,
+					// not the raw line: "**Tests**" is not a glob.
+					section = append(section, title)
+					continue
+				}
+				inside = ownedSectionTitleRegex.MatchString(title)
+				openLevel = level
+				declared = declared || inside
+				if inside && level > 0 {
+					section = append(section, title)
+				}
+				continue
+			}
 		}
 		if inside {
 			section = append(section, line)
@@ -188,25 +227,45 @@ func ownedPathsSection(description string) (string, bool) {
 	return strings.Join(section, "\n"), declared
 }
 
+// codeFenceMarker returns the run of backticks or tildes (three or more) that
+// opens or closes a fenced code block on this line, or "".
+func codeFenceMarker(line string) string {
+	trimmed := strings.TrimLeft(line, " ")
+	if len(line)-len(trimmed) > 3 {
+		return ""
+	}
+	for _, ch := range []byte{'`', '~'} {
+		n := 0
+		for n < len(trimmed) && trimmed[n] == ch {
+			n++
+		}
+		if n >= 3 {
+			return trimmed[:n]
+		}
+	}
+	return ""
+}
+
 // sectionTitle reports whether line is a Markdown ATX heading or a
 // standalone label line, returning its text without emphasis markers or a
-// trailing colon. A label line is bold, or ends in a colon, and holds only
-// words: list items and sentences are never labels.
-func sectionTitle(line string) (string, bool) {
+// trailing colon, and its heading level (0 for a label line). A label line
+// is bold, or ends in a colon, and holds only words: list items and
+// sentences are never labels.
+func sectionTitle(line string) (string, int, bool) {
 	if m := markdownHeadingRegex.FindStringSubmatch(line); m != nil {
-		return cleanSectionTitle(m[1]), true
+		return cleanSectionTitle(m[2]), len(m[1]), true
 	}
 	trimmed := strings.TrimSpace(line)
 	bold := len(trimmed) > 4 && (strings.HasPrefix(trimmed, "**") || strings.HasPrefix(trimmed, "__"))
 	colon := strings.HasSuffix(strings.TrimRight(trimmed, "*_ "), ":")
 	if !bold && !colon {
-		return "", false
+		return "", 0, false
 	}
 	title := cleanSectionTitle(trimmed)
 	if !markdownLabelTextRegex.MatchString(title) {
-		return "", false
+		return "", 0, false
 	}
-	return title, true
+	return title, 0, true
 }
 
 func cleanSectionTitle(text string) string {

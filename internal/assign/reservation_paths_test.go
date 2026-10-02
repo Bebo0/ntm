@@ -110,3 +110,61 @@ func TestExtractFilePathsBacktickedAndNoFilenamePrefixGlobs(t *testing.T) {
 		}
 	}
 }
+
+// Review of 89b32d9a: the owned section must not under-reserve when it has
+// its own sub-labels, a path on the heading line, or a fenced snippet with
+// "# comment" lines, and a bead whose files are only in prose still reserves
+// them.
+func TestReservationPathsForBeadDoesNotUnderReserve(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		description string
+		want        []string
+	}{
+		{
+			name:        "sub-labels inside a heading section",
+			description: "Read internal/old/legacy.go.\n\n## Owned outputs\nPrimary:\n- internal/cli/assign.go\nTests:\n- internal/cli/assign_test.go\n\n## Notes\n- see internal/old/other.go\n",
+			want:        []string{"internal/cli/assign.go", "internal/cli/assign_test.go"},
+		},
+		{
+			name:        "deeper heading inside a heading section",
+			description: "## Owned outputs\n- a/one.go\n### Tests\n- a/one_test.go\n## Inputs\n- a/in.go\n",
+			want:        []string{"a/one.go", "a/one_test.go"},
+		},
+		{
+			name:        "path on the heading line",
+			description: "Read pkg/input.go.\n\n## Owned outputs: `pkg/output.go`\n\n## Acceptance\n- tests pass\n",
+			want:        []string{"pkg/output.go"},
+		},
+		{
+			name:        "fenced comment does not end the section",
+			description: "## Owned outputs\n```sh\n# regenerate\nmake gen\n```\n- gen/out.go\n## Inputs\n- gen/in.go\n",
+			want:        []string{"gen/out.go"},
+		},
+		{
+			name:        "fenced comment does not open a section",
+			description: "Edit internal/api/server.go.\n```sh\n# Output\necho hi\n```\n",
+			want:        []string{"internal/api/server.go"},
+		},
+		{
+			name:        "files only in prose",
+			description: "The stall detector in internal/robot/tmux_adapter.go grades shells; fix it and extend internal/robot/is_working.go so the type survives.",
+			want:        []string{"internal/robot/is_working.go", "internal/robot/tmux_adapter.go"},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := sortedPaths(ReservationPathsForBead("Refactor", tc.description)); !reflect.DeepEqual(got, tc.want) {
+				t.Fatalf("ReservationPathsForBead() = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestDeclaresOwnedPaths(t *testing.T) {
+	if !DeclaresOwnedPaths("Read a.go.\n\n## Deliverables\n- A short report\n") {
+		t.Fatal("a Deliverables heading is an owned section")
+	}
+	if DeclaresOwnedPaths("Read a.go and edit b.go.\n```\n# Outputs\n```\n") {
+		t.Fatal("a heading inside a code fence is not an owned section")
+	}
+}
