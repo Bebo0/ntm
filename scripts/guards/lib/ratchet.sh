@@ -19,6 +19,11 @@
 #
 # Prints offending lines; returns 0 iff both sets match exactly.
 
+# Every sort and comm below runs under LC_ALL=C. comm merges two sorted
+# streams, so it is only correct when it collates exactly as sort did; under a
+# UTF-8 locale the two disagree on these entries ("comm: file 1 is not in
+# sorted order") and the set differences the ratchet reports cannot be trusted.
+
 ratchet_extract_pairs() {
   # allowlist -> "entry<TAB>bead" pairs (non-comment, non-permanent), sorted unique
   local allowlist="$1" class="${2:-}"
@@ -27,18 +32,18 @@ ratchet_extract_pairs() {
     /^#/ || /^[[:space:]]*$/   { next }
     perm && $2 == "permanent"  { next }
     { print $1 "\t" $2 }
-  ' "$allowlist" | { if [ -n "$class" ]; then grep -E "^${class}" || true; else cat; fi; } | sort -u
+  ' "$allowlist" | { if [ -n "$class" ]; then grep -E "^${class}" || true; else cat; fi; } | LC_ALL=C sort -u
 }
 
 ratchet_compare() {
   local allowlist="$1" current="$2" class="${3:-}"
   local allowed cur rc=0
   allowed="$(ratchet_extract_pairs "$allowlist" "$class")"
-  cur="$(sort -u "$current")"
+  cur="$(LC_ALL=C sort -u "$current")"
 
   local new_debt stale
-  new_debt="$(comm -23 <(printf '%s\n' "$cur" | sed '/^$/d') <(printf '%s\n' "$allowed" | sed '/^$/d'))"
-  stale="$(comm -13 <(printf '%s\n' "$cur" | sed '/^$/d') <(printf '%s\n' "$allowed" | sed '/^$/d'))"
+  new_debt="$(LC_ALL=C comm -23 <(printf '%s\n' "$cur" | sed '/^$/d') <(printf '%s\n' "$allowed" | sed '/^$/d'))"
+  stale="$(LC_ALL=C comm -13 <(printf '%s\n' "$cur" | sed '/^$/d') <(printf '%s\n' "$allowed" | sed '/^$/d'))"
 
   if [ -n "$new_debt" ]; then
     echo "RATCHET FAIL — new debt (violation not allowlisted in $allowlist):" >&2

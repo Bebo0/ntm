@@ -52,6 +52,9 @@
 # analysis is guaranteed in CI by the dedicated `reality-guards-go` job
 # (.github/workflows/ci.yml), which sets up Go and runs this script.
 set -u
+# The GOOS intersection and orphan-package check merge sorted lists with comm,
+# which is only correct when it collates as sort did; see lib/ratchet.sh.
+export LC_ALL=C
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$REPO_ROOT" || exit 1
