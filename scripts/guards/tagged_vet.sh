@@ -74,7 +74,10 @@ uncovered="$(git grep -h '^//go:build ' -- '*_test.go' ':(exclude)third_party/**
   | while read -r tag; do
       case "$tag" in
         # GOOS/GOARCH and race are supplied by the platform/toolchain, not -tags.
-        linux|darwin|windows|freebsd|openbsd|netbsd|plan9|solaris|js|wasip1|aix|android|ios|amd64|arm64|386|arm|race|cgo|unix|go1.*) continue ;;
+        # The GOOS/GOARCH names are `go tool dist list`'s, complete as of Go 1.26.
+        aix|android|darwin|dragonfly|freebsd|illumos|ios|js|linux|netbsd|openbsd|plan9|solaris|wasip1|windows) continue ;;
+        386|amd64|arm|arm64|loong64|mips|mips64|mips64le|mipsle|ppc64|ppc64le|riscv64|s390x|wasm) continue ;;
+        race|cgo|unix|go1.*) continue ;;
       esac
       case "$covered" in
         *" $tag "*) ;;
