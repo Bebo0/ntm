@@ -389,8 +389,9 @@ func TestCheckpointJobCancellationStopsWorker(t *testing.T) {
 		srv.dispatchJob(job.ID, CreateJobRequest{Type: JobTypeCheckpointRestore, Params: params})
 	}()
 	t.Cleanup(func() {
-		srv.jobStore.Update(job.ID, JobStatusCancelled, 0, nil, "test cleanup")
-		srv.jobStore.Cancel(job.ID)
+		// A no-op when the test already cancelled the job; otherwise it stops
+		// the worker left behind by an earlier failure.
+		_, _ = srv.cancelJob(job.ID)
 		select {
 		case <-done:
 		case <-time.After(4 * time.Second):
@@ -412,9 +413,11 @@ func TestCheckpointJobCancellationStopsWorker(t *testing.T) {
 		}
 		time.Sleep(5 * time.Millisecond)
 	}
-	// Exactly the order used by DELETE /api/v1/jobs/{id}.
-	srv.jobStore.Update(job.ID, JobStatusCancelled, 0, nil, "cancelled by user")
-	srv.jobStore.Cancel(job.ID)
+	// Cancel through the same path DELETE /api/v1/jobs/{id} uses: it marks
+	// the row cancelled and invokes the worker's registered cancel func.
+	if _, err := srv.cancelJob(job.ID); err != nil {
+		t.Fatalf("cancelJob: %v", err)
+	}
 	select {
 	case <-done:
 	case <-time.After(4 * time.Second):

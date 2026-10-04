@@ -209,7 +209,6 @@ func TestSwarmJobCancellationRecoveryHTTP(t *testing.T) {
 	defer finish()
 
 	env := postJob(t, srv, `{"type":"swarm_spawn","params":{"session":"recoverable","cc_count":2}}`)
-	defer srv.jobStore.Cancel(env.Job.ID)
 	select {
 	case <-started:
 	case <-time.After(5 * time.Second):

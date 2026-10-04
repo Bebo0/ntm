@@ -530,16 +530,6 @@ func (s *JobStore) ClearCancel(id string) {
 	delete(s.cancels, id)
 }
 
-// Cancel invokes the job's registered cancel func, if any.
-func (s *JobStore) Cancel(id string) {
-	s.mu.RLock()
-	cancel := s.cancels[id]
-	s.mu.RUnlock()
-	if cancel != nil {
-		cancel()
-	}
-}
-
 // maxRetainedJobs bounds the job store over the server's lifetime: once the
 // map reaches this size, Create evicts the oldest terminal (completed /
 // failed / cancelled) jobs. Pending and running jobs are never evicted.

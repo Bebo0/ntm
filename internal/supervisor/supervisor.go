@@ -834,29 +834,6 @@ var healthCheckClient = &http.Client{
 const daemonHealthTimeout = 3 * time.Second
 const daemonHealthWaitDelay = 2 * time.Second
 
-// Compatibility helpers use the same bounded probes as the live monitor.
-func (s *Supervisor) checkHealthHTTP(url string) bool {
-	ctx, cancel := context.WithTimeout(context.Background(), daemonHealthTimeout)
-	defer cancel()
-	_, err := daemonHealthResponse(ctx, http.MethodGet, url, nil, false)
-	return err == nil
-}
-
-func (s *Supervisor) checkHealthMCP(url string) bool {
-	ctx, cancel := context.WithTimeout(context.Background(), daemonHealthTimeout)
-	defer cancel()
-	return probeDaemonMCP(ctx, url) == nil
-}
-
-func (s *Supervisor) checkHealthCmd(args []string) bool {
-	if len(args) == 0 {
-		return false
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), daemonHealthTimeout)
-	defer cancel()
-	return probeDaemonHealth(ctx, DaemonSpec{HealthCmd: args}, s.projectDir) == nil
-}
-
 // writePIDFile writes the PID file for a daemon.
 func (s *Supervisor) writePIDFile(d *ManagedDaemon) error {
 	path := s.pidPath(d.Spec.Name)

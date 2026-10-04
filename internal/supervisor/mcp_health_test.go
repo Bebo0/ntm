@@ -26,8 +26,6 @@ import (
 )
 
 func TestCheckHealthMCP(t *testing.T) {
-	s := &Supervisor{}
-
 	tests := []struct {
 		name    string
 		handler http.HandlerFunc
@@ -116,8 +114,9 @@ func TestCheckHealthMCP(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			ts := httptest.NewServer(tt.handler)
 			defer ts.Close()
-			if got := s.checkHealthMCP(ts.URL); got != tt.want {
-				t.Errorf("checkHealthMCP() = %v, want %v", got, tt.want)
+			err := probeHealth(t, DaemonSpec{HealthMCP: true, HealthURL: ts.URL})
+			if got := err == nil; got != tt.want {
+				t.Errorf("MCP health probe healthy = %v (err: %v), want %v", got, err, tt.want)
 			}
 		})
 	}
@@ -127,8 +126,8 @@ func TestCheckHealthMCP(t *testing.T) {
 		if err != nil {
 			t.Fatalf("findAvailablePort: %v", err)
 		}
-		if s.checkHealthMCP(fmt.Sprintf("http://127.0.0.1:%d/", port)) {
-			t.Error("checkHealthMCP() = true for a closed port")
+		if err := probeHealth(t, DaemonSpec{HealthMCP: true, HealthURL: fmt.Sprintf("http://127.0.0.1:%d/", port)}); err == nil {
+			t.Error("MCP health probe passed for a closed port")
 		}
 	})
 }

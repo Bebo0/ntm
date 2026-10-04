@@ -834,19 +834,18 @@ func TestStartNoPortFallbackRefusesOccupiedPort(t *testing.T) {
 	}
 }
 
-// TestHealthCheck tests the HTTP health check functionality
+// probeHealth runs the live monitor's health probe for spec under the
+// monitor's per-probe timeout, scoped to a fresh directory and the current
+// environment. A nil error is the monitor's "healthy" verdict.
+func probeHealth(t *testing.T, spec DaemonSpec) error {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), daemonHealthTimeout)
+	defer cancel()
+	return probeDaemonHealthInScope(ctx, spec, t.TempDir(), os.Environ())
+}
+
+// TestHealthCheck tests the HTTP health probe
 func TestHealthCheck(t *testing.T) {
-	tmpDir := t.TempDir()
-
-	s, err := New(Config{
-		SessionID:  "test-session",
-		ProjectDir: tmpDir,
-	})
-	if err != nil {
-		t.Fatalf("New() error = %v", err)
-	}
-	defer s.Shutdown()
-
 	// Start a test HTTP server
 	mux := http.NewServeMux()
 	mux.HandleFunc("/health/liveness", func(w http.ResponseWriter, r *http.Request) {
@@ -865,39 +864,28 @@ func TestHealthCheck(t *testing.T) {
 	go server.Serve(ln)
 	defer server.Shutdown(context.Background())
 
-	// Test checkHealthHTTP
+	// Test the HTTP probe against a healthy endpoint
 	healthURL := fmt.Sprintf("http://127.0.0.1:%d/health/liveness", port)
-	if !s.checkHealthHTTP(healthURL) {
-		t.Error("checkHealthHTTP() returned false for healthy endpoint")
+	if err := probeHealth(t, DaemonSpec{HealthURL: healthURL}); err != nil {
+		t.Errorf("HTTP health probe failed for healthy endpoint: %v", err)
 	}
 
 	// Test with invalid URL
-	if s.checkHealthHTTP("http://127.0.0.1:99999/health/liveness") {
-		t.Error("checkHealthHTTP() returned true for invalid endpoint")
+	if err := probeHealth(t, DaemonSpec{HealthURL: "http://127.0.0.1:99999/health/liveness"}); err == nil {
+		t.Error("HTTP health probe passed for invalid endpoint")
 	}
 }
 
-// TestHealthCheckCmd tests the command-based health check functionality
+// TestHealthCheckCmd tests the command-based health probe
 func TestHealthCheckCmd(t *testing.T) {
-	tmpDir := t.TempDir()
-
-	s, err := New(Config{
-		SessionID:  "test-session",
-		ProjectDir: tmpDir,
-	})
-	if err != nil {
-		t.Fatalf("New() error = %v", err)
-	}
-	defer s.Shutdown()
-
 	// Test with successful command
-	if !s.checkHealthCmd([]string{"echo", "ok"}) {
-		t.Error("checkHealthCmd() returned false for successful command")
+	if err := probeHealth(t, DaemonSpec{HealthCmd: []string{"echo", "ok"}}); err != nil {
+		t.Errorf("command health probe failed for successful command: %v", err)
 	}
 
 	// Test with failed command
-	if s.checkHealthCmd([]string{"false"}) {
-		t.Error("checkHealthCmd() returned true for failed command")
+	if err := probeHealth(t, DaemonSpec{HealthCmd: []string{"false"}}); err == nil {
+		t.Error("command health probe passed for failed command")
 	}
 }
 

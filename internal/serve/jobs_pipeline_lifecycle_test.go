@@ -177,8 +177,10 @@ func TestJobDispatchCancelledBeforeRegistration(t *testing.T) {
 	srv := NewHermeticServer("test")
 	defer srv.Stop()
 	job := srv.jobStore.Create(JobTypeSwarmSpawn)
-	srv.jobStore.Update(job.ID, JobStatusCancelled, 0, nil, "cancelled by user")
-	srv.jobStore.Cancel(job.ID) // No cancel func is registered yet.
+	// DELETE before dispatch: no cancel func is registered yet.
+	if _, err := srv.cancelJob(job.ID); err != nil {
+		t.Fatalf("cancelJob: %v", err)
+	}
 	srv.spawnAgents = func(context.Context, robot.SpawnOptions) (*robot.SpawnOutput, error) {
 		t.Fatal("cancelled job attempted to spawn agents")
 		return nil, nil

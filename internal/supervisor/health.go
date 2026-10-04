@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"os"
 	"os/exec"
 )
 
@@ -27,17 +26,12 @@ func daemonHealthMode(spec DaemonSpec) string {
 	}
 }
 
-// probeDaemonHealth uses the same execution scope as the daemon. The caller
-// supplies the generation's bounded health context, not its process context:
-// stopping observation must not skip graceful shutdown of the daemon itself.
-func probeDaemonHealth(ctx context.Context, spec DaemonSpec, projectDir string) error {
-	dir := spec.WorkDir
-	if dir == "" {
-		dir = projectDir
-	}
-	return probeDaemonHealthInScope(ctx, spec, dir, append(os.Environ(), spec.Env...))
-}
-
+// probeDaemonHealthInScope runs the daemon's configured health probe in the
+// same execution scope as the daemon: dir and env are the launch scope frozen
+// before exec, so later parent cwd/env changes cannot redirect a health
+// command. The caller supplies the generation's bounded health context, not
+// its process context: stopping observation must not skip graceful shutdown
+// of the daemon itself.
 func probeDaemonHealthInScope(ctx context.Context, spec DaemonSpec, dir string, env []string) error {
 	if err := ctx.Err(); err != nil {
 		return err

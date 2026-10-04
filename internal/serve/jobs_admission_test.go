@@ -178,9 +178,17 @@ func TestJobAdmissionOwnedTerminalJobsSurviveRetention(t *testing.T) {
 	if got := store.Get(job.ID); got == nil || got.Result["pane_id"] != "%17" {
 		t.Fatal("retention evicted an unwinding worker's recovery evidence")
 	}
-	store.Cancel(job.ID)
-	if ctx.Err() == nil {
+	// Read the handle the way cancelJob and drainJobWorkers do; cancelJob
+	// itself refuses this terminal row.
+	store.mu.RLock()
+	handle := store.cancels[job.ID]
+	store.mu.RUnlock()
+	if handle == nil {
 		t.Fatal("retention removed the real cancellation handle")
+	}
+	handle()
+	if ctx.Err() == nil {
+		t.Fatal("retention kept a handle that is not the worker's real cancel func")
 	}
 	store.ClearCancel(job.ID)
 	store.mu.Lock()

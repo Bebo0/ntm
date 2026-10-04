@@ -196,13 +196,9 @@ func TestDaemonHealthRejectsIncompleteProtocolEvidence(t *testing.T) {
 				fmt.Fprint(w, tc.body)
 			}))
 			defer server.Close()
-			s := &Supervisor{}
-			got := s.checkHealthHTTP(server.URL)
-			if tc.mcp {
-				got = s.checkHealthMCP(server.URL)
-			}
-			if got != tc.good {
-				t.Fatalf("healthy=%v, want %v", got, tc.good)
+			err := probeHealth(t, DaemonSpec{HealthURL: server.URL, HealthMCP: tc.mcp})
+			if got := err == nil; got != tc.good {
+				t.Fatalf("healthy=%v (err: %v), want %v", got, err, tc.good)
 			}
 		})
 	}
@@ -212,7 +208,7 @@ func TestDaemonHealthCommandCancellationIsBounded(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Millisecond)
 	defer cancel()
 	start := time.Now()
-	err := probeDaemonHealth(ctx, DaemonSpec{HealthCmd: []string{"sh", "-c", "exec sleep 30"}}, t.TempDir())
+	err := probeDaemonHealthInScope(ctx, DaemonSpec{HealthCmd: []string{"sh", "-c", "exec sleep 30"}}, t.TempDir(), os.Environ())
 	if !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("lost deadline cause: %v", err)
 	}

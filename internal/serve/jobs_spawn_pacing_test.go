@@ -115,7 +115,6 @@ func TestSwarmJobStartupTimeoutHTTP(t *testing.T) {
 				return out, nil
 			}
 			env := postJob(t, srv, `{"type":"swarm_spawn","params":{"session":"recoverable","cc_count":2,"launch_interval":"1h","startup_timeout":"20ms"}}`)
-			defer srv.jobStore.Cancel(env.Job.ID)
 			final := pollJobTerminal(t, srv, env.Job.ID)
 			if final.Job.Status != string(JobStatusFailed) || !strings.Contains(final.Job.Error, "context deadline exceeded") {
 				t.Fatalf("startup deadline was not authoritative: %+v", final.Job)
