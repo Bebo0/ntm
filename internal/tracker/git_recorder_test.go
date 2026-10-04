@@ -1,6 +1,7 @@
 package tracker
 
 import (
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -377,5 +378,169 @@ func TestRecorderKeysLedgerByRepositoryRoot(t *testing.T) {
 	t.Cleanup(func() { GlobalFileChanges = original })
 	if got := RecordedChangesSince(time.Now().Add(-time.Hour)); len(got) != 1 {
 		t.Errorf("reader at the repository root found %d changes, want 1", len(got))
+	}
+}
+
+// git reports paths relative to the repository root even when it runs in a
+// subdirectory. A recorder rooted in a manifest's subdirectory used to stat
+// "services/tracked.txt" for "tracked.txt": every signature came back empty, so
+// a repeat edit was missed, and the stat after a commit failed, so the commit
+// was recorded as a deletion.
+func TestGitRecorderRootedInASubdirectory(t *testing.T) {
+	installFakeBackend(t)
+	repo := newGitRepo(t)
+	sub := filepath.Join(repo, "services")
+	if err := os.MkdirAll(sub, 0o755); err != nil {
+		t.Fatalf("mkdir sub: %v", err)
+	}
+
+	store := NewFileChangeStore(50)
+	r := NewGitRecorder(GitRecorderConfig{Root: sub, ProjectDir: sub, Session: "sess", Identity: "cc-1", Store: store})
+	sample(t, r)
+
+	writeFile(t, repo, "tracked.txt", "edit one")
+	if n := sample(t, r); n != 1 {
+		t.Fatalf("first edit recorded %d changes, want 1", n)
+	}
+	writeFile(t, repo, "tracked.txt", "edit two, a different length entirely")
+	if n := sample(t, r); n != 1 {
+		t.Errorf("repeat edit recorded %d changes, want 1", n)
+	}
+
+	gitCmd(t, repo, "add", ".")
+	gitCmd(t, repo, "commit", "-m", "commit the edits")
+	sample(t, r)
+	for _, entry := range store.All() {
+		if entry.Change.Type == FileDeleted {
+			t.Errorf("committing %s was recorded as a deletion", entry.Change.Path)
+		}
+	}
+}
+
+func fillDir(t *testing.T, dir string, n int) {
+	t.Helper()
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatalf("mkdir %s: %v", dir, err)
+	}
+	for i := range n {
+		if err := os.WriteFile(filepath.Join(dir, fmt.Sprintf("f%05d", i)), nil, 0o644); err != nil {
+			t.Fatalf("write: %v", err)
+		}
+	}
+}
+
+// GH #337: an untracked directory of agent scratch output made every sample
+// list, parse and stat each file in it. Past the listing limit it is held as
+// one entry: recorded once when it appears, and silent while it keeps filling.
+func TestGitRecorderHoldsLargeUntrackedDirectoryWhole(t *testing.T) {
+	installFakeBackend(t)
+	repo := newGitRepo(t)
+	store := NewFileChangeStore(50)
+	r := newTestRecorder(repo, "cc-1", store)
+	sample(t, r)
+
+	fillDir(t, filepath.Join(repo, "scratch"), untrackedDirListLimit+1)
+	writeFile(t, repo, "tracked.txt", "a real edit alongside the scratch output")
+	if n := sample(t, r); n != 2 {
+		t.Fatalf("recorded %d changes, want 2 (scratch/ and tracked.txt)", n)
+	}
+	byPath := map[string]FileChangeType{}
+	for _, entry := range store.All() {
+		byPath[entry.Change.Path] = entry.Change.Type
+	}
+	if byPath["scratch/"] != FileAdded || byPath["tracked.txt"] != FileModified {
+		t.Errorf("recorded %v, want scratch/ added and tracked.txt modified", byPath)
+	}
+
+	writeFile(t, repo, "scratch/more-output.txt", "keeps filling")
+	if n := sample(t, r); n != 0 {
+		t.Errorf("filling a directory held whole recorded %d changes, want 0", n)
+	}
+
+	snapshot, err := gitDirtySnapshot(t.Context(), repo)
+	if err != nil {
+		t.Fatalf("gitDirtySnapshot: %v", err)
+	}
+	if len(snapshot) != 2 {
+		t.Errorf("snapshot holds %d entries, want 2 (scratch/ and tracked.txt)", len(snapshot))
+	}
+}
+
+// A directory that shrinks back under the limit becomes listable again. Its
+// files were inside it all along, so listing them is not an addition per file.
+func TestGitRecorderUntrackedDirectoryShrinkingBackIsNotAChange(t *testing.T) {
+	installFakeBackend(t)
+	repo := newGitRepo(t)
+	scratch := filepath.Join(repo, "scratch")
+	fillDir(t, scratch, untrackedDirListLimit+1)
+
+	store := NewFileChangeStore(50)
+	r := newTestRecorder(repo, "cc-1", store)
+	sample(t, r)
+
+	for i := 2; i <= untrackedDirListLimit; i++ {
+		if err := os.Remove(filepath.Join(scratch, fmt.Sprintf("f%05d", i))); err != nil {
+			t.Fatalf("remove: %v", err)
+		}
+	}
+	if n := sample(t, r); n != 0 {
+		t.Fatalf("listing a shrunken directory recorded %d changes, want 0", n)
+	}
+
+	// Listed file by file again, its files carry signatures once more.
+	writeFile(t, repo, "scratch/f00000", "now edited")
+	if n := sample(t, r); n != 1 {
+		t.Errorf("editing a file in the listed directory recorded %d changes, want 1", n)
+	}
+}
+
+// A directory name handed back to git to be listed is a path, not a pathspec.
+// Parsed as pathspec magic, a directory named ":!x" means "everything except
+// x/" and would list the very directory held whole for being too large.
+func TestUntrackedListingUsesLiteralPathspecs(t *testing.T) {
+	repo := newGitRepo(t)
+	writeFile(t, repo, ":!x/small.txt", "small")
+	fillDir(t, filepath.Join(repo, "big"), untrackedDirListLimit+1)
+
+	snapshot, err := gitDirtySnapshot(t.Context(), repo)
+	if err != nil {
+		t.Fatalf("gitDirtySnapshot: %v", err)
+	}
+	if _, ok := snapshot[":!x/small.txt"]; !ok {
+		t.Errorf("small directory :!x/ was not listed file by file")
+	}
+	if _, ok := snapshot["big/"]; !ok || len(snapshot) != 2 {
+		t.Errorf("snapshot = %d entries, want big/ held whole plus :!x/small.txt", len(snapshot))
+	}
+}
+
+func TestListableUntrackedDirsBoundsEachDirectoryAndTheSample(t *testing.T) {
+	top := t.TempDir()
+	fillDir(t, filepath.Join(top, "a"), 3)
+	fillDir(t, filepath.Join(top, "b"), 5)
+	fillDir(t, filepath.Join(top, "c", "nested"), 1) // two entries: nested/ and its file
+	fillDir(t, filepath.Join(top, "d"), 2)
+
+	// b passes the per-directory limit of 4 while the budget is still whole;
+	// a fits (3 of 5 spent); c fits the remaining 2; nothing is left for d.
+	got := listableUntrackedDirs(top, []string{"b/", "a/", "c/", "d/"}, 4, 5)
+	want := []string{"a/", "c/"}
+	if fmt.Sprint(got) != fmt.Sprint(want) {
+		t.Errorf("listable = %v, want %v", got, want)
+	}
+}
+
+func TestCountEntriesWithinStopsPastTheLimit(t *testing.T) {
+	dir := t.TempDir()
+	fillDir(t, dir, 600)
+
+	if n, within := countEntriesWithin(dir, 600); !within || n != 600 {
+		t.Errorf("countEntriesWithin(600 entries, 600) = %d, %v; want 600, true", n, within)
+	}
+	if n, within := countEntriesWithin(dir, 10); within || n != 11 {
+		t.Errorf("countEntriesWithin(600 entries, 10) = %d, %v; want to stop at 11, false", n, within)
+	}
+	if n, within := countEntriesWithin(filepath.Join(dir, "missing"), 10); !within || n != 0 {
+		t.Errorf("a vanished directory counted %d, %v; want 0, true", n, within)
 	}
 }
