@@ -466,6 +466,28 @@ func TestGitRecorderHoldsLargeUntrackedDirectoryWhole(t *testing.T) {
 	}
 }
 
+// A listed directory that grows past the limit is held whole from then on. Its
+// files leave the snapshot but still exist, so that is one appearance of the
+// directory, never a deletion per file.
+func TestGitRecorderUntrackedDirectoryGrowingPastTheLimitIsOneEntry(t *testing.T) {
+	installFakeBackend(t)
+	repo := newGitRepo(t)
+	scratch := filepath.Join(repo, "scratch")
+	fillDir(t, scratch, 5)
+
+	store := NewFileChangeStore(50)
+	r := newTestRecorder(repo, "cc-1", store)
+	sample(t, r)
+
+	fillDir(t, scratch, untrackedDirListLimit+1)
+	if n := sample(t, r); n != 1 {
+		t.Fatalf("growing past the limit recorded %d changes, want 1", n)
+	}
+	if got := store.All()[0].Change; got.Path != "scratch/" || got.Type != FileAdded {
+		t.Errorf("recorded %s %s, want scratch/ added", got.Type, got.Path)
+	}
+}
+
 // A directory that shrinks back under the limit becomes listable again. Its
 // files were inside it all along, so listing them is not an addition per file.
 func TestGitRecorderUntrackedDirectoryShrinkingBackIsNotAChange(t *testing.T) {
