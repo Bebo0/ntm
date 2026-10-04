@@ -309,7 +309,9 @@ func GetBulkAssign(ctx context.Context, opts BulkAssignOptions) (*BulkAssignOutp
 		}
 		code := ErrCodeInternalError
 		hint := "Ensure bv plan output and live br labels are complete and valid"
-		if assignmentDependencyMissing(err) {
+		if staleCode, staleHint, ok := staleWorkError(err); ok {
+			code, hint = staleCode, staleHint
+		} else if assignmentDependencyMissing(err) {
 			code = ErrCodeDependencyMissing
 			hint = "Install bv and br and ensure both are available on PATH"
 		}

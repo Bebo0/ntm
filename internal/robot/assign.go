@@ -14,6 +14,7 @@ import (
 	"github.com/Dicklesworthstone/ntm/internal/config"
 	statuspkg "github.com/Dicklesworthstone/ntm/internal/status"
 	"github.com/Dicklesworthstone/ntm/internal/tmux"
+	"github.com/Dicklesworthstone/ntm/internal/worksource"
 )
 
 // AssignOptions configures work assignment analysis
@@ -407,9 +408,26 @@ func resolveAssignBlockedBeads(
 	return blocked, nil
 }
 
+// staleWorkHint is the remediation for ErrCodeStaleWorkCoordination. The read
+// is safe to repeat, and ntm never runs br to repair the tracker for the caller.
+const staleWorkHint = "The tracker or checkout changed while work was being read; retry once it is stable. ntm does not repair Beads state on your behalf"
+
+// staleWorkError reports whether err is a work-source mismatch, with the code
+// and hint every assignment surface returns for one.
+func staleWorkError(err error) (string, string, bool) {
+	if errors.Is(err, worksource.ErrStale) {
+		return ErrCodeStaleWorkCoordination, staleWorkHint, true
+	}
+	return "", "", false
+}
+
 func setAssignError(output *AssignOutput, err error, hint string) {
 	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 		output.RobotResponse = NewErrorResponse(err, ErrCodeTimeout, "Retry the command after cancellation")
+		return
+	}
+	if code, staleHint, ok := staleWorkError(err); ok {
+		output.RobotResponse = NewErrorResponse(err, code, staleHint)
 		return
 	}
 	if assignmentDependencyMissing(err) {

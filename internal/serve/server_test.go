@@ -223,6 +223,7 @@ func TestRobotErrorHTTPStatus(t *testing.T) {
 		{code: robot.ErrCodeNotFound, want: http.StatusNotFound},
 		{code: robot.ErrCodePermissionDenied, want: http.StatusForbidden},
 		{code: robot.ErrCodeResourceBusy, want: http.StatusConflict},
+		{code: robot.ErrCodeStaleWorkCoordination, want: http.StatusConflict},
 		{code: robot.ErrCodeTimeout, want: http.StatusGatewayTimeout},
 		{code: robot.ErrCodeNotImplemented, want: http.StatusNotImplemented},
 		{code: robot.ErrCodeDependencyMissing, want: http.StatusServiceUnavailable},

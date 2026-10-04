@@ -2183,7 +2183,7 @@ func robotErrorHTTPStatus(code string) int {
 		return http.StatusNotFound
 	case robot.ErrCodePermissionDenied:
 		return http.StatusForbidden
-	case robot.ErrCodeResourceBusy:
+	case robot.ErrCodeResourceBusy, robot.ErrCodeStaleWorkCoordination:
 		return http.StatusConflict
 	case robot.ErrCodeTimeout:
 		return http.StatusGatewayTimeout

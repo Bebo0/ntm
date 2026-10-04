@@ -19,6 +19,7 @@ import (
 	"github.com/Dicklesworthstone/ntm/internal/bv"
 	statuspkg "github.com/Dicklesworthstone/ntm/internal/status"
 	"github.com/Dicklesworthstone/ntm/internal/tmux"
+	"github.com/Dicklesworthstone/ntm/internal/worksource"
 )
 
 // =============================================================================
@@ -999,6 +1000,17 @@ func TestSetAssignErrorClassifiesMissingDependenciesAndInternalFailures(t *testi
 				t.Fatalf("setAssignError(%v) = %+v, want %s failure", test.err, output.RobotResponse, test.wantCode)
 			}
 		})
+	}
+}
+
+// GH #283: a tracker or checkout that changed while work was read is a typed,
+// retryable refusal, not an INTERNAL_ERROR with the code buried in its text.
+func TestSetAssignErrorTypesStaleWorkSource(t *testing.T) {
+	output := &AssignOutput{RobotResponse: NewRobotResponse(true)}
+	err := fmt.Errorf("read actionable Beads work: %w", &worksource.StaleError{Reason: "tracker changed during source capture"})
+	setAssignError(output, err, "generic hint")
+	if output.Success || output.ErrorCode != ErrCodeStaleWorkCoordination || output.Hint != staleWorkHint {
+		t.Fatalf("setAssignError(stale) = %+v, want %s with the stale-work hint", output.RobotResponse, ErrCodeStaleWorkCoordination)
 	}
 }
 

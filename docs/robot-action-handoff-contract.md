@@ -79,6 +79,7 @@ CC_LAUNCH_FAILED       // Claude Code launch failed
 CC_INIT_TIMEOUT        // Claude Code initialization timeout
 PROMPT_SEND_FAILED     // Could not send prompt to agent
 RESOURCE_BUSY          // Resource in use by another operation
+STALE_WORK_COORDINATION // Tracker or checkout changed while work was read; nothing dispatched, retry once stable
 
 // Internal errors - unexpected failures
 INTERNAL_ERROR         // Catch-all for unexpected errors

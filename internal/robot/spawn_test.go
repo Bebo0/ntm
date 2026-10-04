@@ -23,6 +23,7 @@ import (
 	"github.com/Dicklesworthstone/ntm/internal/pressure"
 	statuspkg "github.com/Dicklesworthstone/ntm/internal/status"
 	"github.com/Dicklesworthstone/ntm/internal/tmux"
+	"github.com/Dicklesworthstone/ntm/internal/worksource"
 	"github.com/Dicklesworthstone/ntm/tests/testutil"
 )
 
@@ -1865,6 +1866,11 @@ func TestGetSpawnAssignmentPreflightFailurePreventsEveryActuation(t *testing.T) 
 		{
 			name: "unverified live labels in dry run", dryRun: true, actionableErr: errors.New("live labels are incomplete"),
 			wantCode: ErrCodeInternalError, wantPolicyCalls: 1, wantActionableCalls: 1,
+		},
+		{
+			name:          "stale work source",
+			actionableErr: fmt.Errorf("plan: %w", &worksource.StaleError{Reason: "tracker changed during source capture"}),
+			wantCode:      ErrCodeStaleWorkCoordination, wantPolicyCalls: 1, wantActionableCalls: 1,
 		},
 	} {
 		t.Run(test.name, func(t *testing.T) {

@@ -71,6 +71,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/Dicklesworthstone/ntm/internal/worksource"
 )
 
 // EnvelopeVersion is the current version of the robot output envelope specification.
@@ -117,6 +119,11 @@ const (
 
 	// ErrCodeResourceBusy indicates a resource is locked or in use.
 	ErrCodeResourceBusy = "RESOURCE_BUSY"
+
+	// ErrCodeStaleWorkCoordination indicates the tracker or checkout changed
+	// while work was being read, so the work could not be attributed to one
+	// source revision and was not dispatched (GH #283).
+	ErrCodeStaleWorkCoordination = worksource.StaleCode
 
 	// =============================================================================
 	// Restart/Exit Error Codes (bd-3vc3s)

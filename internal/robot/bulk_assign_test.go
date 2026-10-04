@@ -24,6 +24,7 @@ import (
 	"github.com/Dicklesworthstone/ntm/internal/redaction"
 	statuspkg "github.com/Dicklesworthstone/ntm/internal/status"
 	"github.com/Dicklesworthstone/ntm/internal/tmux"
+	"github.com/Dicklesworthstone/ntm/internal/worksource"
 )
 
 func TestGetBulkAssignRejectsInvalidStrategyBeforeExternalWork(t *testing.T) {
@@ -2255,8 +2256,23 @@ func TestBulkAssignMissingExplicitConfigIsInvalidFlagWithZeroSideEffects(t *test
 }
 
 func TestBulkAssignActionableVerificationFailureHasZeroMutation(t *testing.T) {
+	for _, test := range []struct {
+		name     string
+		err      error
+		wantCode string
+	}{
+		{name: "unverified labels", err: errors.New("live label coverage is incomplete"), wantCode: ErrCodeInternalError},
+		// GH #283: a source that changed mid-read is typed, not an internal error.
+		{name: "stale work source", err: &worksource.StaleError{Reason: "tracker changed during source capture"}, wantCode: ErrCodeStaleWorkCoordination},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			testBulkAssignActionableVerificationFailure(t, test.err, test.wantCode)
+		})
+	}
+}
+
+func testBulkAssignActionableVerificationFailure(t *testing.T, verificationErr error, wantCode string) {
 	authoritative := t.TempDir()
-	verificationErr := errors.New("live label coverage is incomplete")
 	calls := make([]string, 0, 4)
 	forbidden := func(surface string) {
 		t.Fatalf("actionable verification failure reached %s; calls=%v", surface, calls)
@@ -2315,9 +2331,9 @@ func TestBulkAssignActionableVerificationFailureHasZeroMutation(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetBulkAssign transport error: %v", err)
 	}
-	if output.Success || output.ErrorCode != ErrCodeInternalError || output.Assignments == nil ||
+	if output.Success || output.ErrorCode != wantCode || output.Assignments == nil ||
 		!strings.Contains(output.Error, verificationErr.Error()) {
-		t.Fatalf("actionable verification failure output = %+v", output)
+		t.Fatalf("actionable verification failure output = %+v, want %s", output, wantCode)
 	}
 	if want := []string{"list-panes", "resolve-project", "load-policy", "verify-actionable"}; !reflect.DeepEqual(calls, want) {
 		t.Fatalf("call order = %v, want %v", calls, want)

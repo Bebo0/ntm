@@ -684,11 +684,11 @@ func GetSpawn(ctx context.Context, opts SpawnOptions, cfg *config.Config) (*Spaw
 				setSpawnCancellation(output, cancelErr)
 			} else {
 				output.Error = fmt.Sprintf("verify actionable spawn work: %v", actionableErr)
-				output.RobotResponse = NewErrorResponse(
-					fmt.Errorf("%s", output.Error),
-					ErrCodeInternalError,
-					"Ensure bv plan output and live br labels are complete and valid",
-				)
+				code, hint := ErrCodeInternalError, "Ensure bv plan output and live br labels are complete and valid"
+				if staleCode, staleHint, ok := staleWorkError(actionableErr); ok {
+					code, hint = staleCode, staleHint
+				}
+				output.RobotResponse = NewErrorResponse(fmt.Errorf("%s", output.Error), code, hint)
 			}
 			return output, nil
 		}
