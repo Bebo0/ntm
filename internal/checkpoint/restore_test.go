@@ -102,9 +102,9 @@ func TestRestorer_RestoreFromCheckpoint_DirectoryNotFound(t *testing.T) {
 		},
 	}
 
-	_, err = r.RestoreFromCheckpoint(cp, RestoreOptions{})
+	_, err = r.RestoreFromCheckpointContext(t.Context(), cp, RestoreOptions{})
 	if err == nil {
-		t.Error("RestoreFromCheckpoint should fail for nonexistent directory")
+		t.Error("RestoreFromCheckpointContext should fail for nonexistent directory")
 	}
 }
 
@@ -126,7 +126,7 @@ func TestRestorer_RestoreFromCheckpoint_NoPanes(t *testing.T) {
 		},
 	}
 
-	_, err = r.RestoreFromCheckpoint(cp, RestoreOptions{})
+	_, err = r.RestoreFromCheckpointContext(t.Context(), cp, RestoreOptions{})
 	if err != ErrNoAgentsToRestore {
 		t.Errorf("Expected ErrNoAgentsToRestore, got: %v", err)
 	}
@@ -166,12 +166,12 @@ func TestRestorer_RestoreFromCheckpointAcceptsGrokPanes(t *testing.T) {
 			// DryRun keeps the test off a real tmux server while still
 			// exercising the restore-planning admission that used to refuse
 			// grok before any pane was counted.
-			result, err := NewRestorerWithStorage(NewStorageWithDir(t.TempDir())).RestoreFromCheckpoint(cp, RestoreOptions{Force: true, DryRun: true})
+			result, err := NewRestorerWithStorage(NewStorageWithDir(t.TempDir())).RestoreFromCheckpointContext(t.Context(), cp, RestoreOptions{Force: true, DryRun: true})
 			if err != nil {
-				t.Fatalf("RestoreFromCheckpoint() error = %v, want grok batch accepted", err)
+				t.Fatalf("RestoreFromCheckpointContext() error = %v, want grok batch accepted", err)
 			}
 			if result == nil {
-				t.Fatal("RestoreFromCheckpoint() result = nil, want plan including grok panes")
+				t.Fatal("RestoreFromCheckpointContext() result = nil, want plan including grok panes")
 			}
 			if result.PanesRestored != tt.want {
 				t.Fatalf("PanesRestored = %d, want %d (grok panes must be included)", result.PanesRestored, tt.want)
@@ -236,9 +236,9 @@ func TestRestorer_RestoreFromCheckpoint_DryRun(t *testing.T) {
 		},
 	}
 
-	result, err := r.RestoreFromCheckpoint(cp, RestoreOptions{DryRun: true})
+	result, err := r.RestoreFromCheckpointContext(t.Context(), cp, RestoreOptions{DryRun: true})
 	if err != nil {
-		t.Fatalf("RestoreFromCheckpoint(DryRun) failed: %v", err)
+		t.Fatalf("RestoreFromCheckpointContext(DryRun) failed: %v", err)
 	}
 
 	if !result.DryRun {
@@ -268,12 +268,12 @@ func TestRestorer_RestoreFromCheckpoint_DryRun_CustomDirectory(t *testing.T) {
 	}
 
 	// Should succeed with custom directory override
-	result, err := r.RestoreFromCheckpoint(cp, RestoreOptions{
+	result, err := r.RestoreFromCheckpointContext(t.Context(), cp, RestoreOptions{
 		DryRun:          true,
 		CustomDirectory: tmpDir,
 	})
 	if err != nil {
-		t.Fatalf("RestoreFromCheckpoint with CustomDirectory failed: %v", err)
+		t.Fatalf("RestoreFromCheckpointContext with CustomDirectory failed: %v", err)
 	}
 
 	if result.PanesRestored != 1 {
@@ -299,9 +299,9 @@ func TestRestorer_RestoreFromCheckpoint_WorkingDirNotDirectory(t *testing.T) {
 		},
 	}
 
-	_, err := r.RestoreFromCheckpoint(cp, RestoreOptions{})
+	_, err := r.RestoreFromCheckpointContext(t.Context(), cp, RestoreOptions{})
 	if !errors.Is(err, ErrWorkingDirInvalid) {
-		t.Fatalf("RestoreFromCheckpoint should fail with ErrWorkingDirInvalid, got %v", err)
+		t.Fatalf("RestoreFromCheckpointContext should fail with ErrWorkingDirInvalid, got %v", err)
 	}
 }
 
@@ -343,9 +343,9 @@ func TestRestorer_RestoreFromCheckpoint_SkipsLegacyLayoutForMultiWindowSession(t
 		}
 	})
 
-	result, err := r.RestoreFromCheckpoint(cp, RestoreOptions{})
+	result, err := r.RestoreFromCheckpointContext(t.Context(), cp, RestoreOptions{})
 	if err != nil {
-		t.Fatalf("RestoreFromCheckpoint failed: %v", err)
+		t.Fatalf("RestoreFromCheckpointContext failed: %v", err)
 	}
 
 	found := false
@@ -669,9 +669,9 @@ func TestRestorer_RestoreFromCheckpoint_DryRun_SurfacesAssignments(t *testing.T)
 		},
 	}
 
-	result, err := r.RestoreFromCheckpoint(cp, RestoreOptions{DryRun: true})
+	result, err := r.RestoreFromCheckpointContext(t.Context(), cp, RestoreOptions{DryRun: true})
 	if err != nil {
-		t.Fatalf("RestoreFromCheckpoint(DryRun) failed: %v", err)
+		t.Fatalf("RestoreFromCheckpointContext(DryRun) failed: %v", err)
 	}
 
 	// Verify assignments are surfaced in result
@@ -717,9 +717,9 @@ func TestRestorer_RestoreFromCheckpoint_DryRun_NoAssignments(t *testing.T) {
 		// No Assignments or BVSummary
 	}
 
-	result, err := r.RestoreFromCheckpoint(cp, RestoreOptions{DryRun: true})
+	result, err := r.RestoreFromCheckpointContext(t.Context(), cp, RestoreOptions{DryRun: true})
 	if err != nil {
-		t.Fatalf("RestoreFromCheckpoint(DryRun) failed: %v", err)
+		t.Fatalf("RestoreFromCheckpointContext(DryRun) failed: %v", err)
 	}
 
 	if len(result.Assignments) != 0 {
@@ -997,9 +997,9 @@ func TestRestorer_RestoreFromCheckpoint_RelaunchesCommandsAcrossWindows(t *testi
 		}
 	})
 
-	result, err := r.RestoreFromCheckpoint(cp, RestoreOptions{})
+	result, err := r.RestoreFromCheckpointContext(t.Context(), cp, RestoreOptions{})
 	if err != nil {
-		t.Fatalf("RestoreFromCheckpoint failed: %v", err)
+		t.Fatalf("RestoreFromCheckpointContext failed: %v", err)
 	}
 	if result.PanesRestored != 3 {
 		t.Fatalf("PanesRestored = %d, want 3 (warnings=%v)", result.PanesRestored, result.Warnings)
@@ -1129,9 +1129,9 @@ func TestRestorer_RestoreFromCheckpoint_PreservesSparseWindowIndexes(t *testing.
 		}
 	})
 
-	result, err := r.RestoreFromCheckpoint(cp, RestoreOptions{})
+	result, err := r.RestoreFromCheckpointContext(t.Context(), cp, RestoreOptions{})
 	if err != nil {
-		t.Fatalf("RestoreFromCheckpoint failed: %v", err)
+		t.Fatalf("RestoreFromCheckpointContext failed: %v", err)
 	}
 	if result.PanesRestored != 3 {
 		t.Fatalf("PanesRestored = %d, want 3 (warnings=%v)", result.PanesRestored, result.Warnings)
@@ -1243,9 +1243,9 @@ func TestRestorer_RestoreFromCheckpoint_PreservesPerWindowLayouts(t *testing.T) 
 		Session:     sessionState,
 	}
 
-	result, err := r.RestoreFromCheckpoint(cp, RestoreOptions{})
+	result, err := r.RestoreFromCheckpointContext(t.Context(), cp, RestoreOptions{})
 	if err != nil {
-		t.Fatalf("RestoreFromCheckpoint failed: %v", err)
+		t.Fatalf("RestoreFromCheckpointContext failed: %v", err)
 	}
 	if result.PanesRestored != len(sessionState.Panes) {
 		t.Fatalf("PanesRestored = %d, want %d (warnings=%v)", result.PanesRestored, len(sessionState.Panes), result.Warnings)

@@ -118,12 +118,7 @@ func NewRestorerWithStorage(storage *Storage) *Restorer {
 	}
 }
 
-// RestoreFromCheckpoint restores a session from a loaded checkpoint.
-func (r *Restorer) RestoreFromCheckpoint(cp *Checkpoint, opts RestoreOptions) (*RestoreResult, error) {
-	return r.RestoreFromCheckpointContext(context.Background(), cp, opts)
-}
-
-// RestoreFromCheckpointContext restores under the caller's cancellation and
+// RestoreFromCheckpointContext restores a session from a loaded checkpoint under the caller's cancellation and
 // deadline. Cancellation prevents subsequent mutations; it does not kill agents
 // already restored or roll back the operator-authorized replacement of a session.
 // On a partial failure, the result describes progress and the error remains fatal.

@@ -302,106 +302,6 @@ func buildRestoreCommand(workDir, command string) (string, error) {
 	return tmux.SanitizePaneCommand(full)
 }
 
-// ValidateRestoreAgentCommands checks the full saved batch before a launching
-// restore replaces a session. RestoreAgents repeats the check at its own public
-// boundary so no preceding agent launches hide a malformed later command.
-func ValidateRestoreAgentCommands(state *SessionState, cmds AgentCommands) error {
-	if state == nil {
-		return fmt.Errorf("session state is nil")
-	}
-	if err := ValidateAutomatedRelaunch(state); err != nil {
-		return err
-	}
-	for _, pane := range state.Panes {
-		if pane.AgentType == string(tmux.AgentUser) {
-			continue
-		}
-		command := pane.Command
-		if pane.LaunchSpec != nil {
-			if err := pane.LaunchSpec.ValidateReplay(tmux.ParsePaneAgentTypeOption(pane.AgentType)); err != nil {
-				return fmt.Errorf("saved pane %d.%d launch settings: %w", pane.WindowIndex, pane.Index, err)
-			}
-			command = pane.LaunchSpec.Command
-		} else if command == "" {
-			command = getAgentCommand(pane.AgentType, cmds)
-		}
-		if command == "" {
-			continue
-		}
-		workDir := state.WorkDir
-		if pane.WorkDir != "" {
-			workDir = pane.WorkDir
-		}
-		if _, err := buildRestoreCommand(workDir, command); err != nil {
-			return fmt.Errorf("saved pane %d.%d launch command: %w", pane.WindowIndex, pane.Index, err)
-		}
-	}
-	return nil
-}
-
-// droppedLaunchableAgents reports how many saved panes WOULD launch an agent
-// but sit at a position the live pane grid cannot reach.
-//
-// The mapping is POSITIONAL: the launch loop pairs sortedPaneStates[i] with
-// panes[i] and stops at `i >= len(panes)`, so a non-launchable state (a user
-// pane, or one with no command from either source) still consumes a slot. A
-// count of launchable agents is therefore the wrong comparison — a saved
-// session of [user, cc, cc, cc] restored into 3 panes has 3 launchable agents
-// and 3 panes, yet the third cc sits at index 3 and is dropped. Only the
-// INDEX of each launchable pane answers the question.
-//
-// Non-launchable states past the cutoff are ignored: they were never going to
-// launch anything, so they must not trip a false capacity error.
-func droppedLaunchableAgents(paneStates []PaneState, cmds AgentCommands, paneCount int) int {
-	dropped := 0
-	for i, paneState := range paneStates {
-		if i < paneCount {
-			continue
-		}
-		if paneState.AgentType == string(tmux.AgentUser) || paneState.AgentType == "user" {
-			continue
-		}
-		agentCmd := paneState.Command
-		if paneState.LaunchSpec != nil {
-			agentCmd = paneState.LaunchSpec.Command
-		} else if agentCmd == "" {
-			agentCmd = getAgentCommand(paneState.AgentType, cmds)
-		}
-		if agentCmd == "" {
-			continue
-		}
-		dropped++
-	}
-	return dropped
-}
-
-// RestoreAgents launches the agents in the restored session.
-// This is separated from Restore to allow for customization.
-//
-// cfg carries the launch configuration and may be nil. It is required for
-// per-pane Claude credential isolation (GH#237): restore recreates a whole
-// saved swarm at once, so relaunching its Claude panes onto the shared
-// rotating credential puts every one of them back into the refresh-token race
-// the isolated config dir exists to prevent.
-func RestoreAgents(sessionName string, state *SessionState, cmds AgentCommands, cfg *config.Config) (err error) {
-	ctx := context.Background()
-	launches, err := preflightSavedLaunches(ctx, state, cmds, cfg, nil)
-	if err != nil {
-		return err
-	}
-	panes, err := tmux.GetPanesContext(ctx, sessionName)
-	if err != nil {
-		return fmt.Errorf("getting panes: %w", err)
-	}
-	if dropped := droppedLaunchableAgents(sortedSavedPanes(state), cmds, len(panes)); dropped > 0 {
-		return fmt.Errorf(
-			"restored session %q has %d pane(s) but %d saved pane state(s); %d agent(s) would be silently dropped (topology restore likely failed)",
-			sessionName, len(panes), len(launches), dropped)
-	}
-	_, err = dispatchSavedLaunches(ctx, sessionName, launches, panes)
-	return err
-}
-
 // ResumeOptions configures session resume (topology restore + agent relaunch
 // with provider-session resume delegated to casr / native --resume).
 type ResumeOptions struct {
@@ -411,7 +311,7 @@ type ResumeOptions struct {
 	Config     *config.Config // Used only for legacy settings and replay dependencies
 }
 
-// ResumeResult reports per-pane outcomes of a Resume operation.
+// ResumeResult reports per-pane outcomes of ResumeContext or RestoreWithAgents.
 type ResumeResult struct {
 	Session  string       `json:"session"`
 	Panes    []ResumePane `json:"panes"`
@@ -438,15 +338,11 @@ type ResumePane struct {
 	Action string `json:"action"`
 }
 
-// Resume reconstructs saved topology and resumes fresh provider bindings with
-// native commands preserving recorded settings. Legacy saves without commands
-// may use casr. Panes without a fresh binding receive their saved launch command.
-func Resume(state *SessionState, cmds AgentCommands, opts ResumeOptions) (*ResumeResult, error) {
-	return ResumeContext(context.Background(), state, cmds, opts)
-}
-
-// ResumeContext preflights and resumes the complete saved batch with the
-// caller's cancellation. Durable commands retain all recorded launch settings.
+// ResumeContext reconstructs saved topology and resumes fresh provider bindings
+// with native commands preserving recorded settings. Legacy saves without
+// commands may use casr. Panes without a fresh binding receive their saved
+// launch command. The complete saved batch is preflighted before topology is
+// replaced, and the caller's ctx governs cancellation.
 func ResumeContext(ctx context.Context, state *SessionState, cmds AgentCommands, opts ResumeOptions) (*ResumeResult, error) {
 	launches, err := preflightSavedLaunches(ctx, state, cmds, opts.Config, &opts)
 	if err != nil {

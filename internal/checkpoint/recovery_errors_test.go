@@ -504,9 +504,9 @@ func TestStorage_LoadScrollback_PermissionDenied(t *testing.T) {
 func TestRestorer_RestoreFromCheckpoint_NilCheckpoint(t *testing.T) {
 	r := NewRestorer()
 
-	_, err := r.RestoreFromCheckpoint(nil, RestoreOptions{DryRun: true})
+	_, err := r.RestoreFromCheckpointContext(t.Context(), nil, RestoreOptions{DryRun: true})
 	if !errors.Is(err, ErrNilCheckpoint) {
-		t.Fatalf("RestoreFromCheckpoint(nil) error = %v, want %v", err, ErrNilCheckpoint)
+		t.Fatalf("RestoreFromCheckpointContext(nil) error = %v, want %v", err, ErrNilCheckpoint)
 	}
 }
 
@@ -525,7 +525,7 @@ func TestRestorer_RestoreFromCheckpoint_EmptySessionName(t *testing.T) {
 
 	// A dry run must reject the same invalid source identity as a real
 	// restore. Force authorizes replacement; it never weakens validation.
-	result, err := r.RestoreFromCheckpoint(cp, RestoreOptions{DryRun: true, Force: true})
+	result, err := r.RestoreFromCheckpointContext(t.Context(), cp, RestoreOptions{DryRun: true, Force: true})
 	if err == nil || !strings.Contains(err.Error(), "invalid checkpoint source session") {
 		t.Fatalf("DryRun with an invalid source must fail validation: %v", err)
 	}
@@ -560,10 +560,10 @@ func TestRestorer_RestoreFromCheckpoint_WorkingDir_PermissionDenied(t *testing.T
 	// Note: Current implementation only checks os.IsNotExist, not permission errors.
 	// Permission denied on stat returns a different error that's not explicitly handled.
 	// In DryRun mode, it proceeds and collects warnings via ValidateCheckpoint.
-	result, err := r.RestoreFromCheckpoint(cp, RestoreOptions{DryRun: true, Force: true})
+	result, err := r.RestoreFromCheckpointContext(t.Context(), cp, RestoreOptions{DryRun: true, Force: true})
 	if err != nil {
 		// If it fails, that's also acceptable behavior
-		t.Logf("RestoreFromCheckpoint failed (expected): %v", err)
+		t.Logf("RestoreFromCheckpointContext failed (expected): %v", err)
 		return
 	}
 
@@ -594,7 +594,7 @@ func TestRestorer_RestoreFromCheckpoint_DryRun_CollectsWarnings(t *testing.T) {
 		},
 	}
 
-	result, err := r.RestoreFromCheckpoint(cp, RestoreOptions{DryRun: true})
+	result, err := r.RestoreFromCheckpointContext(t.Context(), cp, RestoreOptions{DryRun: true})
 	if err != nil {
 		t.Fatalf("DryRun should not fail: %v", err)
 	}
@@ -847,7 +847,7 @@ func TestRestorer_RestoreFromCheckpoint_DryRun_WarningFormats(t *testing.T) {
 		},
 	}
 
-	result, err := r.RestoreFromCheckpoint(cp, RestoreOptions{DryRun: true})
+	result, err := r.RestoreFromCheckpointContext(t.Context(), cp, RestoreOptions{DryRun: true})
 	if err != nil {
 		t.Fatalf("DryRun should not error: %v", err)
 	}

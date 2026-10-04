@@ -134,20 +134,20 @@ func TestAutomatedRelaunchDefensesProcessGrokLikeClaude(t *testing.T) {
 			}},
 		}
 
-		err := RestoreAgents(state.Name, state, AgentCommands{Claude: "claude"}, nil)
+		restored, err := RestoreWithAgents(t.Context(), state, AgentCommands{Claude: "claude"}, nil, RestoreOptions{})
 		if errors.Is(err, ErrAutomatedRelaunchNotImplemented) {
-			t.Fatalf("RestoreAgents(%s) error = %v, want no relaunch sentinel", agentType, err)
+			t.Fatalf("RestoreWithAgents(%s) error = %v, want no relaunch sentinel", agentType, err)
 		}
-		if err == nil || !strings.Contains(err.Error(), "getting panes") {
-			t.Fatalf("RestoreAgents(%s) error = %v, want pane-lookup failure past preflight", agentType, err)
+		if restored != nil || err == nil || !strings.Contains(err.Error(), "invalid session name") {
+			t.Fatalf("RestoreWithAgents(%s) = (%+v, %v), want session-name failure past preflight", agentType, restored, err)
 		}
 
-		result, err := Resume(state, AgentCommands{Claude: "claude"}, ResumeOptions{Force: true})
+		result, err := ResumeContext(t.Context(), state, AgentCommands{Claude: "claude"}, ResumeOptions{Force: true})
 		if errors.Is(err, ErrAutomatedRelaunchNotImplemented) {
-			t.Fatalf("Resume(%s) error = %v, want no relaunch sentinel", agentType, err)
+			t.Fatalf("ResumeContext(%s) error = %v, want no relaunch sentinel", agentType, err)
 		}
 		if result != nil || err == nil || !strings.Contains(err.Error(), "invalid session name") {
-			t.Fatalf("Resume(%s) = (%+v, %v), want session-name failure past preflight", agentType, result, err)
+			t.Fatalf("ResumeContext(%s) = (%+v, %v), want session-name failure past preflight", agentType, result, err)
 		}
 	}
 }
@@ -499,11 +499,11 @@ func TestRestore_NilState(t *testing.T) {
 	}
 }
 
-func TestRestoreAgents_NilState(t *testing.T) {
+func TestRestoreWithAgents_NilState(t *testing.T) {
 	t.Parallel()
 
-	if err := RestoreAgents("nil-state", nil, AgentCommands{}, nil); err == nil {
-		t.Fatal("RestoreAgents with nil state should fail")
+	if _, err := RestoreWithAgents(t.Context(), nil, AgentCommands{}, nil, RestoreOptions{Name: "nil-state"}); err == nil {
+		t.Fatal("RestoreWithAgents with nil state should fail")
 	}
 }
 
@@ -1426,97 +1426,6 @@ func TestApplyClaudeIsolation(t *testing.T) {
 	})
 }
 
-// bd-yzvm0: `if i >= len(panes) { break }` discarded every saved agent past the
-// live pane count with no error, no audit event, and no effect on the return
-// value — so a partially-failed topology restore (a rejected split, a collapsed
-// layout) reported a clean restore while N agents never started. Same
-// silently-dropped-work failure ba13c058 fixed on the swarm side.
-func TestDroppedLaunchableAgents(t *testing.T) {
-	cmds := AgentCommands{Claude: "claude", Codex: "codex"}
-
-	// The mapping is POSITIONAL — the loop pairs sortedPaneStates[i] with
-	// panes[i] and stops at i >= len(panes) — so a non-launchable state still
-	// consumes a slot. Comparing a COUNT of launchable agents against the pane
-	// count misses exactly this case: 3 launchable agents and 3 panes, yet the
-	// last one sits at index 3 and is dropped.
-	t.Run("a user pane consumes a slot and pushes an agent off the end", func(t *testing.T) {
-		states := []PaneState{
-			{Index: 0, AgentType: "user"},
-			{Index: 1, AgentType: "cc"},
-			{Index: 2, AgentType: "cc"},
-			{Index: 3, AgentType: "cc"},
-		}
-		if got := droppedLaunchableAgents(states, cmds, 3); got != 1 {
-			t.Fatalf("droppedLaunchableAgents = %d, want 1 — the agent at index 3 cannot be reached by a 3-pane grid", got)
-		}
-	})
-
-	t.Run("everything fits", func(t *testing.T) {
-		states := []PaneState{
-			{Index: 0, AgentType: "user"},
-			{Index: 1, AgentType: "cc"},
-			{Index: 2, AgentType: "cod"},
-		}
-		if got := droppedLaunchableAgents(states, cmds, 3); got != 0 {
-			t.Fatalf("droppedLaunchableAgents = %d, want 0", got)
-		}
-	})
-
-	t.Run("non-launchable states past the cutoff do not trip the guard", func(t *testing.T) {
-		states := []PaneState{
-			{Index: 0, AgentType: "cc"},
-			{Index: 1, AgentType: "user"},          // past cutoff, launches nothing
-			{Index: 2, AgentType: "unknown-agent"}, // past cutoff, no command
-		}
-		if got := droppedLaunchableAgents(states, cmds, 1); got != 0 {
-			t.Fatalf("droppedLaunchableAgents = %d, want 0 — those states were never going to launch anything", got)
-		}
-	})
-
-	t.Run("a saved command makes an otherwise unlaunchable type count", func(t *testing.T) {
-		states := []PaneState{
-			{Index: 0, AgentType: "cc"},
-			{Index: 1, AgentType: "unknown-agent", Command: "some-cli"},
-		}
-		if got := droppedLaunchableAgents(states, cmds, 1); got != 1 {
-			t.Fatalf("droppedLaunchableAgents = %d, want 1", got)
-		}
-	})
-
-	t.Run("counts every dropped agent, not just the first", func(t *testing.T) {
-		states := []PaneState{
-			{Index: 0, AgentType: "cc"},
-			{Index: 1, AgentType: "cc"},
-			{Index: 2, AgentType: "cc"},
-			{Index: 3, AgentType: "cod"},
-		}
-		if got := droppedLaunchableAgents(states, cmds, 1); got != 3 {
-			t.Fatalf("droppedLaunchableAgents = %d, want 3", got)
-		}
-	})
-}
-
-// The capacity guard must fire BEFORE any pane is launched, and must name the
-// arithmetic so the operator can see what was going to be dropped.
-func TestRestoreAgents_RefusesWhenPanesCannotHoldTheAgents(t *testing.T) {
-	state := &SessionState{
-		Name:    "ntm-nonexistent-session-bdyzvm0",
-		WorkDir: t.TempDir(),
-		Panes: []PaneState{
-			{Index: 1, AgentType: "cc"},
-			{Index: 2, AgentType: "cc"},
-		},
-	}
-
-	// The session does not exist, so GetPanes fails and we cannot reach the
-	// capacity check. That is fine: the point of this test is that the error
-	// is never a silent success.
-	err := RestoreAgents(state.Name, state, AgentCommands{Claude: "claude"}, nil)
-	if err == nil {
-		t.Fatal("RestoreAgents returned nil for a session whose panes could not be read; a restore that launches nothing must not report success")
-	}
-}
-
 // Use the real tmux command boundary with deterministic replacement/dispatch
 // failures. Each invocation is logged so preflight tests prove no live session
 // was touched, rather than only checking the returned error.
@@ -1645,9 +1554,9 @@ func TestSavedSessionAgentCommandsPreflightWholeBatch(t *testing.T) {
 			}}
 			var err error
 			if resume {
-				_, err = Resume(state, AgentCommands{}, ResumeOptions{Force: true})
+				_, err = ResumeContext(t.Context(), state, AgentCommands{}, ResumeOptions{Force: true})
 			} else {
-				err = RestoreAgents(state.Name, state, AgentCommands{}, nil)
+				_, err = RestoreWithAgents(t.Context(), state, AgentCommands{}, nil, RestoreOptions{Force: true})
 			}
 			if err == nil || !strings.Contains(err.Error(), "0.1") {
 				t.Fatalf("bad second launch command was not identified: %v", err)
@@ -1666,7 +1575,7 @@ func TestSavedSessionRestoreReportsPartialDispatch(t *testing.T) {
 		{Index: 0, AgentType: "cod", Command: "codex"},
 		{Index: 1, AgentType: "cod", Command: "codex"},
 	}}
-	err := RestoreAgents(state.Name, state, AgentCommands{}, nil)
+	_, err := RestoreWithAgents(t.Context(), state, AgentCommands{}, nil, RestoreOptions{Force: true})
 	if err == nil || !strings.Contains(err.Error(), "launched 1 of 2") || !strings.Contains(err.Error(), "0.1") {
 		t.Fatalf("partial restore reported success or lost its failed pane: %v", err)
 	}
@@ -1674,8 +1583,15 @@ func TestSavedSessionRestoreReportsPartialDispatch(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(string(data), "send-keys -t %0") || strings.Contains(string(data), "kill-session") {
+	calls := string(data)
+	if !strings.Contains(calls, "send-keys -t %0") {
 		t.Fatalf("partial failure did not preserve successful dispatch: %s", data)
+	}
+	// --force replaces the fixture's pre-existing session exactly once, before
+	// the topology is rebuilt. A partial dispatch must never kill the session it
+	// just restored, so no kill-session may follow new-session.
+	if strings.Count(calls, "kill-session") != 1 || strings.Index(calls, "kill-session") > strings.Index(calls, "new-session") {
+		t.Fatalf("partial failure killed the restored session: %s", data)
 	}
 }
 
@@ -1689,7 +1605,7 @@ func TestSavedSessionResumeRetainsEveryPaneOutcome(t *testing.T) {
 				{Index: 0, AgentType: "cod", SessionID: "resume-me", SessionFreshness: agentsession.BindingFresh, SessionConfidence: 1},
 				{Index: 1, AgentType: "cod", Command: "codex"},
 			}}
-			result, err := Resume(state, AgentCommands{}, ResumeOptions{Force: true})
+			result, err := ResumeContext(t.Context(), state, AgentCommands{}, ResumeOptions{Force: true})
 			if err == nil || result == nil || result.Resumed != 1 || result.Launched != 0 || result.Failed != 1 || result.Skipped != 0 || len(result.Panes) != 2 {
 				t.Fatalf("partial resume lost outcomes: result=%+v err=%v", result, err)
 			}
@@ -1706,7 +1622,7 @@ func TestSavedSessionResumeFreshFallbackAndDefaultDirectory(t *testing.T) {
 		{Index: 0, AgentType: "aider"},
 		{Index: 1, AgentType: "user"},
 	}}
-	result, err := Resume(state, AgentCommands{Aider: "aider --model saved-model"}, ResumeOptions{Force: true})
+	result, err := ResumeContext(t.Context(), state, AgentCommands{Aider: "aider --model saved-model"}, ResumeOptions{Force: true})
 	if err != nil || result == nil || result.Launched != 1 || result.Skipped != 1 || result.Failed != 0 {
 		t.Fatalf("agent without native resume was not freshly launched: result=%+v err=%v", result, err)
 	}
