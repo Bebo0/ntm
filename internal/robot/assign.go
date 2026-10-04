@@ -408,9 +408,11 @@ func resolveAssignBlockedBeads(
 	return blocked, nil
 }
 
-// staleWorkHint is the remediation for ErrCodeStaleWorkCoordination. The read
-// is safe to repeat, and ntm never runs br to repair the tracker for the caller.
-const staleWorkHint = "The tracker or checkout changed while work was being read; retry once it is stable. ntm does not repair Beads state on your behalf"
+// staleWorkHint is the remediation for ErrCodeStaleWorkCoordination. The code
+// covers more than a mid-read change (an unreadable or invalid canonical JSONL,
+// an opt-in ref or clean-checkout policy), so the hint defers to the error for
+// the reason; ntm never runs br to repair the tracker for the caller.
+const staleWorkHint = "The work source could not be verified as one revision; the error names why. Inspect the tracker and checkout, then retry. ntm does not repair Beads state on your behalf"
 
 // staleWorkError reports whether err is a work-source mismatch, with the code
 // and hint every assignment surface returns for one.

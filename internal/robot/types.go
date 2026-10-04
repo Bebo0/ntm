@@ -120,9 +120,10 @@ const (
 	// ErrCodeResourceBusy indicates a resource is locked or in use.
 	ErrCodeResourceBusy = "RESOURCE_BUSY"
 
-	// ErrCodeStaleWorkCoordination indicates the tracker or checkout changed
-	// while work was being read, so the work could not be attributed to one
-	// source revision and was not dispatched (GH #283).
+	// ErrCodeStaleWorkCoordination indicates work could not be attributed to
+	// one verified source revision — the tracker or checkout changed while it
+	// was read, the canonical Beads JSONL is unavailable or invalid, or an
+	// opt-in ref/clean policy failed — so it was not dispatched (GH #283).
 	ErrCodeStaleWorkCoordination = worksource.StaleCode
 
 	// =============================================================================
