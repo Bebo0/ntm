@@ -720,11 +720,7 @@ func resolveSwarmInitialPrompt(prompt, promptFile string) (resolved string, sour
 	return "", "", "", nil
 }
 
-// discoverProjects finds projects with bead counts using BeadScanner
-func discoverProjects(scanDir string, explicitProjects []string) ([]swarm.ProjectBeadCount, error) {
-	return discoverProjectsContext(context.Background(), scanDir, explicitProjects)
-}
-
+// discoverProjectsContext finds projects with bead counts using BeadScanner.
 func discoverProjectsContext(ctx context.Context, scanDir string, explicitProjects []string) ([]swarm.ProjectBeadCount, error) {
 	var opts []swarm.BeadScannerOption
 

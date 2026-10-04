@@ -100,8 +100,6 @@ type MockTmuxClient struct {
 	verifications []MockTmuxVerification
 }
 
-func (*MockTmuxClient) Endpoint() string { return "local" }
-
 // SetSubmissionVerifier installs the outcome of future VerifySubmission calls.
 // Returning a non-nil error models a composer that is still holding the
 // payload after the bounded rescue — the stranded-prompt case from ntm#320.

@@ -376,7 +376,7 @@ func TestAccountRotatorIsAvailableWithInvalidPath(t *testing.T) {
 	}
 }
 
-func TestAccountRotatorListAvailableAccounts_FiltersRateLimited(t *testing.T) {
+func TestAccountRotatorListAccountsContext_ParsesRateLimitedPerAccount(t *testing.T) {
 	dir := t.TempDir()
 	stateFile := filepath.Join(dir, "state")
 	if err := os.WriteFile(stateFile, []byte("claude-a"), 0o644); err != nil {
@@ -386,17 +386,41 @@ func TestAccountRotatorListAvailableAccounts_FiltersRateLimited(t *testing.T) {
 	caamPath := writeFakeCAAM(t, dir, stateFile)
 	rotator := NewAccountRotator().WithCaamPath(caamPath)
 
-	available, err := rotator.ListAvailableAccounts("cc")
+	accounts, err := rotator.ListAccountsContext(context.Background(), "cc")
 	if err != nil {
-		t.Fatalf("ListAvailableAccounts error: %v", err)
+		t.Fatalf("ListAccountsContext error: %v", err)
 	}
-	if len(available) != 1 {
-		t.Fatalf("available len = %d, want 1", len(available))
+	// The system "_original" profile must be dropped; the two real accounts
+	// must both be listed, with the cooldown one flagged RateLimited so the
+	// failover selector (verifiedFailoverAccounts) can exclude it.
+	if len(accounts) != 2 {
+		t.Fatalf("accounts len = %d, want 2: %+v", len(accounts), accounts)
 	}
-	if available[0].AccountName != "claude-a" {
-		t.Fatalf("available[0].AccountName = %q, want claude-a", available[0].AccountName)
+	byName := make(map[string]AccountInfo, len(accounts))
+	for _, acc := range accounts {
+		if acc.Provider != "claude" {
+			t.Fatalf("account %q Provider = %q, want claude", acc.AccountName, acc.Provider)
+		}
+		byName[acc.AccountName] = acc
 	}
-	if available[0].RateLimited {
-		t.Fatalf("available[0].RateLimited = true, want false")
+	a, ok := byName["claude-a"]
+	if !ok {
+		t.Fatalf("claude-a missing from %+v", accounts)
+	}
+	if a.RateLimited {
+		t.Fatalf("claude-a RateLimited = true, want false (health ok)")
+	}
+	if !a.IsActive {
+		t.Fatalf("claude-a IsActive = false, want true")
+	}
+	b, ok := byName["claude-b"]
+	if !ok {
+		t.Fatalf("claude-b missing from %+v", accounts)
+	}
+	if !b.RateLimited {
+		t.Fatalf("claude-b RateLimited = false, want true (health cooldown)")
+	}
+	if b.IsActive {
+		t.Fatalf("claude-b IsActive = true, want false")
 	}
 }

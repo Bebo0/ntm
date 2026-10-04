@@ -158,9 +158,9 @@ func reservationActiveAt(r agentmail.FileReservation, now time.Time) bool {
 	// A zero expiry means the server sent no expires_ts, or sent one this
 	// client could not parse (agentmail.FlexTime maps "" to the zero time).
 	// Comparing against it made every such reservation look EXPIRED, so
-	// DetectConflicts and CheckPathConflict skipped it entirely and reported
-	// "no conflict" for a path that is exclusively held — a fail-OPEN in the
-	// layer whose whole job is stopping two agents from editing the same file.
+	// DetectConflicts skipped it entirely and reported "no conflict" for a
+	// path that is exclusively held — a fail-OPEN in the layer whose whole
+	// job is stopping two agents from editing the same file.
 	//
 	// Treat unknown as ACTIVE: an unexpired-looking lease we cannot date is a
 	// reason to coordinate, not to ignore. internal/assign/reservation.go
@@ -623,10 +623,4 @@ func sanitizeForID(s string) string {
 		s = s[:20]
 	}
 	return s
-}
-
-// matchesPattern keeps concrete filenames distinct from reservation globs.
-// Both this check and glob-to-glob overlap use the same bounded matcher.
-func matchesPattern(path, pattern string) bool {
-	return reservationpath.Matches(pattern, path)
 }

@@ -273,8 +273,10 @@ func TestWorkflowRunnerReviewGateNonReviewerRoleNonTerminalTarget(t *testing.T) 
 	}
 }
 
-// recordTransition runs on the main loop while the TimeoutMonitor goroutine's
-// Pause action writes the same WorkflowState; both must synchronize on r.mu.
+// recordTransitionLocked runs on the main loop (under dispatchMu, via
+// advanceObservation) while the TimeoutMonitor goroutine's Pause action
+// writes the same WorkflowState; both must synchronize on r.mu. Pause does
+// not take dispatchMu, so holding it here does not serialize the two writers.
 // Run with -race: this test exists to catch the unlocked r.state access.
 func TestWorkflowRunnerPauseAndRecordTransitionAreRaceFree(t *testing.T) {
 	fake := newFakeWorkflowSession()
@@ -295,7 +297,9 @@ func TestWorkflowRunnerPauseAndRecordTransitionAreRaceFree(t *testing.T) {
 	go func() {
 		defer wg.Done()
 		for i := 0; i < 25; i++ {
-			runner.recordTransition("green")
+			runner.dispatchMu.Lock()
+			runner.recordTransitionLocked("green")
+			runner.dispatchMu.Unlock()
 		}
 	}()
 	go func() {

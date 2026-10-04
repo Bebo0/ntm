@@ -121,7 +121,7 @@ type AccountRotator struct {
 	// pinnedAccounts maps a caam provider (e.g. "openai", "claude") to an
 	// operator-pinned account name. While a provider is pinned, automatic
 	// rotation (OnLimitHit) is refused unless ForceGlobalAuthClobber is set.
-	// Manual operator-initiated switches (SwitchToAccount) are not blocked.
+	// Manual operator-initiated switches (SwitchToAccountContext) are not blocked.
 	pinnedAccounts map[string]string
 
 	// codexHomeInspector, when set, reports the currently live Codex panes and
@@ -383,11 +383,6 @@ func (r *AccountRotator) IsAvailable() bool {
 	return true
 }
 
-// GetCurrentAccount returns the active account for a provider/agent type.
-func (r *AccountRotator) GetCurrentAccount(agentType string) (*AccountInfo, error) {
-	return r.GetCurrentAccountContext(context.Background(), agentType)
-}
-
 // GetCurrentAccountContext resolves the active account within the caller's
 // lifetime, including when a resident recovery monitor is shutting down.
 func (r *AccountRotator) GetCurrentAccountContext(ctx context.Context, agentType string) (*AccountInfo, error) {
@@ -446,11 +441,6 @@ func (r *AccountRotator) GetCurrentAccountContext(ctx context.Context, agentType
 	return nil, fmt.Errorf("no active account found for provider %q", provider)
 }
 
-// ListAccounts returns all accounts for a provider/agent type.
-func (r *AccountRotator) ListAccounts(agentType string) ([]AccountInfo, error) {
-	return r.ListAccountsContext(context.Background(), agentType)
-}
-
 // ListAccountsContext is the cancellation-aware account inventory query.
 func (r *AccountRotator) ListAccountsContext(ctx context.Context, agentType string) ([]AccountInfo, error) {
 	if ctx == nil {
@@ -504,29 +494,6 @@ func (r *AccountRotator) ListAccountsContext(ctx context.Context, agentType stri
 		"count", len(result))
 
 	return result, nil
-}
-
-// ListAvailableAccounts returns non-rate-limited accounts for a provider/agent type.
-func (r *AccountRotator) ListAvailableAccounts(agentType string) ([]AccountInfo, error) {
-	return r.ListAvailableAccountsContext(context.Background(), agentType)
-}
-
-// ListAvailableAccountsContext excludes limited accounts without detaching the
-// underlying query from cancellation.
-func (r *AccountRotator) ListAvailableAccountsContext(ctx context.Context, agentType string) ([]AccountInfo, error) {
-	accounts, err := r.ListAccountsContext(ctx, agentType)
-	if err != nil {
-		return nil, err
-	}
-
-	available := make([]AccountInfo, 0, len(accounts))
-	for _, acc := range accounts {
-		if acc.RateLimited {
-			continue
-		}
-		available = append(available, acc)
-	}
-	return available, nil
 }
 
 func parseCAAMAccounts(output string) ([]tools.CAAMAccount, error) {
@@ -611,11 +578,6 @@ func validateCaamAccountOperand(name string) error {
 		}
 	}
 	return nil
-}
-
-// SwitchToAccount switches to a specific account.
-func (r *AccountRotator) SwitchToAccount(agentType, accountName string) (*RotationRecord, error) {
-	return r.SwitchToAccountContext(context.Background(), agentType, accountName)
 }
 
 // AccountActivationPreflight runs at the actual activation boundary, after the

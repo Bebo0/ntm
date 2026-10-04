@@ -41,10 +41,6 @@ func newMonitorCmd() *cobra.Command {
 	}
 }
 
-func runMonitor(session string) error {
-	return runMonitorContext(context.Background(), session)
-}
-
 func runMonitorContext(parent context.Context, session string) (runErr error) {
 	if tmux.DefaultClient.Remote != "" {
 		return fmt.Errorf("internal monitors require local tmux sessions")

@@ -120,9 +120,7 @@ func TestAccountRotatorLoggerNilFallback(t *testing.T) {
 	}
 }
 
-// ---------- AccountRotator EnableRotationHistory ----------
-
-// ---------- AccountRotator SwitchToAccount with fake caam ----------
+// ---------- caam account operand validation ----------
 
 func TestValidateCaamAccountOperand(t *testing.T) {
 	t.Parallel()

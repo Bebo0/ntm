@@ -109,6 +109,69 @@ func TestMatchesKeepsConcretePathLiteral(t *testing.T) {
 	}
 }
 
+// Reservation-glob cases carried over from the coordinator package, whose
+// path-match wrapper over Matches was removed; each exercises a shape not
+// already pinned above.
+func TestMatchesReservationGlobs(t *testing.T) {
+	for _, tc := range []struct {
+		pattern, name string
+		want          bool
+	}{
+		// Exact literals.
+		{"internal/cli/coordinator.go", "internal/cli/coordinator.go", true},
+		{"internal/cli/other.go", "internal/cli/coordinator.go", false},
+		{"file.go", "file.go", true},
+
+		// Single * within one segment.
+		{"internal/cli/*.go", "internal/cli/coordinator.go", true},
+		{"internal/cli/*.ts", "internal/cli/coordinator.go", false},
+
+		// Multiple * segments.
+		{"src/*/test/*.go", "src/app/test/main.go", true},
+		{"src/*/test.go", "src/foo/bar/test.go", false},
+		{"src/*/test/*.go", "src/app/other/main.go", false},
+
+		// Trailing ** reserves the whole subtree.
+		{"internal/**", "internal/cli/coordinator.go", true},
+		{"internal/**", "internal/cli/subdir/file.go", true},
+		{"internal/**", "external/cli/file.go", false},
+
+		// ** followed by a literal basename.
+		{"src/**/test.go", "src/foo/bar/test.go", true},
+		{"src/**/test.go", "src/deep/nested/path/test.go", true},
+		{"src/**/test.go", "src/foo/bar/main.go", false},
+		{"src/**/test.go", "other/test.go", false},
+
+		// ** followed by a wildcard basename.
+		{"src/**/*.go", "src/foo/bar/test.go", true},
+		{"src/**/*.go", "src/main.go", true},
+		{"src/**/*.go", "src/foo/bar/test.ts", false},
+		{"src/**/*.go", "other/main.go", false},
+		{"**/*.go", "foo/bar/main.go", true},
+		{"**/*.go", "main.go", true},
+
+		// Multi-segment suffix after **.
+		{"src/**/foo/*.go", "src/a/b/foo/main.go", true},
+		{"src/**/foo/*.go", "src/a/b/bar/main.go", false},
+		{"**/foo/bar/*.go", "main.go", false}, // path has fewer segments than the suffix
+
+		// Directory literal reserves nested subtrees.
+		{"internal/cli", "internal/cli/subdir/file.go", true},
+
+		// bd-eebvt: a literal suffix after ** must occupy a whole basename,
+		// not a fragment ("mytest.go" must not match "**/test.go").
+		{"**/test.go", "mytest.go", false},
+		{"**/test.go", "xtest.go", false},
+		{"**/test.go", "test.go", true},
+		{"**/test.go", "foo/test.go", true},
+		{"**/test.go", "deep/nested/test.go", true},
+	} {
+		if got := Matches(tc.pattern, tc.name); got != tc.want {
+			t.Errorf("Matches(%q, %q) = %v, want %v", tc.pattern, tc.name, got, tc.want)
+		}
+	}
+}
+
 func TestUnverifiablePatternsNeverProveDisjointness(t *testing.T) {
 	for _, pattern := range []string{
 		"src/[", "src/[]", "src/[a-]", "src/[-a]", "src/\\", "src/\x00", "src/\xff", strings.Repeat("x", maxPatternBytes+1),

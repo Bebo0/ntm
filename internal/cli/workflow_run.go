@@ -978,7 +978,7 @@ func (a workflowRunActions) RestartAgent(_ context.Context, agentID string) erro
 }
 
 func (a workflowRunActions) Pause(_ context.Context, reason string) error {
-	// Hold r.mu across the store write: recordTransition mutates the same
+	// Hold r.mu across the store write: recordTransitionLocked mutates the same
 	// WorkflowState from the main run loop under the same lock.
 	a.r.mu.Lock()
 	var saveErr error
@@ -1087,15 +1087,10 @@ func (r *workflowRunner) stopped() (string, error) {
 	return r.stopReason, r.stopErr
 }
 
-// recordTransition persists the stage change to the state store. It holds
-// r.mu for the duration: the TimeoutMonitor goroutine's Pause writes the same
+// recordTransitionLocked persists the stage change to the state store. The
+// caller must hold r.dispatchMu (advanceObservation does). It holds r.mu for
+// the duration: the TimeoutMonitor goroutine's Pause writes the same
 // WorkflowState under the same lock.
-func (r *workflowRunner) recordTransition(newStage string) error {
-	r.dispatchMu.Lock()
-	defer r.dispatchMu.Unlock()
-	return r.recordTransitionLocked(newStage)
-}
-
 func (r *workflowRunner) recordTransitionLocked(newStage string) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
