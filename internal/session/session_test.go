@@ -1595,6 +1595,30 @@ func TestSavedSessionRestoreReportsPartialDispatch(t *testing.T) {
 	}
 }
 
+// bd-yzvm0: saved panes pair with live panes by POSITION, so a non-launchable
+// pane (here the user pane) still consumes a slot. With three saved panes and
+// two live ones, the second agent has no target and must be reported as a
+// failed pane, never silently dropped from an otherwise clean restore.
+func TestSavedSessionRestoreReportsAgentsPastTheLivePanes(t *testing.T) {
+	savedSessionRestoreFixture(t)
+	t.Setenv("NTM_SESSION_TEST_PANES", "2")
+	state := &SessionState{Name: "recovery", WorkDir: t.TempDir(), Panes: []PaneState{
+		{Index: 0, AgentType: "user"},
+		{Index: 1, AgentType: "cod", Command: "codex"},
+		{Index: 2, AgentType: "cod", Command: "codex"},
+	}}
+	result, err := RestoreWithAgents(t.Context(), state, AgentCommands{}, nil, RestoreOptions{Force: true})
+	if err == nil || !strings.Contains(err.Error(), "no target") {
+		t.Fatalf("restore dropped an agent past the live panes without failing: %v", err)
+	}
+	if result == nil || result.Skipped != 1 || result.Launched != 1 || result.Failed != 1 || len(result.Panes) != 3 {
+		t.Fatalf("restore outcomes = %+v, want the user pane skipped, one agent launched and one failed", result)
+	}
+	if result.Panes[2].Action != "failed" || !strings.Contains(result.Panes[2].Error, "no target") {
+		t.Fatalf("agent past the live panes = %+v, want a failed outcome naming the missing target", result.Panes[2])
+	}
+}
+
 func TestSavedSessionResumeRetainsEveryPaneOutcome(t *testing.T) {
 	for _, paneCount := range []string{"2", "1"} {
 		t.Run("available_"+paneCount, func(t *testing.T) {

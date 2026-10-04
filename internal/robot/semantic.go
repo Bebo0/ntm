@@ -66,9 +66,10 @@ type SemanticProgress struct {
 	// look-back window (attributed BY TOKEN, never by repo/cwd).
 	CommitsInWindow int `json:"commits_in_window"`
 	// ClaimsInWindow counts beads carrying this pane's label whose status
-	// changed within the window. See the limitation note on gatherClaimActivityWithContext:
-	// beads_rust exposes no per-transition ledger, so this is a conservative
-	// proxy (status-updated-within-window), not an exact claim/close count.
+	// changed within the window. See the limitation note on
+	// gatherClaimActivityWithContext: beads_rust exposes no per-transition
+	// ledger, so this is a conservative proxy (status-updated-within-window),
+	// not an exact claim/close count.
 	ClaimsInWindow int `json:"claims_in_window"`
 	// LastCommitAt is the RFC3339 committer time of the most recent
 	// token-attributed commit (any age), or null when none exists. A value
@@ -239,10 +240,10 @@ func buildSemanticProgress(token string, window time.Duration, velocityPositive 
 }
 
 // gatherGitTokenActivityWithContext runs a single bounded `git log --grep`
-// keyed by the pane token across all refs and attributes commits BY EXACT TOKEN LINE, so a
-// sibling pane's commits in the same shared repo are never counted. Any error
-// (not a git repo, git missing, timeout) degrades to "no activity" — never a
-// wedge.
+// keyed by the pane token across all refs and attributes commits BY EXACT
+// TOKEN LINE, so a sibling pane's commits in the same shared repo are never
+// counted. Any error (not a git repo, git missing, timeout) degrades to "no
+// activity" — never a wedge.
 //
 // IMPORTANT: `git --grep` is a substring (contains) match, and one pane's token
 // is a prefix of a denser sibling's ("NTM-Pane: s/0.1" ⊂ "NTM-Pane: s/0.10").
