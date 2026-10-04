@@ -521,12 +521,64 @@ func TestListableUntrackedDirsBoundsEachDirectoryAndTheSample(t *testing.T) {
 	fillDir(t, filepath.Join(top, "c", "nested"), 1) // two entries: nested/ and its file
 	fillDir(t, filepath.Join(top, "d"), 2)
 
-	// b passes the per-directory limit of 4 while the budget is still whole;
-	// a fits (3 of 5 spent); c fits the remaining 2; nothing is left for d.
-	got := listableUntrackedDirs(top, []string{"b/", "a/", "c/", "d/"}, 4, 5)
+	// b is past the per-directory limit of 4, and reading enough of it to know
+	// that spends 5 of the budget of 10; a spends 3; c the remaining 2; d is
+	// never probed.
+	got := listableUntrackedDirs(top, []string{"b/", "a/", "c/", "d/"}, 4, 10)
 	want := []string{"a/", "c/"}
 	if fmt.Sprint(got) != fmt.Sprint(want) {
 		t.Errorf("listable = %v, want %v", got, want)
+	}
+
+	// Oversized directories spend the budget too, so probing many of them
+	// cannot cost more than one sample's budget either.
+	if got := listableUntrackedDirs(top, []string{"b/", "b/", "a/"}, 4, 10); len(got) != 0 {
+		t.Errorf("listable after two oversized probes = %v, want none (budget spent)", got)
+	}
+}
+
+// More listable directories than one git invocation takes are listed in
+// batches, so a long argument list never fails the sample.
+func TestGitDirtySnapshotListsDirectoriesInBatches(t *testing.T) {
+	repo := newGitRepo(t)
+	n := untrackedPathspecBatch + 1
+	for i := range n {
+		writeFile(t, repo, fmt.Sprintf("run-%04d/out.txt", i), "x")
+	}
+
+	snapshot, err := gitDirtySnapshot(t.Context(), repo)
+	if err != nil {
+		t.Fatalf("gitDirtySnapshot: %v", err)
+	}
+	if len(snapshot) != n {
+		t.Fatalf("snapshot holds %d entries, want %d listed files", len(snapshot), n)
+	}
+	for _, i := range []int{0, n - 1} {
+		if _, ok := snapshot[fmt.Sprintf("run-%04d/out.txt", i)]; !ok {
+			t.Errorf("run-%04d/out.txt missing from the snapshot", i)
+		}
+	}
+}
+
+func TestInsideAnyMatchesStrictAncestorsOnly(t *testing.T) {
+	held := map[string]bool{"scratch/": true, "a/b/": true}
+	for path, want := range map[string]bool{
+		"scratch/f":       true,
+		"scratch/deep/f":  true,
+		"a/b/c/":          true,
+		"scratch/":        false, // the held entry itself is not inside itself
+		"scratchpad/f":    false,
+		"a/f":             false,
+		"a/bc/f":          false,
+		"other/scratch/f": false,
+		"tracked.txt":     false,
+	} {
+		if got := insideAny(path, held); got != want {
+			t.Errorf("insideAny(%q) = %v, want %v", path, got, want)
+		}
+	}
+	if insideAny("scratch/f", nil) {
+		t.Error("insideAny with no held directories = true, want false")
 	}
 }
 

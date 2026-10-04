@@ -32,17 +32,24 @@ const gitStatusTimeout = 20 * time.Second
 // a single directory of agent scratch output can hold tens of thousands of
 // files, and listing it with --untracked-files=all made an idle session's
 // monitor walk, parse and stat every one of them on every tick (GH #337).
-// Untracked content is listed file by file only while it stays small; a
-// directory past these bounds is held as the one entry git's default untracked
-// mode gives it.
+// The contents of a wholly untracked directory are listed file by file only
+// while they stay small; a directory past these bounds is held as the one entry
+// git's default untracked mode gives it. (That mode still lists loose untracked
+// files one by one when they sit in a directory that also holds tracked files;
+// these bounds cover wholly untracked directories, where scratch output goes.)
 const (
 	// untrackedDirListLimit is the most filesystem entries one untracked
 	// directory may hold and still be listed file by file.
 	untrackedDirListLimit = 1000
-	// untrackedListBudget bounds the entries listed file by file across every
-	// untracked directory in one sample, so many small directories cannot add
-	// back up to the cost a single large one is kept from having.
+	// untrackedListBudget bounds the filesystem entries the size probes read
+	// in one sample, listed or not, so neither many small directories nor many
+	// large ones can add back up to the cost a single large one is kept from
+	// having. A directory the budget does not reach is held whole.
 	untrackedListBudget = 5000
+	// untrackedPathspecBatch bounds the directories handed to one git
+	// invocation, keeping the argument list well inside every platform's
+	// ARG_MAX however long the directory names are.
+	untrackedPathspecBatch = 500
 )
 
 // GitRecorder observes one git working tree and records what changed since its
@@ -286,22 +293,24 @@ func gitDirtySnapshot(ctx context.Context, top string) (map[string]FileState, er
 	}
 
 	listed := listableUntrackedDirs(top, untrackedDirs, untrackedDirListLimit, untrackedListBudget)
-	if len(listed) == 0 {
-		return snapshot, nil
-	}
+	for len(listed) > 0 {
+		batch := listed[:min(len(listed), untrackedPathspecBatch)]
+		listed = listed[len(batch):]
 
-	// Literal pathspecs: a directory named "[a]" or "*" must match only itself.
-	args := []string{"--literal-pathspecs", "status", "--porcelain", "-z", "--untracked-files=all", "--"}
-	for _, dir := range listed {
-		delete(snapshot, dir)
-		args = append(args, dir)
-	}
-	out, err = runGit(ctx, top, args...)
-	if err != nil {
-		return nil, err
-	}
-	for _, record := range parsePorcelainZ(out) {
-		snapshot[record.path] = stateFor(top, record.path, record.status)
+		// Literal pathspecs: a directory name is a path, never a glob or
+		// pathspec magic (":!x/" would otherwise mean "everything but x/").
+		args := []string{"--literal-pathspecs", "status", "--porcelain", "-z", "--untracked-files=all", "--"}
+		for _, dir := range batch {
+			delete(snapshot, dir)
+			args = append(args, dir)
+		}
+		out, err = runGit(ctx, top, args...)
+		if err != nil {
+			return nil, err
+		}
+		for _, record := range parsePorcelainZ(out) {
+			snapshot[record.path] = stateFor(top, record.path, record.status)
+		}
 	}
 
 	return snapshot, nil
@@ -360,23 +369,27 @@ func isUntrackedDir(path, status string) bool {
 	return status == "??" && strings.HasSuffix(path, "/")
 }
 
-// untrackedDirsHeldWhole returns the untracked directories a snapshot holds as
-// single entries.
-func untrackedDirsHeldWhole(snapshot map[string]FileState) []string {
-	var dirs []string
+// untrackedDirsHeldWhole returns the set of untracked directories a snapshot
+// holds as single entries.
+func untrackedDirsHeldWhole(snapshot map[string]FileState) map[string]bool {
+	dirs := make(map[string]bool)
 	for path, state := range snapshot {
 		if isUntrackedDir(path, state.GitStatus) {
-			dirs = append(dirs, path)
+			dirs[path] = true
 		}
 	}
 	return dirs
 }
 
 // insideAny reports whether path lies strictly inside one of dirs, each of
-// which ends in "/".
-func insideAny(path string, dirs []string) bool {
-	for _, dir := range dirs {
-		if path != dir && strings.HasPrefix(path, dir) {
+// which ends in "/". It looks up each ancestor of path rather than scanning
+// dirs, so the cost follows path depth, not how many directories are held.
+func insideAny(path string, dirs map[string]bool) bool {
+	if len(dirs) == 0 {
+		return false
+	}
+	for i := 0; i < len(path)-1; i++ {
+		if path[i] == '/' && dirs[path[:i+1]] {
 			return true
 		}
 	}
@@ -385,7 +398,9 @@ func insideAny(path string, dirs []string) bool {
 
 // listableUntrackedDirs returns, in their given order, the untracked
 // directories small enough to list file by file: each holds at most dirLimit
-// filesystem entries, and together they hold at most budget.
+// filesystem entries. budget bounds the entries the size probes read, listed
+// or not; once it is spent, the remaining directories are held whole without
+// being probed.
 //
 // Sizes are counted on the filesystem, so ignored files count too. That can
 // only hold a directory whole sooner; it can never let an unbounded one be
@@ -398,11 +413,10 @@ func listableUntrackedDirs(top string, dirs []string, dirLimit, budget int) []st
 			break
 		}
 		n, within := countEntriesWithin(filepath.Join(top, dir), limit)
-		if !within {
-			continue
-		}
-		listed = append(listed, dir)
 		budget -= n
+		if within {
+			listed = append(listed, dir)
+		}
 	}
 	return listed
 }
