@@ -271,44 +271,6 @@ func TestIsRobotErrorLine_StackTrace(t *testing.T) {
 	}
 }
 
-func TestParseErrorsIndex(t *testing.T) {
-
-	tests := []struct {
-		name    string
-		input   string
-		wantOK  bool
-		wantIdx int
-	}{
-		{"simple number", "5", true, 5},
-		{"zero", "0", true, 0},
-		{"multi-digit", "42", true, 42},
-		{"large number", "999", true, 999},
-		{"padded spaces", "  7  ", true, 7},
-		{"empty string", "", false, 0},
-		{"whitespace only", "   ", false, 0},
-		{"non-numeric", "abc", false, 0},
-		{"mixed", "12abc", false, 0},
-		{"negative", "-1", false, 0},
-		{"decimal", "3.5", false, 0},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			var idx int
-			ok, err := parseErrorsIndex(tc.input, &idx)
-			if err != nil {
-				t.Fatalf("unexpected error: %v", err)
-			}
-			if ok != tc.wantOK {
-				t.Errorf("parseErrorsIndex(%q) ok = %v, want %v", tc.input, ok, tc.wantOK)
-			}
-			if ok && idx != tc.wantIdx {
-				t.Errorf("parseErrorsIndex(%q) idx = %d, want %d", tc.input, idx, tc.wantIdx)
-			}
-		})
-	}
-}
-
 func TestDetectErrorsPaneAgentTypeUsesEnhancedDetection(t *testing.T) {
 
 	pane := tmux.Pane{ID: "%1", Type: tmux.AgentUser, Title: "notes", Command: ""}

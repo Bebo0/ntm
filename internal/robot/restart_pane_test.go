@@ -1392,8 +1392,8 @@ func TestRestartAgentLaunchCommandNilConfigFallsBackToAlias(t *testing.T) {
 	}
 
 	for _, tt := range tests {
-		if got := restartAgentLaunchCommand(nil, tt.agentType, ""); got != tt.want {
-			t.Errorf("restartAgentLaunchCommand(nil, %q) = %q, want %q", tt.agentType, got, tt.want)
+		if got, err := restartAgentLaunchCommandWithOverride(nil, tt.agentType, "", restartLaunchOverride{}); err != nil || got != tt.want {
+			t.Errorf("restartAgentLaunchCommandWithOverride(nil, %q) = %q, %v, want %q", tt.agentType, got, err, tt.want)
 		}
 	}
 }
@@ -1401,8 +1401,8 @@ func TestRestartAgentLaunchCommandNilConfigFallsBackToAlias(t *testing.T) {
 // GH#251 phase 2: grok has its own canonical launch command — and it must be
 // the grok command, never a fallback to claude's alias.
 func TestRestartAgentLaunchCommandGrokUsesGrokCommand(t *testing.T) {
-	if got := restartAgentLaunchCommand(nil, "grok", ""); got != "grok --always-approve" {
-		t.Fatalf("restartAgentLaunchCommand(nil, grok) = %q, want %q", got, "grok --always-approve")
+	if got, err := restartAgentLaunchCommandWithOverride(nil, "grok", "", restartLaunchOverride{}); err != nil || got != "grok --always-approve" {
+		t.Fatalf("restartAgentLaunchCommandWithOverride(nil, grok) = %q, %v, want %q", got, err, "grok --always-approve")
 	}
 	if got := restartLaunchAlias("grok-build"); got != "grok --always-approve" {
 		t.Fatalf("restartLaunchAlias(grok-build) = %q, want %q", got, "grok --always-approve")
@@ -1414,15 +1414,15 @@ func TestRestartAgentLaunchCommandUsesConfiguredCommand(t *testing.T) {
 	cfg.Agents.Claude = "claude --dangerously-skip-permissions"
 	cfg.Agents.Codex = "codex --yolo"
 
-	if got := restartAgentLaunchCommand(cfg, "claude", ""); got != "claude --dangerously-skip-permissions" {
-		t.Errorf("restartAgentLaunchCommand(cfg, claude) = %q, want configured command", got)
+	if got, err := restartAgentLaunchCommandWithOverride(cfg, "claude", "", restartLaunchOverride{}); err != nil || got != "claude --dangerously-skip-permissions" {
+		t.Errorf("restartAgentLaunchCommandWithOverride(cfg, claude) = %q, %v, want configured command", got, err)
 	}
-	if got := restartAgentLaunchCommand(cfg, "codex", ""); got != "codex --yolo" {
-		t.Errorf("restartAgentLaunchCommand(cfg, codex) = %q, want configured command", got)
+	if got, err := restartAgentLaunchCommandWithOverride(cfg, "codex", "", restartLaunchOverride{}); err != nil || got != "codex --yolo" {
+		t.Errorf("restartAgentLaunchCommandWithOverride(cfg, codex) = %q, %v, want configured command", got, err)
 	}
 	// Unconfigured type falls back to the alias.
-	if got := restartAgentLaunchCommand(cfg, "gemini", ""); got != "gmi" {
-		t.Errorf("restartAgentLaunchCommand(cfg, gemini) = %q, want %q", got, "gmi")
+	if got, err := restartAgentLaunchCommandWithOverride(cfg, "gemini", "", restartLaunchOverride{}); err != nil || got != "gmi" {
+		t.Errorf("restartAgentLaunchCommandWithOverride(cfg, gemini) = %q, %v, want %q", got, err, "gmi")
 	}
 }
 
@@ -1432,8 +1432,8 @@ func TestRestartAgentLaunchCommandRendersTemplate(t *testing.T) {
 	// robot-spawn pattern (spawn.go getAgentCommands).
 	cfg.Agents.Claude = "claude {{.Model}}"
 
-	if got := restartAgentLaunchCommand(cfg, "claude", ""); got != "claude" {
-		t.Errorf("restartAgentLaunchCommand template render = %q, want %q", got, "claude")
+	if got, err := restartAgentLaunchCommandWithOverride(cfg, "claude", "", restartLaunchOverride{}); err != nil || got != "claude" {
+		t.Errorf("restartAgentLaunchCommandWithOverride template render = %q, %v, want %q", got, err, "claude")
 	}
 }
 
@@ -1441,8 +1441,8 @@ func TestRestartAgentLaunchCommandInvalidTemplateFallsBack(t *testing.T) {
 	cfg := &config.Config{}
 	cfg.Agents.Claude = "claude {{.Broken"
 
-	if got := restartAgentLaunchCommand(cfg, "claude", ""); got != "cc" {
-		t.Errorf("restartAgentLaunchCommand invalid template = %q, want fallback %q", got, "cc")
+	if got, err := restartAgentLaunchCommandWithOverride(cfg, "claude", "", restartLaunchOverride{}); err != nil || got != "cc" {
+		t.Errorf("restartAgentLaunchCommandWithOverride invalid template = %q, %v, want fallback %q", got, err, "cc")
 	}
 }
 
@@ -1450,8 +1450,8 @@ func TestRestartAgentLaunchCommandRejectsControlCharacters(t *testing.T) {
 	cfg := &config.Config{}
 	cfg.Agents.Claude = "claude\nrm -x"
 
-	if got := restartAgentLaunchCommand(cfg, "claude", ""); got != "cc" {
-		t.Errorf("restartAgentLaunchCommand control chars = %q, want fallback %q", got, "cc")
+	if got, err := restartAgentLaunchCommandWithOverride(cfg, "claude", "", restartLaunchOverride{}); err != nil || got != "cc" {
+		t.Errorf("restartAgentLaunchCommandWithOverride control chars = %q, %v, want fallback %q", got, err, "cc")
 	}
 }
 
@@ -1545,30 +1545,30 @@ func TestRestartAgentLaunchCommandPreservesModelPin(t *testing.T) {
 	cfg.Agents.Claude = "claude --dangerously-skip-permissions{{if .Model}} --model {{shellQuote .Model}}{{end}}"
 	cfg.Models.Claude = map[string]string{"opus": "claude-opus-4-6"}
 
-	got := restartAgentLaunchCommand(cfg, "claude", "opus")
+	got, err := restartAgentLaunchCommandWithOverride(cfg, "claude", "opus", restartLaunchOverride{})
 	want := "claude --dangerously-skip-permissions --model 'claude-opus-4-6'"
-	if got != want {
-		t.Errorf("restartAgentLaunchCommand(cfg, claude, opus) = %q, want %q", got, want)
+	if err != nil || got != want {
+		t.Errorf("restartAgentLaunchCommandWithOverride(cfg, claude, opus) = %q, %v, want %q", got, err, want)
 	}
 
 	// A full model name from the alias table is honored as-is (case-insensitive).
-	got = restartAgentLaunchCommand(cfg, "claude", "Claude-Opus-4-6")
-	if got != want {
-		t.Errorf("restartAgentLaunchCommand full-name variant = %q, want %q", got, want)
+	got, err = restartAgentLaunchCommandWithOverride(cfg, "claude", "Claude-Opus-4-6", restartLaunchOverride{})
+	if err != nil || got != want {
+		t.Errorf("restartAgentLaunchCommandWithOverride full-name variant = %q, %v, want %q", got, err, want)
 	}
 
 	// An unknown variant (e.g. a persona name in the same title slot) must
 	// not be guessed into a bogus --model value.
-	got = restartAgentLaunchCommand(cfg, "claude", "architect")
+	got, err = restartAgentLaunchCommandWithOverride(cfg, "claude", "architect", restartLaunchOverride{})
 	want = "claude --dangerously-skip-permissions"
-	if got != want {
-		t.Errorf("restartAgentLaunchCommand persona variant = %q, want %q", got, want)
+	if err != nil || got != want {
+		t.Errorf("restartAgentLaunchCommandWithOverride persona variant = %q, %v, want %q", got, err, want)
 	}
 
 	// No variant keeps the exact pre-#223 behavior.
-	got = restartAgentLaunchCommand(cfg, "claude", "")
-	if got != want {
-		t.Errorf("restartAgentLaunchCommand empty variant = %q, want %q", got, want)
+	got, err = restartAgentLaunchCommandWithOverride(cfg, "claude", "", restartLaunchOverride{})
+	if err != nil || got != want {
+		t.Errorf("restartAgentLaunchCommandWithOverride empty variant = %q, %v, want %q", got, err, want)
 	}
 }
 

@@ -82,9 +82,9 @@ func TestGetProductivityAttributesBuildsAndProgressToMatchingPane(t *testing.T) 
 		now: func() time.Time { return now },
 	}
 
-	output, err := getProductivity(ProductivityOptions{Session: "swarm", Window: time.Minute}, deps)
+	output, err := getProductivityWithContext(context.Background(), ProductivityOptions{Session: "swarm", Window: time.Minute}, deps)
 	if err != nil {
-		t.Fatalf("getProductivity() error = %v", err)
+		t.Fatalf("getProductivityWithContext() error = %v", err)
 	}
 	if output.Decision != ProductivityContinue {
 		t.Fatalf("decision = %q, want continue (%s)", output.Decision, output.DecisionReason)
@@ -118,9 +118,9 @@ func TestGetProductivityDoesNotConvergeWhenAttributionIsUnavailable(t *testing.T
 		now: time.Now,
 	}
 
-	output, err := getProductivity(ProductivityOptions{Session: "swarm"}, deps)
+	output, err := getProductivityWithContext(context.Background(), ProductivityOptions{Session: "swarm"}, deps)
 	if err != nil {
-		t.Fatalf("getProductivity() error = %v", err)
+		t.Fatalf("getProductivityWithContext() error = %v", err)
 	}
 	if output.Decision != ProductivityUnknown || output.EvidenceComplete {
 		t.Fatalf("output = %+v, want unknown with incomplete attribution evidence", output)
@@ -136,9 +136,9 @@ func TestGetProductivityDoesNotConvergeWhenEvidenceFails(t *testing.T) {
 		readyBeads:    func(context.Context, string) (int, error) { return 0, context.DeadlineExceeded },
 		now:           time.Now,
 	}
-	output, err := getProductivity(ProductivityOptions{Session: "swarm"}, deps)
+	output, err := getProductivityWithContext(context.Background(), ProductivityOptions{Session: "swarm"}, deps)
 	if err != nil {
-		t.Fatalf("getProductivity() error = %v", err)
+		t.Fatalf("getProductivityWithContext() error = %v", err)
 	}
 	if output.Decision != ProductivityUnknown || output.EvidenceComplete {
 		t.Fatalf("output = %+v, want unknown with incomplete evidence", output)
@@ -156,9 +156,9 @@ func TestGetProductivityDoesNotConvergeWithoutRecognizedAgentPanes(t *testing.T)
 		readyBeads: func(context.Context, string) (int, error) { return 0, nil },
 		now:        time.Now,
 	}
-	output, err := getProductivity(ProductivityOptions{Session: "swarm"}, deps)
+	output, err := getProductivityWithContext(context.Background(), ProductivityOptions{Session: "swarm"}, deps)
 	if err != nil {
-		t.Fatalf("getProductivity() error = %v", err)
+		t.Fatalf("getProductivityWithContext() error = %v", err)
 	}
 	if output.Decision != ProductivityUnknown || output.EvidenceComplete {
 		t.Fatalf("output = %+v, want unknown with incomplete agent evidence", output)
@@ -183,9 +183,9 @@ func TestGetProductivityReportsInvalidAndMissingSessions(t *testing.T) {
 		{name: "missing session", session: "missing", errorCode: ErrCodeSessionNotFound},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			output, err := getProductivity(ProductivityOptions{Session: tc.session}, deps)
+			output, err := getProductivityWithContext(context.Background(), ProductivityOptions{Session: tc.session}, deps)
 			if err != nil {
-				t.Fatalf("getProductivity() error = %v", err)
+				t.Fatalf("getProductivityWithContext() error = %v", err)
 			}
 			if output.Success || output.ErrorCode != tc.errorCode {
 				t.Fatalf("output success=%v error_code=%q, want false and %q", output.Success, output.ErrorCode, tc.errorCode)

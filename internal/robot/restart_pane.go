@@ -1802,25 +1802,15 @@ func restartModelVars(cfg *config.Config, agentType, variant string) config.Agen
 	return vars
 }
 
-// restartAgentLaunchCommand resolves the command used to relaunch an agent CLI
-// in a respawned pane. It prefers the configured (template-rendered) agent
-// command — the same command robot-spawn delivers by keystroke — rendered with
-// the pane's recovered model pin (#223), and falls back to the canonical
-// launch alias (cc/cod/gmi/...) when no usable command is configured (#187).
-// restartAgentLaunchCommand resolves the relaunch command without an
-// override; kept as the zero-override entry point for existing callers.
-func restartAgentLaunchCommand(cfg *config.Config, agentType, variant string) string {
-	cmd, err := restartAgentLaunchCommandWithOverride(cfg, agentType, variant, restartLaunchOverride{})
-	if err != nil {
-		return restartLaunchAlias(agentType)
-	}
-	return cmd
-}
-
-// restartAgentLaunchCommandWithOverride composes the relaunch command,
-// honoring an explicit model/effort/args override (ntm-yusj). Without an
-// override it preserves the historical silent-fallback-to-alias behavior;
-// with one, every failure that would drop the override is a loud error.
+// restartAgentLaunchCommandWithOverride resolves the command used to relaunch
+// an agent CLI in a respawned pane. It prefers the configured
+// (template-rendered) agent command — the same command robot-spawn delivers by
+// keystroke — rendered with the pane's recovered model pin (#223), and falls
+// back to the canonical launch alias (cc/cod/gmi/...) when no usable command
+// is configured (#187). It honors an explicit model/effort/args override
+// (ntm-yusj). Without an override it preserves the historical
+// silent-fallback-to-alias behavior and never returns an error; with one,
+// every failure that would drop the override is a loud error.
 func restartAgentLaunchCommandWithOverride(cfg *config.Config, agentType, variant string, override restartLaunchOverride) (string, error) {
 	alias := restartLaunchAlias(agentType)
 	resolved := ResolveAgentType(agentType)

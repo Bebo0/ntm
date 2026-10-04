@@ -66,7 +66,7 @@ type SemanticProgress struct {
 	// look-back window (attributed BY TOKEN, never by repo/cwd).
 	CommitsInWindow int `json:"commits_in_window"`
 	// ClaimsInWindow counts beads carrying this pane's label whose status
-	// changed within the window. See the limitation note on gatherClaimActivity:
+	// changed within the window. See the limitation note on gatherClaimActivityWithContext:
 	// beads_rust exposes no per-transition ledger, so this is a conservative
 	// proxy (status-updated-within-window), not an exact claim/close count.
 	ClaimsInWindow int `json:"claims_in_window"`
@@ -238,8 +238,8 @@ func buildSemanticProgress(token string, window time.Duration, velocityPositive 
 	return sp
 }
 
-// gatherGitTokenActivity runs a single bounded `git log --grep` keyed by the
-// pane token across all refs and attributes commits BY EXACT TOKEN LINE, so a
+// gatherGitTokenActivityWithContext runs a single bounded `git log --grep`
+// keyed by the pane token across all refs and attributes commits BY EXACT TOKEN LINE, so a
 // sibling pane's commits in the same shared repo are never counted. Any error
 // (not a git repo, git missing, timeout) degrades to "no activity" — never a
 // wedge.
@@ -252,10 +252,6 @@ func buildSemanticProgress(token string, window time.Duration, velocityPositive 
 // and 10..19) would miscredit siblings — and worse, an unstamped but
 // genuinely-working pane could read as source="token" + stale and trip a false
 // wedge tell, the exact failure the design forbids.
-func gatherGitTokenActivity(repoDir, token string, window time.Duration, now time.Time) gitTokenActivity {
-	return gatherGitTokenActivityWithContext(context.Background(), repoDir, token, window, now)
-}
-
 func gatherGitTokenActivityWithContext(ctx context.Context, repoDir, token string, window time.Duration, now time.Time) gitTokenActivity {
 	if strings.TrimSpace(repoDir) == "" || strings.TrimSpace(token) == "" {
 		return gitTokenActivity{}
@@ -286,8 +282,8 @@ func commitBodyHasTokenLine(body, token string) bool {
 	return false
 }
 
-// gatherClaimActivity is a bounded, best-effort bead read keyed by the pane
-// label. It is the SECONDARY ("and/or") signal per the design.
+// gatherClaimActivityWithContext is a bounded, best-effort bead read keyed by
+// the pane label. It is the SECONDARY ("and/or") signal per the design.
 //
 // LIMITATION (documented deliberately): beads_rust exposes no per-pane→bead
 // binding and no per-window status-transition ledger. The only cleanly
@@ -299,10 +295,6 @@ func commitBodyHasTokenLine(body, token string) bool {
 // updated_at). It is never used to flip is_working; at worst it raises
 // confidence or suppresses the advisory wedge tell. Any error (br missing, no
 // .beads workspace, timeout) degrades to zero — never a wedge.
-func gatherClaimActivity(dir, label string, window time.Duration, now time.Time) claimActivity {
-	return gatherClaimActivityWithContext(context.Background(), dir, label, window, now)
-}
-
 func gatherClaimActivityWithContext(ctx context.Context, dir, label string, window time.Duration, now time.Time) claimActivity {
 	if strings.TrimSpace(dir) == "" || strings.TrimSpace(label) == "" {
 		return claimActivity{}
@@ -319,11 +311,6 @@ type brListIssue struct {
 	Status    string `json:"status"`
 	UpdatedAt string `json:"updated_at"`
 	ClosedAt  string `json:"closed_at"`
-}
-
-// brListResponse is the compatibility envelope used by some br wrappers.
-type brListResponse struct {
-	Issues []brListIssue `json:"issues"`
 }
 
 // decodeClaimIssues accepts the native br array and the compatibility envelope.
@@ -381,20 +368,4 @@ func countClaimsInWindow(raw []byte, window time.Duration, now time.Time) claimA
 		out.available = out.available && available
 	}
 	return out
-}
-
-func withinWindow(ts string, cutoff time.Time) bool {
-	ts = strings.TrimSpace(ts)
-	if ts == "" {
-		return false
-	}
-	parsed, err := time.Parse(time.RFC3339, ts)
-	if err != nil {
-		// br emits RFC3339 with sub-second precision; RFC3339Nano covers it.
-		parsed, err = time.Parse(time.RFC3339Nano, ts)
-		if err != nil {
-			return false
-		}
-	}
-	return !parsed.Before(cutoff)
 }

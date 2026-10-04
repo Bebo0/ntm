@@ -50,7 +50,7 @@ func snapshotPayload(t *testing.T, project string, input *WorkSection, policy Wo
 		t.Fatal(err)
 	}
 	work = limitVerifiedWorkPreview(work, 1)
-	key, payload, err := MarshalWorkSnapshot(work)
+	key, payload, _, err := marshalWorkSnapshotObservation(work)
 	if err != nil || key == "" {
 		t.Fatalf("encode snapshot: %s %v", key, err)
 	}
@@ -225,7 +225,7 @@ func TestPersistedWorkSnapshotRejectsMalformedAndUnverifiedPayloads(t *testing.T
 	failed.Reason = "tracker could not be read"
 	failed.Verification = &WorkVerification{ProjectDir: project}
 	stampWorkSnapshotProject(failed, project)
-	_, marker, err := MarshalWorkSnapshot(failed)
+	_, marker, _, err := marshalWorkSnapshotObservation(failed)
 	if err != nil {
 		t.Fatal(err)
 	}

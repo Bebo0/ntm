@@ -57,7 +57,7 @@ func TestSnapshotFreezePreservesLiveIDNormalization(t *testing.T) {
 	if err != nil || work == nil || !work.Available || len(work.Ready) != 2 {
 		t.Fatalf("freezing broke the live verifier's normalized identity contract: %+v %v", work, err)
 	}
-	_, payload, err := MarshalWorkSnapshot(work)
+	_, payload, _, err := marshalWorkSnapshotObservation(work)
 	if err != nil {
 		t.Fatal(err)
 	}

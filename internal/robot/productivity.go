@@ -143,10 +143,6 @@ func defaultProductivityDependencies() productivityDependencies {
 	}
 }
 
-func getProductivity(opts ProductivityOptions, deps productivityDependencies) (*ProductivityOutput, error) {
-	return getProductivityWithContext(context.Background(), opts, deps)
-}
-
 func getProductivityWithContext(parent context.Context, opts ProductivityOptions, deps productivityDependencies) (*ProductivityOutput, error) {
 	if parent == nil {
 		parent = context.Background()

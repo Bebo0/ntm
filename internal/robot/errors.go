@@ -283,20 +283,3 @@ func PrintErrors(opts ErrorsOptions) error {
 	}
 	return encodeTerminalRobotOutput(output, output.RobotResponse, "robot error scan failed")
 }
-
-// parseErrorsIndex parses a string to int (helper).
-func parseErrorsIndex(s string, idx *int) (bool, error) {
-	s = strings.TrimSpace(s)
-	if s == "" {
-		return false, nil
-	}
-	n := 0
-	for _, c := range s {
-		if c < '0' || c > '9' {
-			return false, nil
-		}
-		n = n*10 + int(c-'0')
-	}
-	*idx = n
-	return true, nil
-}

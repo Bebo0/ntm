@@ -173,16 +173,11 @@ func stampWorkSnapshotProject(work *WorkSection, project string, originalStart .
 	}
 }
 
-// MarshalWorkSnapshot supplies the opaque payload persisted with the runtime
-// projection. Even a failed/DB-only collection produces a scoped unavailable
-// marker, so a newer failure cannot leave an older healthy cache in its place.
-func MarshalWorkSnapshot(work *WorkSection) (string, []byte, error) {
-	project, payload, _, err := marshalWorkSnapshotObservation(work)
-	return project, payload, err
-}
-
-// marshalWorkSnapshotObservation also returns the immutable collection start.
-// A publisher must not replace it with the time of serialization or cache reuse.
+// marshalWorkSnapshotObservation supplies the opaque payload persisted with
+// the runtime projection. Even a failed/DB-only collection produces a scoped
+// unavailable marker, so a newer failure cannot leave an older healthy cache in
+// its place. It also returns the immutable collection start; a publisher must
+// not replace it with the time of serialization or cache reuse.
 func marshalWorkSnapshotObservation(work *WorkSection) (string, []byte, time.Time, error) {
 	if work == nil || work.Verification == nil {
 		return "", nil, time.Time{}, ErrWorkSnapshotUnavailable
