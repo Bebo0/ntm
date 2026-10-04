@@ -129,6 +129,75 @@ func TestAgentStepFailsWhenPromptStaysInComposer(t *testing.T) {
 	assertNotResent(t, mock)
 }
 
+// alwaysWorkingDetector reports a pane that never finishes its turn.
+type alwaysWorkingDetector struct{}
+
+func (alwaysWorkingDetector) Detect(paneID string) (status.AgentStatus, error) {
+	return status.AgentStatus{PaneID: paneID, State: status.StateWorking}, nil
+}
+
+func (alwaysWorkingDetector) DetectAll(string) ([]status.AgentStatus, error) {
+	return nil, nil
+}
+
+// A failed send and an expired wait must keep the pane's evidence with the
+// step error: the last thing the agent printed and whether it read idle or
+// busy. Both were dropped when delivery moved to executeAgentDelivery, so
+// `ntm pipeline status` and the pipelines API showed the failure without why.
+func TestFailedAgentDeliveryRecordsPaneEvidence(t *testing.T) {
+	const evidence = "provider error: 529 overloaded"
+	tests := []struct {
+		name      string
+		executor  func(t *testing.T) (*Executor, *MockTmuxClient)
+		wantType  string
+		wantState string
+	}{
+		{
+			name:      "send",
+			executor:  func(t *testing.T) (*Executor, *MockTmuxClient) { return strandedExecutor(t, "evidence-send") },
+			wantType:  "send",
+			wantState: string(status.StateIdle),
+		},
+		{
+			name: "timeout",
+			executor: func(t *testing.T) (*Executor, *MockTmuxClient) {
+				executor, mock := submittingExecutor(t, "evidence-timeout")
+				executor.SetDetector(alwaysWorkingDetector{})
+				return executor, mock
+			},
+			wantType:  "timeout",
+			wantState: string(status.StateWorking),
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			executor, mock := tt.executor(t)
+			if err := mock.SetPaneOutput("%1", evidence); err != nil {
+				t.Fatalf("SetPaneOutput: %v", err)
+			}
+			workflow := singleStepWorkflow("evidence-"+tt.name, Step{
+				ID:      "work",
+				Pane:    PaneSpec{Index: 1},
+				Prompt:  "run the task",
+				Wait:    WaitCompletion,
+				Timeout: Duration{Duration: 500 * time.Millisecond},
+			})
+
+			state, _ := executor.Run(context.Background(), workflow, nil, nil)
+			got := state.Steps["work"]
+			if got.Status != StatusFailed || got.Error == nil || got.Error.Type != tt.wantType {
+				t.Fatalf("step = status %q error %+v, want a failed %q step", got.Status, got.Error, tt.wantType)
+			}
+			if !strings.Contains(got.Error.PaneOutput, evidence) {
+				t.Errorf("error pane output = %q, want the pane's last output %q", got.Error.PaneOutput, evidence)
+			}
+			if got.Error.AgentState != tt.wantState {
+				t.Errorf("error agent state = %q, want %q", got.Error.AgentState, tt.wantState)
+			}
+		})
+	}
+}
+
 // TestAgentStepVerifiesSubmissionBeforeWaiting: verification must happen, be
 // handed the exact payload that was pasted and the pane's real width, and run
 // once per send.

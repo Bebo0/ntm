@@ -1750,6 +1750,14 @@ func (e *Executor) executeAgentDelivery(ctx context.Context, step *Step, workflo
 		}
 		result.Status = StatusFailed
 		result.Error = stepRuntimeError(step, kind, typ, err.Error(), "inspect the original pane and saved delivery before an intentional --mode=restart-failed or reset", err.Error())
+		// A failed send or an expired wait leaves its evidence in the pane:
+		// what the agent last printed and whether it reads idle or busy. Keep
+		// it with the error so status and the API can show why after the pane
+		// has moved on.
+		if typ == "send" || typ == "timeout" {
+			result.Error.PaneOutput = e.captureErrorContext(result.PaneUsed, 50)
+			result.Error.AgentState = e.detectAgentState(result.PaneUsed)
+		}
 		return result
 	}
 	record, recorded := e.loadAgentDelivery(step.ID)
