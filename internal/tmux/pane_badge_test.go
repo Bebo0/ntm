@@ -266,7 +266,13 @@ func TestRealListWindowBadgeInfoLinkedAndOptOut(t *testing.T) {
 	session := createBadgeTestSession(t)
 	other := createSecondBadgeTestSession(t)
 	ctx := context.Background()
-	if err := DefaultClient.RunSilentContext(ctx, "link-window", "-s", SessionOptionTarget(session)+"0", "-t", SessionOptionTarget(other)+"9"); err != nil {
+	// Link the session's window by its id: its index follows the host's
+	// base-index, so a hard-coded ":0" fails wherever base-index is 1.
+	before, err := DefaultClient.ListWindowBadgeInfoContext(ctx, session)
+	if err != nil || len(before) != 1 {
+		t.Fatalf("windows before linking = %+v, %v", before, err)
+	}
+	if err := DefaultClient.RunSilentContext(ctx, "link-window", "-s", before[0].ID, "-t", SessionOptionTarget(other)+"9"); err != nil {
 		t.Fatalf("link-window: %v", err)
 	}
 	if err := DefaultClient.RunSilentContext(ctx, "set-option", "-t", SessionOptionTarget(session), SessionOptionAgentMailBadges, "off"); err != nil {
