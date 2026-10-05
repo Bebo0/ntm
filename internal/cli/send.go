@@ -2794,246 +2794,40 @@ func runKill(ctx context.Context, w io.Writer, session string, force bool, tags 
 		return fmt.Errorf("session is required")
 	}
 	session = res.Session
-	sessionInferred := res.Inferred
 
 	if !tmux.SessionExists(session) {
 		return fmt.Errorf("session '%s' not found", session)
 	}
 
-	dir := getSessionWorkingDir(ctx, session, sessionInferred)
-	auditStart := time.Now()
-	auditAborted := false
-	auditKilled := false
-	auditNoTargets := false
-	auditScope := "session"
-	auditKilledPanes := 0
-	if len(tags) > 0 {
-		auditScope = "tags"
+	req := killRequest{
+		session:   session,
+		inferred:  res.Inferred,
+		force:     force,
+		tags:      tags,
+		noHooks:   noHooks,
+		summarize: summarize,
+		notify:    func(format string, args ...any) { fmt.Printf(format, args...) },
 	}
-	_ = audit.LogEvent(session, audit.EventTypeCommand, audit.ActorUser, "session.kill", map[string]interface{}{
-		"phase":          "start",
-		"session":        session,
-		"force":          force,
-		"tags":           tags,
-		"summarize":      summarize,
-		"scope":          auditScope,
-		"working_dir":    dir,
-		"correlation_id": auditCorrelationID,
-	}, nil)
-	defer func() {
-		success := err == nil && !auditAborted
-		payload := map[string]interface{}{
-			"phase":          "finish",
-			"session":        session,
-			"force":          force,
-			"tags":           tags,
-			"summarize":      summarize,
-			"scope":          auditScope,
-			"killed":         auditKilled,
-			"killed_panes":   auditKilledPanes,
-			"no_targets":     auditNoTargets,
-			"aborted":        auditAborted,
-			"success":        success,
-			"duration_ms":    time.Since(auditStart).Milliseconds(),
-			"working_dir":    dir,
-			"correlation_id": auditCorrelationID,
-		}
-		if err != nil {
-			payload["error"] = err.Error()
-		}
-		_ = audit.LogEvent(session, audit.EventTypeCommand, audit.ActorUser, "session.kill", payload, nil)
-	}()
-
-	// Initialize hook executor
-	var hookExec *hooks.Executor
-	if !noHooks {
-		var err error
-		hookExec, err = hooks.NewExecutorFromConfig()
-		if err != nil {
-			if !jsonOutput {
-				fmt.Printf("⚠ Could not load hooks config: %v\n", err)
-			}
-			hookExec = hooks.NewExecutor(nil)
-		}
-	}
-
-	// Build hook context
-	hookCtx := hooks.ExecutionContext{
-		SessionName: session,
-		ProjectDir:  dir,
-		AdditionalEnv: map[string]string{
-			"NTM_FORCE_KILL": boolToStr(force),
-			"NTM_KILL_TAGS":  strings.Join(tags, ","),
-		},
-	}
-
-	// Run pre-kill hooks
-	if hookExec != nil && hookExec.HasHooksForEvent(hooks.EventPreKill) {
-		if !jsonOutput {
-			fmt.Println("Running pre-kill hooks...")
-		}
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
-		results, err := hookExec.RunHooksForEvent(ctx, hooks.EventPreKill, hookCtx)
-		cancel()
-		if err != nil {
-			return fmt.Errorf("pre-kill hook failed: %w", err)
-		}
-		if hooks.AnyFailed(results) {
-			return fmt.Errorf("pre-kill hook failed: %w", hooks.AllErrors(results))
-		}
-	}
-
-	// Generate summary before killing if requested
-	if summarize {
-		fmt.Println("Generating session summary...")
-		summaryResult, err := generateKillSummary(ctx, session, sessionInferred)
-		if err != nil {
-			fmt.Printf("⚠ Summary generation failed: %v\n", err)
-		} else {
-			fmt.Println("\n" + summaryResult.Text + "\n")
-		}
-	}
-
-	// If tags are provided, kill specific panes
-	if len(tags) > 0 {
-		panes, err := tmux.GetPanes(session)
-		if err != nil {
-			return err
-		}
-
-		var toKill []tmux.Pane
-		for _, p := range panes {
-			if HasAnyTag(p.Tags, tags) {
-				toKill = append(toKill, p)
-			}
-		}
-
-		if len(toKill) == 0 {
-			fmt.Println("No panes found matching tags.")
-			auditNoTargets = true
-			return nil
-		}
-
-		if !force {
-			title := fmt.Sprintf("Kill %d pane(s)?", len(toKill))
-			desc := fmt.Sprintf("This will terminate panes matching tags %v in session '%s'.", tags, session)
-			if !confirmHuhDestructive(title, desc) {
-				auditAborted = true
-				fmt.Println("Aborted.")
-				return nil
-			}
-		}
-
-		for _, p := range toKill {
-			if err := tmux.KillPane(p.ID); err != nil {
-				return fmt.Errorf("killing pane %s: %w", p.ID, err)
-			}
-		}
-		addTimelineStopMarkers(session, toKill)
-		auditKilled = true
-		auditKilledPanes = len(toKill)
-		fmt.Printf("Killed %d pane(s)\n", len(toKill))
-		return nil
-	}
-
 	if !force {
-		panes, err := tmux.GetPanes(session)
-		if err != nil {
-			return err
-		}
-
-		title := fmt.Sprintf("Kill session '%s'?", session)
-		desc := fmt.Sprintf("This will terminate %d running agent(s).", len(panes))
-		if !confirmHuhDestructive(title, desc) {
-			auditAborted = true
-			fmt.Println("Aborted.")
-			return nil
-		}
+		req.confirm = confirmHuhDestructive
 	}
-
-	// Join the owning resident before recording the process subtree or ending
-	// its timeline. Recovery must not create another agent during shutdown.
-	local := tmux.DefaultClient.Remote == ""
-	if local {
-		if err := stopKillSessionMonitor(ctx, session); err != nil {
-			return fmt.Errorf("stopping session monitor before kill: %w", err)
-		}
+	outcome, err := executeKill(ctx, req)
+	if outcome.summaryErr != nil {
+		fmt.Printf("⚠ Summary generation failed: %v\n", outcome.summaryErr)
+	} else if outcome.summary != nil {
+		fmt.Println("\n" + outcome.summary.Text + "\n")
 	}
-	panesForStop, err := tmux.GetPanes(session)
-	if err == nil {
-		addTimelineStopMarkers(session, panesForStop)
-	}
-
-	// Finalize timeline persistence before killing the session
-	if err := state.EndSessionTimeline(session); err != nil {
-		// Log but don't fail - timeline finalization is not critical
-		if !jsonOutput {
-			fmt.Printf("⚠ Timeline finalization failed: %v\n", err)
-		}
-	}
-
-	// Collect the agent process subtree of every pane BEFORE killing the
-	// session. Agents (often node/bun launched with --dangerously-skip-
-	// permissions) run as descendants of the pane shell PID; on a tmux
-	// kill-session SIGHUP they can survive, reparent to init, and leak —
-	// holding agent-mail registrations and file locks. We snapshot the subtree
-	// now while the shells are still alive, then reap any survivors after the
-	// session is gone. Remote pane PIDs belong to another host and cannot
-	// identify local processes for collection or signaling.
-	var orphanCandidates []int
-	if local {
-		var panePIDs []int
-		for _, p := range panesForStop {
-			panePIDs = append(panePIDs, p.PID)
-		}
-		orphanCandidates = collectKillPaneDescendants(panePIDs)
-	}
-
-	if err := tmux.KillSession(session); err != nil {
+	if err != nil {
 		return err
 	}
-	auditKilled = true
-
-	// Reap any agent process subtrees that survived kill-session.
-	if local {
-		reapKillOrphans(orphanCandidates)
+	switch {
+	case outcome.aborted:
+		fmt.Println("Aborted.")
+	case outcome.noTargets:
+		fmt.Println("No panes found matching tags.")
+	default:
+		fmt.Println(outcome.message)
 	}
-
-	// Best-effort: release Agent Mail reservations held by the session's
-	// registered pane agents and drop stale pane identities (bd-1bdvy).
-	// Never blocks or fails the kill when the mail server is down.
-	cleanupAgentMailOnKill(ctx, session, dir)
-
-	// Drop persisted routing state for the killed session so a recreated
-	// session with the same name does not inherit a stale last_agent /
-	// rotation cursor (bd-88um4). Best-effort: routing state is only a hint.
-	if st, err := state.Open(""); err == nil {
-		_ = st.DeleteRoutingState(session)
-		_ = st.Close()
-	}
-
-	fmt.Printf("Killed session '%s'\n", session)
-
-	// Post-kill hooks?
-	// The session is gone, but we can still run hooks in context of what was killed.
-	if hookExec != nil && hookExec.HasHooksForEvent(hooks.EventPostKill) {
-		if !jsonOutput {
-			fmt.Println("Running post-kill hooks...")
-		}
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
-		results, err := hookExec.RunHooksForEvent(ctx, hooks.EventPostKill, hookCtx)
-		cancel()
-		if err != nil {
-			if !jsonOutput {
-				fmt.Printf("⚠ Post-kill hook error: %v\n", err)
-			}
-		} else if hooks.AnyFailed(results) {
-			if !jsonOutput {
-				fmt.Printf("⚠ Post-kill hook failed: %v\n", hooks.AllErrors(results))
-			}
-		}
-	}
-
 	return nil
 }
 
@@ -3191,7 +2985,7 @@ func runKillProject(ctx context.Context, w io.Writer, project string, force bool
 // buildKillResponse constructs the response for session kill.
 // Used by both kernel handler and direct CLI calls.
 // In JSON/robot mode, force is effectively always true (no interactive confirmation).
-func buildKillResponse(ctx context.Context, session string, force bool, tags []string, noHooks bool, summarize bool) (resp *output.KillResponse, err error) {
+func buildKillResponse(ctx context.Context, session string, force bool, tags []string, noHooks bool, summarize bool) (*output.KillResponse, error) {
 	if err := tmux.EnsureInstalled(); err != nil {
 		return nil, err
 	}
@@ -3205,15 +2999,60 @@ func buildKillResponse(ctx context.Context, session string, force bool, tags []s
 		return nil, fmt.Errorf("session '%s' not found", session)
 	}
 
-	dir := getSessionWorkingDir(ctx, session, false)
+	outcome, err := executeKill(ctx, killRequest{session: session, force: force, tags: tags, noHooks: noHooks, summarize: summarize})
+	if err != nil {
+		return nil, err
+	}
+	return &output.KillResponse{
+		TimestampedResponse: output.NewTimestamped(),
+		Session:             session,
+		Killed:              outcome.killed,
+		Message:             outcome.message,
+		Summary:             outcome.summary,
+	}, nil
+}
+
+// killRequest is one kill of a resolved session, or of its panes matching
+// tags. The terminal and JSON surfaces resolve the session their own way and
+// then share executeKill, so both write the same audit record, run the same
+// hooks, reap the same orphaned agent processes and emit the same webhook
+// events. Each used to carry its own copy: the terminal kill emitted no events
+// and the JSON kill reaped no orphans (bd-zp9su).
+type killRequest struct {
+	session   string
+	inferred  bool
+	force     bool
+	tags      []string
+	noHooks   bool
+	summarize bool
+	// confirm asks before destroying anything; nil never asks.
+	confirm func(title, desc string) bool
+	// notify prints progress for a person; nil is silent.
+	notify func(format string, args ...any)
+}
+
+type killOutcome struct {
+	killed      bool
+	aborted     bool
+	noTargets   bool
+	killedPanes int
+	message     string
+	summary     *summary.SessionSummary
+	summaryErr  error
+}
+
+func executeKill(ctx context.Context, req killRequest) (outcome killOutcome, err error) {
+	session, force, tags, summarize := req.session, req.force, req.tags, req.summarize
+	notify := req.notify
+	if notify == nil {
+		notify = func(string, ...any) {}
+	}
+	dir := getSessionWorkingDir(ctx, session, req.inferred)
 	auditStart := time.Now()
 	auditScope := "session"
 	if len(tags) > 0 {
 		auditScope = "tags"
 	}
-	auditKilled := false
-	auditNoTargets := false
-	auditKilledPanes := 0
 	_ = audit.LogEvent(session, audit.EventTypeCommand, audit.ActorUser, "session.kill", map[string]interface{}{
 		"phase":          "start",
 		"session":        session,
@@ -3225,7 +3064,7 @@ func buildKillResponse(ctx context.Context, session string, force bool, tags []s
 		"correlation_id": auditCorrelationID,
 	}, nil)
 	defer func() {
-		success := err == nil
+		success := err == nil && !outcome.aborted
 		payload := map[string]interface{}{
 			"phase":          "finish",
 			"session":        session,
@@ -3233,9 +3072,10 @@ func buildKillResponse(ctx context.Context, session string, force bool, tags []s
 			"tags":           tags,
 			"summarize":      summarize,
 			"scope":          auditScope,
-			"killed":         auditKilled,
-			"killed_panes":   auditKilledPanes,
-			"no_targets":     auditNoTargets,
+			"killed":         outcome.killed,
+			"killed_panes":   outcome.killedPanes,
+			"no_targets":     outcome.noTargets,
+			"aborted":        outcome.aborted,
 			"success":        success,
 			"duration_ms":    time.Since(auditStart).Milliseconds(),
 			"working_dir":    dir,
@@ -3267,11 +3107,11 @@ func buildKillResponse(ctx context.Context, session string, force bool, tags []s
 
 	// Initialize hook executor
 	var hookExec *hooks.Executor
-	if !noHooks {
+	if !req.noHooks {
 		var err error
 		hookExec, err = hooks.NewExecutorFromConfig()
 		if err != nil {
-			// In kernel mode, we don't have interactive output
+			notify("⚠ Could not load hooks config: %v\n", err)
 			hookExec = hooks.NewExecutor(nil)
 		}
 	}
@@ -3288,35 +3128,33 @@ func buildKillResponse(ctx context.Context, session string, force bool, tags []s
 
 	// Run pre-kill hooks
 	if hookExec != nil && hookExec.HasHooksForEvent(hooks.EventPreKill) {
+		notify("Running pre-kill hooks...\n")
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 		results, err := hookExec.RunHooksForEvent(ctx, hooks.EventPreKill, hookCtx)
 		cancel()
 		if err != nil {
-			return nil, fmt.Errorf("pre-kill hook failed: %w", err)
+			return outcome, fmt.Errorf("pre-kill hook failed: %w", err)
 		}
 		if hooks.AnyFailed(results) {
-			return nil, fmt.Errorf("pre-kill hook failed: %w", hooks.AllErrors(results))
+			return outcome, fmt.Errorf("pre-kill hook failed: %w", hooks.AllErrors(results))
 		}
 	}
 
-	// Generate summary before killing if requested
-	var summaryResult *summary.SessionSummary
+	// Generate summary before killing if requested. A failure does not stop
+	// the kill; the error is reported with the outcome.
 	if summarize {
-		var err error
-		summaryResult, err = generateKillSummary(ctx, session, false)
-		if err != nil {
-			// Non-fatal - continue with kill but note the error
-			summaryResult = nil
+		notify("Generating session summary...\n")
+		outcome.summary, outcome.summaryErr = generateKillSummary(ctx, session, req.inferred)
+		if outcome.summaryErr != nil {
+			outcome.summary = nil
 		}
 	}
-
-	var message string
 
 	// If tags are provided, kill specific panes
 	if len(tags) > 0 {
 		panes, err := tmux.GetPanes(session)
 		if err != nil {
-			return nil, err
+			return outcome, err
 		}
 
 		var toKill []tmux.Pane
@@ -3327,19 +3165,23 @@ func buildKillResponse(ctx context.Context, session string, force bool, tags []s
 		}
 
 		if len(toKill) == 0 {
-			auditNoTargets = true
-			resp = &output.KillResponse{
-				TimestampedResponse: output.NewTimestamped(),
-				Session:             session,
-				Killed:              false,
-				Message:             "No panes found matching tags",
+			outcome.noTargets = true
+			outcome.message = "No panes found matching tags"
+			return outcome, nil
+		}
+
+		if req.confirm != nil {
+			title := fmt.Sprintf("Kill %d pane(s)?", len(toKill))
+			desc := fmt.Sprintf("This will terminate panes matching tags %v in session '%s'.", tags, session)
+			if !req.confirm(title, desc) {
+				outcome.aborted = true
+				return outcome, nil
 			}
-			return resp, nil
 		}
 
 		for _, p := range toKill {
 			if err := tmux.KillPane(p.ID); err != nil {
-				return nil, fmt.Errorf("killing pane %s: %w", p.ID, err)
+				return outcome, fmt.Errorf("killing pane %s: %w", p.ID, err)
 			}
 			events.DefaultEmitter().Emit(events.NewWebhookEvent(
 				events.WebhookAgentStopped,
@@ -3356,13 +3198,30 @@ func buildKillResponse(ctx context.Context, session string, force bool, tags []s
 			))
 		}
 		addTimelineStopMarkers(session, toKill)
-		auditKilled = true
-		auditKilledPanes = len(toKill)
-		message = fmt.Sprintf("Killed %d pane(s) matching tags", len(toKill))
+		outcome.killed = true
+		outcome.killedPanes = len(toKill)
+		outcome.message = fmt.Sprintf("Killed %d pane(s) matching tags", len(toKill))
 	} else {
-		if tmux.DefaultClient.Remote == "" {
+		if req.confirm != nil {
+			panes, err := tmux.GetPanes(session)
+			if err != nil {
+				return outcome, err
+			}
+			title := fmt.Sprintf("Kill session '%s'?", session)
+			desc := fmt.Sprintf("This will terminate %d running agent(s).", len(panes))
+			if !req.confirm(title, desc) {
+				outcome.aborted = true
+				return outcome, nil
+			}
+		}
+
+		// Join the owning resident before recording the process subtree or
+		// ending its timeline. Recovery must not create another agent during
+		// shutdown.
+		local := tmux.DefaultClient.Remote == ""
+		if local {
 			if err := stopKillSessionMonitor(ctx, session); err != nil {
-				return nil, fmt.Errorf("stopping session monitor before kill: %w", err)
+				return outcome, fmt.Errorf("stopping session monitor before kill: %w", err)
 			}
 		}
 		panesForStop, err := tmux.GetPanes(session)
@@ -3370,13 +3229,39 @@ func buildKillResponse(ctx context.Context, session string, force bool, tags []s
 			addTimelineStopMarkers(session, panesForStop)
 		}
 
-		// Finalize timeline persistence before killing the session
-		_ = state.EndSessionTimeline(session) // Ignore error - not critical
+		// Finalize timeline persistence before killing the session; a
+		// failure is reported but does not stop the kill.
+		if err := state.EndSessionTimeline(session); err != nil {
+			notify("⚠ Timeline finalization failed: %v\n", err)
+		}
+
+		// Collect the agent process subtree of every pane BEFORE killing the
+		// session. Agents (often node/bun launched with --dangerously-skip-
+		// permissions) run as descendants of the pane shell PID; on a tmux
+		// kill-session SIGHUP they can survive, reparent to init, and leak —
+		// holding agent-mail registrations and file locks. We snapshot the
+		// subtree now while the shells are still alive, then reap any
+		// survivors after the session is gone. Remote pane PIDs belong to
+		// another host and cannot identify local processes for collection or
+		// signaling.
+		var orphanCandidates []int
+		if local {
+			var panePIDs []int
+			for _, p := range panesForStop {
+				panePIDs = append(panePIDs, p.PID)
+			}
+			orphanCandidates = collectKillPaneDescendants(panePIDs)
+		}
 
 		if err := tmux.KillSession(session); err != nil {
-			return nil, err
+			return outcome, err
 		}
-		auditKilled = true
+		outcome.killed = true
+
+		// Reap any agent process subtrees that survived kill-session.
+		if local {
+			reapKillOrphans(orphanCandidates)
+		}
 
 		// Best-effort: release Agent Mail reservations held by the session's
 		// registered pane agents and drop stale pane identities (bd-1bdvy).
@@ -3385,21 +3270,20 @@ func buildKillResponse(ctx context.Context, session string, force bool, tags []s
 
 		// Drop persisted routing state for the killed session so a recreated
 		// session with the same name does not inherit a stale last_agent /
-		// rotation cursor (bd-88um4) — same cleanup as the plain-kill path
-		// (runKill). Best-effort: routing state is only a hint.
+		// rotation cursor (bd-88um4). Best-effort: routing state is only a hint.
 		if st, err := state.Open(""); err == nil {
 			_ = st.DeleteRoutingState(session)
 			_ = st.Close()
 		}
 
-		message = fmt.Sprintf("Killed session '%s'", session)
+		outcome.message = fmt.Sprintf("Killed session '%s'", session)
 
 		events.DefaultEmitter().Emit(events.NewWebhookEvent(
 			events.WebhookSessionKilled,
 			session,
 			"",
 			"",
-			message,
+			outcome.message,
 			map[string]string{
 				"project_dir": dir,
 				"force":       boolToStr(force),
@@ -3411,7 +3295,7 @@ func buildKillResponse(ctx context.Context, session string, force bool, tags []s
 			session,
 			"",
 			"",
-			message,
+			outcome.message,
 			map[string]string{
 				"project_dir": dir,
 				"force":       boolToStr(force),
@@ -3419,22 +3303,21 @@ func buildKillResponse(ctx context.Context, session string, force bool, tags []s
 		))
 	}
 
-	// Post-kill hooks
+	// Post-kill hooks run in the context of what was killed. Their errors are
+	// reported but do not fail the kill.
 	if hookExec != nil && hookExec.HasHooksForEvent(hooks.EventPostKill) {
+		notify("Running post-kill hooks...\n")
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
-		_, _ = hookExec.RunHooksForEvent(ctx, hooks.EventPostKill, hookCtx)
+		results, err := hookExec.RunHooksForEvent(ctx, hooks.EventPostKill, hookCtx)
 		cancel()
-		// Post-kill hook errors are logged but don't fail the response
+		if err != nil {
+			notify("⚠ Post-kill hook error: %v\n", err)
+		} else if hooks.AnyFailed(results) {
+			notify("⚠ Post-kill hook failed: %v\n", hooks.AllErrors(results))
+		}
 	}
 
-	resp = &output.KillResponse{
-		TimestampedResponse: output.NewTimestamped(),
-		Session:             session,
-		Killed:              true,
-		Message:             message,
-		Summary:             summaryResult,
-	}
-	return resp, nil
+	return outcome, nil
 }
 
 // generateKillSummary generates a session summary for use before killing.

@@ -17,6 +17,7 @@ import (
 	"github.com/Dicklesworthstone/ntm/internal/assignment"
 	"github.com/Dicklesworthstone/ntm/internal/config"
 	dispatchsvc "github.com/Dicklesworthstone/ntm/internal/dispatch"
+	"github.com/Dicklesworthstone/ntm/internal/events"
 	"github.com/Dicklesworthstone/ntm/internal/process"
 	"github.com/Dicklesworthstone/ntm/internal/redaction"
 	"github.com/Dicklesworthstone/ntm/internal/robot"
@@ -2883,6 +2884,53 @@ exec /bin/sh -c "$3"
 			}
 			if !strings.Contains(string(calls), "remote-host operator@remote.example") || !strings.Contains(string(calls), "kill-session -t =shutdown-target") {
 				t.Fatalf("remote session was not killed: %s", calls)
+			}
+		})
+	}
+}
+
+// Both kill surfaces share one implementation (bd-zp9su): a local session kill
+// reaps orphaned agent processes and emits the session-killed webhook event
+// whether it came from the terminal or from --json. Before, the terminal kill
+// emitted no events and the JSON kill reaped no orphans.
+func TestKillSurfacesReapOrphansAndEmitKillEvents(t *testing.T) {
+	for _, surface := range []string{"plain", "response"} {
+		t.Run(surface, func(t *testing.T) {
+			killResidentFixture(t)
+			oldStop, oldCollect, oldReap := stopKillSessionMonitor, collectKillPaneDescendants, reapKillOrphans
+			t.Cleanup(func() {
+				stopKillSessionMonitor, collectKillPaneDescendants, reapKillOrphans = oldStop, oldCollect, oldReap
+			})
+			stopKillSessionMonitor = func(context.Context, string) error { return nil }
+			collectKillPaneDescendants = func([]int) []int { return []int{4242} }
+			var reaped []int
+			reapKillOrphans = func(pids []int) { reaped = append(reaped, pids...) }
+
+			killed := make(chan struct{}, 4)
+			unsubscribe := events.DefaultBus.Subscribe(events.WebhookSessionKilled, func(e events.BusEvent) {
+				if e.EventSession() == "shutdown-target" {
+					killed <- struct{}{}
+				}
+			})
+			defer unsubscribe()
+
+			var err error
+			if surface == "plain" {
+				err = runKill(t.Context(), io.Discard, "shutdown-target", true, nil, true, false)
+			} else {
+				_, err = buildKillResponse(t.Context(), "shutdown-target", true, nil, true, false)
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(reaped) != 1 || reaped[0] != 4242 {
+				t.Fatalf("kill reaped %v, want the collected agent subtree [4242]", reaped)
+			}
+			events.DefaultEmitter().Flush(2 * time.Second)
+			select {
+			case <-killed:
+			case <-time.After(2 * time.Second):
+				t.Fatal("kill emitted no session-killed webhook event")
 			}
 		})
 	}
