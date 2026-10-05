@@ -903,19 +903,6 @@ func findLiveAgentPane(panes []tmux.Pane, agentID, paneID string) (tmux.Pane, er
 	return tmux.Pane{}, fmt.Errorf("pane not found for agent %s", agentID)
 }
 
-func validateAutomatedRotationBatch(panes []tmux.Pane, agentInfos []AgentContextInfo) error {
-	for _, info := range agentInfos {
-		pane, err := findLiveAgentPane(panes, info.AgentID, info.PaneID)
-		if err != nil {
-			return err
-		}
-		if err := validateAutomatedRotation(pane.Type); err != nil {
-			return fmt.Errorf("agent %s (%s): %w", info.AgentID, pane.Type.Canonical(), err)
-		}
-	}
-	return nil
-}
-
 func (r *Rotator) resolveLiveAgentType(session, agentID, paneID string) (agent.AgentType, error) {
 	return r.resolveLiveAgentTypeContext(stdcontext.Background(), session, agentID, paneID)
 }
@@ -1048,110 +1035,6 @@ func NewRotator(cfg RotatorConfig) *Rotator {
 		pending:    make(map[string]*PendingRotation),
 		confirming: make(map[string]bool),
 	}
-}
-
-// CheckAndRotate checks all agents and rotates those above the threshold.
-// Returns the results of all rotation attempts.
-// If RequireConfirm is enabled, agents needing rotation are added to pending
-// and results have State=RotationStatePending until confirmed.
-func (r *Rotator) CheckAndRotate(sessionName, workDir string) ([]RotationResult, error) {
-	if r.monitor == nil {
-		return nil, fmt.Errorf("no monitor available")
-	}
-	if r.spawner == nil {
-		return nil, fmt.Errorf("no spawner available")
-	}
-	if !r.config.Enabled {
-		return nil, nil // Rotation disabled
-	}
-
-	// First, process any expired pending rotations
-	r.processExpiredPending(sessionName, workDir)
-
-	// Surface agents approaching exhaustion even when they have not reached the
-	// rotation threshold yet. The warning is keyed by agent and session, so
-	// repeated checks refresh the same alert instead of creating duplicates.
-	for _, agentInfo := range r.agentsEligibleForRotation(r.config.WarningThreshold * 100) {
-		usagePercent := 0.0
-		if agentInfo.Estimate != nil {
-			usagePercent = agentInfo.Estimate.UsagePercent
-		}
-		alerts.EmitContextWarning(alerts.RotationAlertData{
-			AgentID:      agentInfo.AgentID,
-			Session:      sessionName,
-			Pane:         agentInfo.PaneID,
-			ContextUsage: usagePercent,
-		})
-	}
-
-	// Find agents above rotate threshold
-	// Note: r.config.RotateThreshold is 0.0-1.0, but AgentsAboveThreshold expects 0-100 percentage
-	agentsToRotate := r.agentsEligibleForRotation(r.config.RotateThreshold * 100)
-	if len(agentsToRotate) == 0 {
-		return nil, nil // No agents need rotation
-	}
-	panes, err := r.spawner.GetPanes(sessionName)
-	if err != nil {
-		return nil, fmt.Errorf("rotation preflight failed: get panes: %w", err)
-	}
-	if err := validateAutomatedRotationBatch(panes, agentsToRotate); err != nil {
-		return nil, fmt.Errorf("rotation preflight failed: %w", err)
-	}
-
-	var results []RotationResult
-
-	// Process agents one at a time
-	for _, agentInfo := range agentsToRotate {
-		// Skip if already pending
-		if r.HasPendingRotation(agentInfo.AgentID) {
-			continue
-		}
-
-		// If confirmation is required, create a pending rotation instead
-		if r.config.RequireConfirm {
-			usagePercent := 0.0
-			if agentInfo.Estimate != nil {
-				usagePercent = agentInfo.Estimate.UsagePercent
-			}
-			pending := r.createPendingRotation(sessionName, agentInfo.AgentID, agentInfo.PaneID, usagePercent, workDir)
-			results = append(results, RotationResult{
-				OldAgentID: agentInfo.AgentID,
-				Method:     RotationThresholdExceeded,
-				State:      RotationStatePending,
-				Timestamp:  pending.CreatedAt,
-				Error:      fmt.Sprintf("awaiting confirmation, timeout in %ds", pending.RemainingSeconds()),
-			})
-			continue
-		}
-
-		// No confirmation required, rotate directly
-		result := r.rotateAgent(sessionName, agentInfo.AgentID, workDir)
-		results = append(results, result)
-	}
-
-	return results, nil
-}
-
-// agentsEligibleForRotation returns threshold-matching agents that have been
-// monitored long enough to satisfy the configured minimum session age. A
-// missing start time is treated conservatively as ineligible: rotating an
-// agent whose age is unknown defeats the guard's purpose.
-func (r *Rotator) agentsEligibleForRotation(threshold float64) []AgentContextInfo {
-	agents := r.monitor.AgentsAboveThreshold(threshold)
-	minAge := time.Duration(r.config.MinSessionAgeSec) * time.Second
-	if minAge <= 0 {
-		return agents
-	}
-
-	now := time.Now()
-	eligible := make([]AgentContextInfo, 0, len(agents))
-	for _, agent := range agents {
-		if agent.SessionStart.IsZero() || now.Sub(agent.SessionStart) < minAge {
-			continue
-		}
-		eligible = append(eligible, agent)
-	}
-	return eligible
 }
 
 // createPendingRotation creates a pending rotation entry for an agent.
@@ -1982,54 +1865,6 @@ func (r *Rotator) ClearHistory() {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.history = make([]RotationEvent, 0)
-}
-
-// NeedsRotation checks if any agent needs rotation.
-// Returns agent IDs that need rotation and a reason string.
-func (r *Rotator) NeedsRotation() ([]string, string) {
-	if r.monitor == nil {
-		return nil, "no monitor available"
-	}
-	if !r.config.Enabled {
-		return nil, "rotation disabled"
-	}
-
-	agentInfos := r.monitor.AgentsAboveThreshold(r.config.RotateThreshold * 100)
-	if len(agentInfos) == 0 {
-		return nil, "no agents above threshold"
-	}
-
-	agentIDs := make([]string, len(agentInfos))
-	for i, info := range agentInfos {
-		agentIDs[i] = info.AgentID
-	}
-
-	return agentIDs, fmt.Sprintf("%d agent(s) above %.0f%% threshold",
-		len(agentIDs), r.config.RotateThreshold*100)
-}
-
-// NeedsWarning checks if any agent is above the warning threshold.
-// Returns agent IDs that need warning and a reason string.
-func (r *Rotator) NeedsWarning() ([]string, string) {
-	if r.monitor == nil {
-		return nil, "no monitor available"
-	}
-	if !r.config.Enabled {
-		return nil, "rotation disabled"
-	}
-
-	agentInfos := r.monitor.AgentsAboveThreshold(r.config.WarningThreshold * 100)
-	if len(agentInfos) == 0 {
-		return nil, "no agents above warning threshold"
-	}
-
-	agentIDs := make([]string, len(agentInfos))
-	for i, info := range agentInfos {
-		agentIDs[i] = info.AgentID
-	}
-
-	return agentIDs, fmt.Sprintf("%d agent(s) above %.0f%% warning threshold",
-		len(agentInfos), r.config.WarningThreshold*100)
 }
 
 // ManualRotate triggers a rotation for a specific agent regardless of threshold.

@@ -168,24 +168,24 @@ func TestGetValueRejectsUnknownAndDeadPaths(t *testing.T) {
 	}
 }
 
-// TestGetValueTraversesPluginMap covers the map-traversal branch: a custom
-// agent command is addressable by name rather than only as a whole map.
-func TestGetValueTraversesPluginMap(t *testing.T) {
+// TestGetValueTraversesModelAliasMap covers the map-traversal branch: a model
+// alias is addressable by name rather than only as a whole map.
+func TestGetValueTraversesModelAliasMap(t *testing.T) {
 	cfg := Default()
-	if cfg.Agents.Plugins == nil {
-		cfg.Agents.Plugins = map[string]string{}
+	if cfg.Models.Claude == nil {
+		cfg.Models.Claude = map[string]string{}
 	}
-	cfg.Agents.Plugins["mytool"] = "mytool --run"
+	cfg.Models.Claude["mytool"] = "claude-mytool-1"
 
-	got, err := GetValue(cfg, "agents.plugins.mytool")
+	got, err := GetValue(cfg, "models.claude.mytool")
 	if err != nil {
-		t.Fatalf("GetValue(agents.plugins.mytool): %v", err)
+		t.Fatalf("GetValue(models.claude.mytool): %v", err)
 	}
-	if got != "mytool --run" {
-		t.Errorf("agents.plugins.mytool = %v; want the registered command", got)
+	if got != "claude-mytool-1" {
+		t.Errorf("models.claude.mytool = %v; want the registered alias", got)
 	}
 
-	if _, err := GetValue(cfg, "agents.plugins.absent"); err == nil {
-		t.Error("a missing plugin key should not resolve")
+	if _, err := GetValue(cfg, "models.claude.absent"); err == nil {
+		t.Error("a missing alias key should not resolve")
 	}
 }

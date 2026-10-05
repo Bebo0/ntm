@@ -90,8 +90,6 @@ func TestContextRotationRecoveryNestedKey(t *testing.T) {
 	if err := os.WriteFile(path, []byte(`projects_base = "/tmp"
 
 [context_rotation]
-enabled = true
-warning_threshold = 0.80
 rotate_threshold = 0.95
 
 [context_rotation.recovery]
@@ -137,7 +135,7 @@ func TestContextRotationRecoveryDefaultsAreUseful(t *testing.T) {
 	if err := os.WriteFile(path, []byte(`projects_base = "/tmp"
 
 [context_rotation]
-enabled = true
+rotate_threshold = 0.95
 `), 0o644); err != nil {
 		t.Fatal(err)
 	}

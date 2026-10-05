@@ -84,8 +84,6 @@ func newRotationTestEnv(t *testing.T, threshold float64, autoConfirm bool, panes
 	t.Helper()
 
 	rotCfg := config.DefaultContextRotationConfig()
-	rotCfg.Enabled = true
-	rotCfg.RequireConfirm = true
 	rotCfg.ConfirmTimeoutSec = 300
 
 	ctxMonitor := ntmctx.NewContextMonitor(ntmctx.DefaultMonitorConfig())

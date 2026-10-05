@@ -202,6 +202,31 @@ var deprecatedKnobPrefixes = map[string]string{
 	"tmux.activity_indicators": noEffect,
 }
 
+// noReader is the disposition for keys that were parsed, validated, written by
+// `ntm config init` and printed by `config get`, while the code that read them
+// had no caller.
+const noReader = "removed, no replacement — nothing in ntm read this key"
+
+// readerlessKnobExact is the claims-audit batch (bd-syx9t). These keys looked
+// live only because a G2 claim pointed at a reader with no production caller:
+// the [context_rotation] toggles were read solely by Rotator.CheckAndRotate,
+// NeedsRotation and NeedsWarning, and agents.plugins solely by the resilience
+// monitor's ScanAndRegisterAgents (bd-ir0li). Like the recovery-alias batch
+// they error outright instead of warning for a release first: there is
+// nothing to migrate (no value ever had an effect) and `ntm config migrate`
+// deletes them.
+var readerlessKnobExact = map[string]string{
+	"context_rotation.enabled":             noReader + " (the live rotation trigger is [rotation] usage_percent_threshold; 0 turns it off)",
+	"context_rotation.warning_threshold":   noReader,
+	"context_rotation.min_session_age_sec": noReader,
+	"context_rotation.require_confirm":     noReader + " (coordinator rotations always wait for confirmation unless [rotation] auto_confirm is set)",
+}
+
+// readerlessKnobPrefixes holds the claims-audit batch's tables.
+var readerlessKnobPrefixes = map[string]string{
+	"agents.plugins": noReader + " (custom agents are plugin files in the agents/ directory of the config dir; see `ntm plugins`)",
+}
+
 // Dead-key tier names shared by the strict loader, doctor, and config migrate.
 const (
 	// DeadKeyTierRemoved is the v1.26.0 removal batch (error since v1.27.0).
@@ -212,6 +237,9 @@ const (
 	// removed outright rather than run through a warn release: the warning
 	// had already been shipping since v1.26.0 (ntm#323).
 	DeadKeyTierRecoveryAlias = "recovery-alias"
+	// DeadKeyTierReaderless is the claims-audit batch (bd-syx9t): keys whose
+	// only reader had no caller, removed outright.
+	DeadKeyTierReaderless = "readerless"
 )
 
 // deadKeyTier is one removal batch: its key sets and the release provenance
@@ -255,6 +283,14 @@ var deadKeyTiers = []deadKeyTier{
 		// version that has not been cut yet is how that happens. The
 		// CHANGELOG entry carries the release.
 		provenance: "removed with the memory.*/[recovery] split (ntm#323); the [recovery] replacement carries the same value",
+	},
+	{
+		name:     DeadKeyTierReaderless,
+		exact:    readerlessKnobExact,
+		prefixes: readerlessKnobPrefixes,
+		// Cites the bead, not a release, for the reason the recovery-alias
+		// batch gives above.
+		provenance: "removed in the reader-less key sweep (bd-syx9t); `ntm config migrate` deletes it",
 	},
 }
 
@@ -404,16 +440,18 @@ func deadKnobErrorLine(knob RemovedKnob, provenance string) string {
 // decodes leniently, so it works on exactly the configs the strict loader
 // refuses since v1.27.0. A missing config file yields no knobs; an
 // unparseable file yields an error.
-// ScanRemovedKnobs also reports the recovery-alias batch (ntm#323), whose
-// keys are removals in the same sense: doctor lists everything the user must
-// delete, and the per-tier release text lives in the strict-loader error.
+// ScanRemovedKnobs also reports the recovery-alias batch (ntm#323) and the
+// reader-less batch (bd-syx9t), whose keys are removals in the same sense:
+// doctor lists everything the user must delete, and the per-tier release text
+// lives in the strict-loader error.
 func ScanRemovedKnobs(path string) ([]RemovedKnob, error) {
 	byTier, err := scanKnobs(path)
 	if err != nil {
 		return nil, err
 	}
 	knobs := append([]RemovedKnob(nil), byTier[DeadKeyTierRemoved]...)
-	return append(knobs, byTier[DeadKeyTierRecoveryAlias]...), nil
+	knobs = append(knobs, byTier[DeadKeyTierRecoveryAlias]...)
+	return append(knobs, byTier[DeadKeyTierReaderless]...), nil
 }
 
 // ScanDeprecatedKnobs reports the v1.28.0-batch deprecated (bd-6otuk) config

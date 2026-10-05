@@ -5,50 +5,6 @@ import (
 	"testing"
 )
 
-func TestEmitContextWarning(t *testing.T) {
-	// Clear global tracker first
-	tracker := GetGlobalTracker()
-	clearTracker(tracker)
-
-	data := RotationAlertData{
-		AgentID:      "test-agent",
-		Session:      "test-session",
-		Pane:         "test-pane",
-		ContextUsage: 85.0,
-	}
-
-	EmitContextWarning(data)
-
-	// Check alert was created
-	active := tracker.GetActive()
-	if len(active) != 1 {
-		t.Fatalf("expected 1 active alert, got %d", len(active))
-	}
-
-	alert := active[0]
-	if alert.Type != AlertContextWarning {
-		t.Errorf("expected type %s, got %s", AlertContextWarning, alert.Type)
-	}
-	if alert.Severity != SeverityWarning {
-		t.Errorf("expected severity %s, got %s", SeverityWarning, alert.Severity)
-	}
-	if alert.Source != "context_rotation" {
-		t.Errorf("expected source 'context_rotation', got %s", alert.Source)
-	}
-	if alert.Session != "test-session" {
-		t.Errorf("expected session 'test-session', got %s", alert.Session)
-	}
-	if alert.Pane != "test-pane" {
-		t.Errorf("expected pane 'test-pane', got %s", alert.Pane)
-	}
-	if !strings.Contains(alert.Message, "85%") {
-		t.Errorf("expected message to contain '85%%', got %s", alert.Message)
-	}
-	if alert.Context["agent_id"] != "test-agent" {
-		t.Errorf("expected context agent_id 'test-agent', got %v", alert.Context["agent_id"])
-	}
-}
-
 func TestEmitRotationStarted(t *testing.T) {
 	tracker := GetGlobalTracker()
 	clearTracker(tracker)
@@ -86,14 +42,6 @@ func TestEmitRotationComplete(t *testing.T) {
 	tracker := GetGlobalTracker()
 	clearTracker(tracker)
 
-	// First emit a context warning and rotation started
-	warningData := RotationAlertData{
-		AgentID:      "old-agent",
-		Session:      "session-1",
-		ContextUsage: 90.0,
-	}
-	EmitContextWarning(warningData)
-
 	startedData := RotationAlertData{
 		AgentID:      "old-agent",
 		Session:      "session-1",
@@ -101,10 +49,9 @@ func TestEmitRotationComplete(t *testing.T) {
 	}
 	EmitRotationStarted(startedData)
 
-	// Verify both alerts are active
 	active := tracker.GetActive()
-	if len(active) != 2 {
-		t.Fatalf("expected 2 active alerts before complete, got %d", len(active))
+	if len(active) != 1 {
+		t.Fatalf("expected the started alert before complete, got %d", len(active))
 	}
 
 	// Now emit rotation complete
@@ -146,8 +93,8 @@ func TestEmitRotationComplete(t *testing.T) {
 
 	// Check resolved alerts
 	resolved := trackerResolved(tracker)
-	if len(resolved) != 2 {
-		t.Errorf("expected 2 resolved alerts, got %d", len(resolved))
+	if len(resolved) != 1 || resolved[0].Type != AlertRotationStarted {
+		t.Errorf("expected the rotation_started alert resolved, got %+v", resolved)
 	}
 }
 

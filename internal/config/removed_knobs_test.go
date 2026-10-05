@@ -189,6 +189,72 @@ func TestRemovedKnobsErrorAtLoad(t *testing.T) {
 	}
 }
 
+// TestReaderlessKnobsErrorScanAndMigrate covers the bd-syx9t batch end to
+// end on the [context_rotation] block `ntm config init` used to write: the
+// strict loader names every reader-less key under this batch's provenance,
+// doctor lists them, and `config migrate` deletes them while keeping the live
+// [context_rotation] keys, after which the config loads.
+func TestReaderlessKnobsErrorScanAndMigrate(t *testing.T) {
+	path := createTempConfig(t, `projects_base = "/tmp/removed-knob-proof"
+
+[agents.plugins]
+mytool = "mytool --run"
+
+[context_rotation]
+enabled = true
+warning_threshold = 0.80
+rotate_threshold = 0.90
+summary_max_tokens = 2000
+min_session_age_sec = 300
+try_compact_first = true
+require_confirm = false
+`)
+	wantKeys := map[string]string{
+		"agents.plugins.mytool":                readerlessKnobPrefixes["agents.plugins"],
+		"context_rotation.enabled":             readerlessKnobExact["context_rotation.enabled"],
+		"context_rotation.warning_threshold":   noReader,
+		"context_rotation.min_session_age_sec": noReader,
+		"context_rotation.require_confirm":     readerlessKnobExact["context_rotation.require_confirm"],
+	}
+
+	_, _, err := loadCapturingStderr(t, path)
+	if err == nil {
+		t.Fatal("Load must fail on reader-less keys")
+	}
+	provenance := DeadKeyTierProvenance(DeadKeyTierReaderless)
+	for key, disposition := range wantKeys {
+		want := deadKnobErrorLine(RemovedKnob{Key: key, Disposition: disposition}, provenance)
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("load error is missing the line for %s.\nwant: %q\ngot:  %q", key, want, err.Error())
+		}
+	}
+
+	knobs, err := ScanRemovedKnobs(path)
+	if err != nil {
+		t.Fatalf("ScanRemovedKnobs: %v", err)
+	}
+	scanned := map[string]string{}
+	for _, knob := range knobs {
+		scanned[knob.Key] = knob.Tier
+	}
+	for key := range wantKeys {
+		if scanned[key] != DeadKeyTierReaderless {
+			t.Errorf("doctor scan: %s tier = %q, want %q (scan: %v)", key, scanned[key], DeadKeyTierReaderless, knobs)
+		}
+	}
+
+	if _, err := MigrateDeadKeys(path, false); err != nil {
+		t.Fatalf("MigrateDeadKeys: %v", err)
+	}
+	cfg, _, err := loadCapturingStderr(t, path)
+	if err != nil {
+		t.Fatalf("migrated config must load: %v", err)
+	}
+	if cfg.ContextRotation.RotateThreshold != 0.90 || cfg.ContextRotation.SummaryMaxTokens != 2000 {
+		t.Errorf("migrate must keep live [context_rotation] keys, got %+v", cfg.ContextRotation)
+	}
+}
+
 // TestCleanConfigLoadsSilently: a config with no removed keys loads without
 // error and without any removed-key (or other) warning on stderr.
 func TestCleanConfigLoadsSilently(t *testing.T) {

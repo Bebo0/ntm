@@ -196,8 +196,8 @@ func TestDiff_ContextRotationSettings(t *testing.T) {
 	t.Parallel()
 
 	cfg := Default()
-	cfg.ContextRotation.Enabled = !cfg.ContextRotation.Enabled
-	cfg.ContextRotation.WarningThreshold = 0.5
+	cfg.ContextRotation.TryCompactFirst = !cfg.ContextRotation.TryCompactFirst
+	cfg.ContextRotation.ConfirmTimeoutSec = 5
 	cfg.ContextRotation.RotateThreshold = 0.99
 
 	diffs := Diff(cfg)
@@ -208,8 +208,8 @@ func TestDiff_ContextRotationSettings(t *testing.T) {
 	}
 
 	for _, expected := range []string{
-		"context_rotation.enabled",
-		"context_rotation.warning_threshold",
+		"context_rotation.try_compact_first",
+		"context_rotation.confirm_timeout_sec",
 		"context_rotation.rotate_threshold",
 	} {
 		if !paths[expected] {

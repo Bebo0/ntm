@@ -13,7 +13,6 @@
 # real claims (the 8 all-build ensemble defaults + swarm.force_global_auth_clobber
 # after its flag-clobber wiring fix), and the 16 ensemble.* keys below are live
 # ONLY under -tags ensemble_experimental.
-agents.plugins	bd-syx9t	no runtime reader: its only reader, resilience Monitor.ScanAndRegisterAgents, had no caller and was deleted (bd-ir0li); plugin agents load from the agents/ plugin dir and restarts reuse the manifest command
 # permanent:
 # Blind spot: build tags. These keys' RegisterReader claims live in
 # internal/cli/liveness_claims_ensemble.go behind the ensemble_experimental

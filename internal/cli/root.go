@@ -6112,9 +6112,8 @@ Examples:
 						"auto_select_pro_model": effectiveCfg.GeminiSetup.AutoSelectProModel,
 					},
 					"context_rotation": map[string]interface{}{
-						"enabled":           effectiveCfg.ContextRotation.Enabled,
-						"warning_threshold": effectiveCfg.ContextRotation.WarningThreshold,
 						"rotate_threshold":  effectiveCfg.ContextRotation.RotateThreshold,
+						"try_compact_first": effectiveCfg.ContextRotation.TryCompactFirst,
 					},
 					"agent_mail": map[string]interface{}{
 						"enabled":            effectiveCfg.AgentMail.Enabled,
@@ -6183,7 +6182,7 @@ Examples:
 Examples:
   ntm config get projects_base
   ntm config get alerts.enabled
-  ntm config get context_rotation.warning_threshold`,
+  ntm config get context_rotation.rotate_threshold`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			effectiveCfg := loadSelectedConfigOrDefault()

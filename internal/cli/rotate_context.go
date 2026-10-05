@@ -318,8 +318,9 @@ func newRotateContextPendingCmd() *cobra.Command {
 		Short: "View pending rotation confirmations",
 		Long: `View pending context rotation confirmations awaiting user action.
 
-When context rotation is configured with require_confirmation=true, rotations
-are queued as pending until confirmed via this CLI or dashboard.
+Rotations triggered by the coordinator ([rotation] usage_percent_threshold) are
+queued as pending until confirmed via this CLI or dashboard, unless [rotation]
+auto_confirm is set.
 
 Examples:
   ntm rotate context pending              # All pending rotations

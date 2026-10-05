@@ -1184,39 +1184,25 @@ func TestContextRotationDefaults(t *testing.T) {
 	cfg := Default()
 
 	// Defaults should be sensible
-	if !cfg.ContextRotation.Enabled {
-		t.Error("ContextRotation should be enabled by default")
-	}
-	if cfg.ContextRotation.WarningThreshold != 0.80 {
-		t.Errorf("Expected warning_threshold 0.80, got %f", cfg.ContextRotation.WarningThreshold)
-	}
 	if cfg.ContextRotation.RotateThreshold != 0.95 {
 		t.Errorf("Expected rotate_threshold 0.95, got %f", cfg.ContextRotation.RotateThreshold)
 	}
 	if cfg.ContextRotation.SummaryMaxTokens != 2000 {
 		t.Errorf("Expected summary_max_tokens 2000, got %d", cfg.ContextRotation.SummaryMaxTokens)
 	}
-	if cfg.ContextRotation.MinSessionAgeSec != 300 {
-		t.Errorf("Expected min_session_age_sec 300, got %d", cfg.ContextRotation.MinSessionAgeSec)
-	}
 	if !cfg.ContextRotation.TryCompactFirst {
 		t.Error("TryCompactFirst should be true by default")
-	}
-	if cfg.ContextRotation.RequireConfirm {
-		t.Error("RequireConfirm should be false by default")
 	}
 }
 
 func TestContextRotationFromTOML(t *testing.T) {
 	configContent := `
 [context_rotation]
-enabled = false
-warning_threshold = 0.70
 rotate_threshold = 0.90
 summary_max_tokens = 3000
-min_session_age_sec = 600
 try_compact_first = false
-require_confirm = true
+confirm_timeout_sec = 120
+default_confirm_action = "compact"
 `
 	configPath := createTempConfig(t, configContent)
 	cfg, err := Load(configPath)
@@ -1224,26 +1210,17 @@ require_confirm = true
 		t.Fatalf("Failed to load config: %v", err)
 	}
 
-	if cfg.ContextRotation.Enabled {
-		t.Error("Expected enabled = false")
-	}
-	if cfg.ContextRotation.WarningThreshold != 0.70 {
-		t.Errorf("Expected warning_threshold 0.70, got %f", cfg.ContextRotation.WarningThreshold)
-	}
 	if cfg.ContextRotation.RotateThreshold != 0.90 {
 		t.Errorf("Expected rotate_threshold 0.90, got %f", cfg.ContextRotation.RotateThreshold)
 	}
 	if cfg.ContextRotation.SummaryMaxTokens != 3000 {
 		t.Errorf("Expected summary_max_tokens 3000, got %d", cfg.ContextRotation.SummaryMaxTokens)
 	}
-	if cfg.ContextRotation.MinSessionAgeSec != 600 {
-		t.Errorf("Expected min_session_age_sec 600, got %d", cfg.ContextRotation.MinSessionAgeSec)
-	}
 	if cfg.ContextRotation.TryCompactFirst {
 		t.Error("Expected try_compact_first = false")
 	}
-	if !cfg.ContextRotation.RequireConfirm {
-		t.Error("Expected require_confirm = true")
+	if cfg.ContextRotation.ConfirmTimeoutSec != 120 || cfg.ContextRotation.DefaultConfirmAction != "compact" {
+		t.Errorf("Expected confirm_timeout_sec 120 / default_confirm_action compact, got %+v", cfg.ContextRotation)
 	}
 }
 
@@ -1256,36 +1233,14 @@ func TestValidateContextRotationConfig(t *testing.T) {
 		{
 			name: "valid config",
 			cfg: ContextRotationConfig{
-				Enabled:          true,
-				WarningThreshold: 0.80,
 				RotateThreshold:  0.95,
 				SummaryMaxTokens: 2000,
-				MinSessionAgeSec: 300,
 			},
 			wantErr: false,
 		},
 		{
-			name: "warning_threshold too low",
-			cfg: ContextRotationConfig{
-				WarningThreshold: -0.1,
-				RotateThreshold:  0.95,
-				SummaryMaxTokens: 2000,
-			},
-			wantErr: true,
-		},
-		{
-			name: "warning_threshold too high",
-			cfg: ContextRotationConfig{
-				WarningThreshold: 1.5,
-				RotateThreshold:  0.95,
-				SummaryMaxTokens: 2000,
-			},
-			wantErr: true,
-		},
-		{
 			name: "rotate_threshold too low",
 			cfg: ContextRotationConfig{
-				WarningThreshold: 0.80,
 				RotateThreshold:  -0.1,
 				SummaryMaxTokens: 2000,
 			},
@@ -1294,26 +1249,7 @@ func TestValidateContextRotationConfig(t *testing.T) {
 		{
 			name: "rotate_threshold too high",
 			cfg: ContextRotationConfig{
-				WarningThreshold: 0.80,
 				RotateThreshold:  1.5,
-				SummaryMaxTokens: 2000,
-			},
-			wantErr: true,
-		},
-		{
-			name: "warning >= rotate threshold",
-			cfg: ContextRotationConfig{
-				WarningThreshold: 0.95,
-				RotateThreshold:  0.80,
-				SummaryMaxTokens: 2000,
-			},
-			wantErr: true,
-		},
-		{
-			name: "warning == rotate threshold",
-			cfg: ContextRotationConfig{
-				WarningThreshold: 0.80,
-				RotateThreshold:  0.80,
 				SummaryMaxTokens: 2000,
 			},
 			wantErr: true,
@@ -1321,7 +1257,6 @@ func TestValidateContextRotationConfig(t *testing.T) {
 		{
 			name: "summary_max_tokens too low",
 			cfg: ContextRotationConfig{
-				WarningThreshold: 0.80,
 				RotateThreshold:  0.95,
 				SummaryMaxTokens: 100,
 			},
@@ -1330,31 +1265,19 @@ func TestValidateContextRotationConfig(t *testing.T) {
 		{
 			name: "summary_max_tokens too high",
 			cfg: ContextRotationConfig{
-				WarningThreshold: 0.80,
 				RotateThreshold:  0.95,
 				SummaryMaxTokens: 20000,
 			},
 			wantErr: true,
 		},
 		{
-			name: "min_session_age negative",
+			name: "confirm_timeout_sec negative",
 			cfg: ContextRotationConfig{
-				WarningThreshold: 0.80,
-				RotateThreshold:  0.95,
-				SummaryMaxTokens: 2000,
-				MinSessionAgeSec: -1,
+				RotateThreshold:   0.95,
+				SummaryMaxTokens:  2000,
+				ConfirmTimeoutSec: -1,
 			},
 			wantErr: true,
-		},
-		{
-			name: "min_session_age zero is valid",
-			cfg: ContextRotationConfig{
-				WarningThreshold: 0.80,
-				RotateThreshold:  0.95,
-				SummaryMaxTokens: 2000,
-				MinSessionAgeSec: 0,
-			},
-			wantErr: false,
 		},
 	}
 
@@ -1381,11 +1304,18 @@ func TestContextRotationPrintOutput(t *testing.T) {
 	if !strings.Contains(output, "[context_rotation]") {
 		t.Error("Expected output to contain [context_rotation]")
 	}
-	if !strings.Contains(output, "warning_threshold") {
-		t.Error("Expected output to contain warning_threshold")
-	}
 	if !strings.Contains(output, "rotate_threshold") {
 		t.Error("Expected output to contain rotate_threshold")
+	}
+	// `ntm config init` writes this output; it must not seed reader-less
+	// keys that the strict loader then rejects (bd-syx9t).
+	for _, dead := range []string{"warning_threshold", "min_session_age_sec", "require_confirm"} {
+		if strings.Contains(output, "\n"+dead+" =") {
+			t.Errorf("Print output still writes the removed key %s", dead)
+		}
+	}
+	if _, err := Load(createTempConfig(t, output)); err != nil {
+		t.Errorf("the printed default config must load cleanly: %v", err)
 	}
 }
 
@@ -2864,7 +2794,6 @@ func TestValidateContextRotationConfig_MissingBranches(t *testing.T) {
 		{
 			name: "confirm_timeout_sec negative",
 			cfg: ContextRotationConfig{
-				WarningThreshold:  0.80,
 				RotateThreshold:   0.95,
 				SummaryMaxTokens:  2000,
 				ConfirmTimeoutSec: -1,
@@ -2874,7 +2803,6 @@ func TestValidateContextRotationConfig_MissingBranches(t *testing.T) {
 		{
 			name: "invalid default_confirm_action",
 			cfg: ContextRotationConfig{
-				WarningThreshold:     0.80,
 				RotateThreshold:      0.95,
 				SummaryMaxTokens:     2000,
 				DefaultConfirmAction: "invalid",
@@ -2884,7 +2812,6 @@ func TestValidateContextRotationConfig_MissingBranches(t *testing.T) {
 		{
 			name: "empty default_confirm_action is valid",
 			cfg: ContextRotationConfig{
-				WarningThreshold:     0.80,
 				RotateThreshold:      0.95,
 				SummaryMaxTokens:     2000,
 				DefaultConfirmAction: "",
@@ -2894,7 +2821,6 @@ func TestValidateContextRotationConfig_MissingBranches(t *testing.T) {
 		{
 			name: "compact default_confirm_action is valid",
 			cfg: ContextRotationConfig{
-				WarningThreshold:     0.80,
 				RotateThreshold:      0.95,
 				SummaryMaxTokens:     2000,
 				DefaultConfirmAction: "compact",

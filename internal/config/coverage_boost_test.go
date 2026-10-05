@@ -359,8 +359,8 @@ func TestGetValue_ContextRotation(t *testing.T) {
 		path string
 	}{
 		{"context_rotation"},
-		{"context_rotation.enabled"},
-		{"context_rotation.warning_threshold"},
+		{"context_rotation.try_compact_first"},
+		{"context_rotation.confirm_timeout_sec"},
 		{"context_rotation.rotate_threshold"},
 	}
 	for _, tt := range tests {
@@ -1187,7 +1187,7 @@ func TestValidate_TmuxPaneInitDelayNegative(t *testing.T) {
 func TestValidate_InvalidContextRotation(t *testing.T) {
 	t.Parallel()
 	cfg := Default()
-	cfg.ContextRotation.WarningThreshold = 2.0 // out of 0.0-1.0 range
+	cfg.ContextRotation.RotateThreshold = 2.0 // out of 0.0-1.0 range
 	errs := Validate(cfg)
 	found := false
 	for _, e := range errs {

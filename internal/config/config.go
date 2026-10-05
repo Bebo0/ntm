@@ -733,7 +733,6 @@ type AgentConfig struct {
 	Aider       string            `toml:"aider"`
 	Opencode    string            `toml:"oc"`      // Opencode (https://opencode.ai) launch command — see ntm#116
 	Omp         string            `toml:"omp"`     // Oh My Pi (omp) launch command; empty uses DefaultOmpCommand
-	Plugins     map[string]string `toml:"plugins"` // Custom agent commands keyed by type
 
 	// ClaudeIsolateCredentials opts Claude panes into per-pane
 	// CLAUDE_CONFIG_DIR isolation at spawn (GH#237). Claude Code rewrites the
@@ -765,13 +764,9 @@ func DefaultContextConfig() ContextConfig {
 
 // ContextRotationConfig holds configuration for automatic context window rotation
 type ContextRotationConfig struct {
-	Enabled              bool                     `toml:"enabled"`                // Top-level toggle for context rotation
-	WarningThreshold     float64                  `toml:"warning_threshold"`      // 0.0-1.0, warn when context usage exceeds this
 	RotateThreshold      float64                  `toml:"rotate_threshold"`       // 0.0-1.0, rotate agent when usage exceeds this
 	SummaryMaxTokens     int                      `toml:"summary_max_tokens"`     // Max tokens for handoff summary
-	MinSessionAgeSec     int                      `toml:"min_session_age_sec"`    // Don't rotate agents younger than this
 	TryCompactFirst      bool                     `toml:"try_compact_first"`      // Try to compact before rotating
-	RequireConfirm       bool                     `toml:"require_confirm"`        // Require user confirmation before rotating
 	ConfirmTimeoutSec    int                      `toml:"confirm_timeout_sec"`    // Seconds to wait for confirmation (0 = no auto-rotate)
 	DefaultConfirmAction string                   `toml:"default_confirm_action"` // Action if timeout expires: "rotate", "ignore", "compact"
 	Recovery             CompactionRecoveryConfig `toml:"recovery"`               // Compaction-recovery prompt behaviour (issue #113)
@@ -815,13 +810,9 @@ func DefaultCompactionRecoveryConfig() CompactionRecoveryConfig {
 // DefaultContextRotationConfig returns sensible defaults for context rotation
 func DefaultContextRotationConfig() ContextRotationConfig {
 	return ContextRotationConfig{
-		Enabled:              true,
-		WarningThreshold:     0.80,     // Warn at 80%
 		RotateThreshold:      0.95,     // Rotate at 95%
 		SummaryMaxTokens:     2000,     // 2000 tokens for handoff summary
-		MinSessionAgeSec:     300,      // 5 minutes minimum session age
 		TryCompactFirst:      true,     // Try compaction before rotation
-		RequireConfirm:       false,    // Don't require confirmation by default
 		ConfirmTimeoutSec:    60,       // 60 seconds timeout for confirmation
 		DefaultConfirmAction: "rotate", // Auto-rotate on timeout
 		Recovery:             DefaultCompactionRecoveryConfig(),
@@ -830,21 +821,11 @@ func DefaultContextRotationConfig() ContextRotationConfig {
 
 // ValidateContextRotationConfig validates the context rotation configuration
 func ValidateContextRotationConfig(cfg *ContextRotationConfig) error {
-	if cfg.WarningThreshold < 0.0 || cfg.WarningThreshold > 1.0 {
-		return fmt.Errorf("warning_threshold must be between 0.0 and 1.0, got %f", cfg.WarningThreshold)
-	}
 	if cfg.RotateThreshold < 0.0 || cfg.RotateThreshold > 1.0 {
 		return fmt.Errorf("rotate_threshold must be between 0.0 and 1.0, got %f", cfg.RotateThreshold)
 	}
-	if cfg.WarningThreshold >= cfg.RotateThreshold {
-		return fmt.Errorf("warning_threshold (%f) must be less than rotate_threshold (%f)",
-			cfg.WarningThreshold, cfg.RotateThreshold)
-	}
 	if cfg.SummaryMaxTokens < 500 || cfg.SummaryMaxTokens > 10000 {
 		return fmt.Errorf("summary_max_tokens must be between 500 and 10000, got %d", cfg.SummaryMaxTokens)
-	}
-	if cfg.MinSessionAgeSec < 0 {
-		return fmt.Errorf("min_session_age_sec must be non-negative, got %d", cfg.MinSessionAgeSec)
 	}
 	if cfg.ConfirmTimeoutSec < 0 {
 		return fmt.Errorf("confirm_timeout_sec must be non-negative, got %d", cfg.ConfirmTimeoutSec)
@@ -4301,13 +4282,9 @@ func Print(cfg *Config, w io.Writer) error {
 	fmt.Fprintln(w, "[context_rotation]")
 	fmt.Fprintln(w, "# Context window rotation configuration")
 	fmt.Fprintln(w, "# Monitors agent context usage and rotates before exhaustion")
-	fmt.Fprintf(w, "enabled = %t                    # Top-level toggle for context rotation\n", cfg.ContextRotation.Enabled)
-	fmt.Fprintf(w, "warning_threshold = %.2f        # Warn when context usage exceeds this (0.0-1.0)\n", cfg.ContextRotation.WarningThreshold)
 	fmt.Fprintf(w, "rotate_threshold = %.2f         # Rotate agent when usage exceeds this (0.0-1.0)\n", cfg.ContextRotation.RotateThreshold)
 	fmt.Fprintf(w, "summary_max_tokens = %d        # Max tokens for handoff summary\n", cfg.ContextRotation.SummaryMaxTokens)
-	fmt.Fprintf(w, "min_session_age_sec = %d        # Don't rotate agents younger than this\n", cfg.ContextRotation.MinSessionAgeSec)
 	fmt.Fprintf(w, "try_compact_first = %t         # Try to compact before rotating\n", cfg.ContextRotation.TryCompactFirst)
-	fmt.Fprintf(w, "require_confirm = %t           # Require user confirmation before rotating\n", cfg.ContextRotation.RequireConfirm)
 	fmt.Fprintln(w)
 
 	fmt.Fprintln(w, "[recovery]")
@@ -4699,8 +4676,9 @@ func GetValue(cfg *Config, path string) (interface{}, error) {
 	// [command_hooks], [retry] and [routing]. An operator verifying a
 	// documented key with `ntm config get` was told it did not exist.
 	//
-	// It also *shadowed* deeper paths: `agents.plugins.<name>` returned the
-	// whole map because the case matched on `parts[1]` and ignored the rest.
+	// It also *shadowed* deeper paths: a map entry such as `models.claude.<alias>`
+	// returned the whole map because the case matched on `parts[1]` and ignored
+	// the rest.
 	// Resolving structurally first fixes that and makes reachability a
 	// property of the struct instead of of anyone remembering to add a case.
 	// TestGetValueReachesEveryTOMLLeaf enforces it.
@@ -4761,8 +4739,6 @@ func GetValue(cfg *Config, path string) (interface{}, error) {
 			return cfg.Agents.Opencode, nil
 		case "omp":
 			return cfg.Agents.Omp, nil
-		case "plugins":
-			return cfg.Agents.Plugins, nil
 		}
 	case "tmux":
 		if len(parts) < 2 {
@@ -5079,20 +5055,12 @@ func GetValue(cfg *Config, path string) (interface{}, error) {
 			return cfg.ContextRotation, nil
 		}
 		switch parts[1] {
-		case "enabled":
-			return cfg.ContextRotation.Enabled, nil
-		case "warning_threshold":
-			return cfg.ContextRotation.WarningThreshold, nil
 		case "rotate_threshold":
 			return cfg.ContextRotation.RotateThreshold, nil
 		case "summary_max_tokens":
 			return cfg.ContextRotation.SummaryMaxTokens, nil
-		case "min_session_age_sec":
-			return cfg.ContextRotation.MinSessionAgeSec, nil
 		case "try_compact_first":
 			return cfg.ContextRotation.TryCompactFirst, nil
-		case "require_confirm":
-			return cfg.ContextRotation.RequireConfirm, nil
 		case "confirm_timeout_sec":
 			return cfg.ContextRotation.ConfirmTimeoutSec, nil
 		case "default_confirm_action":
@@ -5597,7 +5565,7 @@ var configValueOverrides = map[string]func(cfg *Config) interface{}{
 // configLookup distinguishes "this path is not structurally addressable" from
 // "the container resolved but holds no such key". The difference matters
 // because only the former may fall through to the legacy switch; letting a
-// map miss fall through made `agents.plugins.<absent>` return the whole map.
+// map miss fall through made `<map>.<absent>` return the whole map.
 type configLookup int
 
 const (
@@ -5610,7 +5578,7 @@ const (
 // time, and returns the addressed value.
 //
 // Maps with string keys are traversable too, so a custom entry such as
-// `agents.plugins.<name>` resolves instead of returning its whole container.
+// `models.claude.<alias>` resolves instead of returning its whole container.
 func configValueByTOMLPath(v reflect.Value, parts []string) (interface{}, configLookup) {
 	for _, part := range parts {
 		for v.Kind() == reflect.Ptr || v.Kind() == reflect.Interface {
@@ -5755,7 +5723,6 @@ func Diff(cfg *Config) []ConfigDiff {
 	addDiff("agents.windsurf", defaults.Agents.Windsurf, cfg.Agents.Windsurf)
 	addDiff("agents.aider", defaults.Agents.Aider, cfg.Agents.Aider)
 	addDiff("agents.omp", defaults.Agents.Omp, cfg.Agents.Omp)
-	addDiff("agents.plugins", defaults.Agents.Plugins, cfg.Agents.Plugins)
 
 	// Tmux
 	addDiff("tmux.default_panes", defaults.Tmux.DefaultPanes, cfg.Tmux.DefaultPanes)
@@ -5942,13 +5909,9 @@ func Diff(cfg *Config) []ConfigDiff {
 	addDiff("prompts.omp_default_file", defaults.Prompts.OmpDefaultFile, cfg.Prompts.OmpDefaultFile)
 
 	// Context Rotation
-	addDiff("context_rotation.enabled", defaults.ContextRotation.Enabled, cfg.ContextRotation.Enabled)
-	addDiff("context_rotation.warning_threshold", defaults.ContextRotation.WarningThreshold, cfg.ContextRotation.WarningThreshold)
 	addDiff("context_rotation.rotate_threshold", defaults.ContextRotation.RotateThreshold, cfg.ContextRotation.RotateThreshold)
 	addDiff("context_rotation.summary_max_tokens", defaults.ContextRotation.SummaryMaxTokens, cfg.ContextRotation.SummaryMaxTokens)
-	addDiff("context_rotation.min_session_age_sec", defaults.ContextRotation.MinSessionAgeSec, cfg.ContextRotation.MinSessionAgeSec)
 	addDiff("context_rotation.try_compact_first", defaults.ContextRotation.TryCompactFirst, cfg.ContextRotation.TryCompactFirst)
-	addDiff("context_rotation.require_confirm", defaults.ContextRotation.RequireConfirm, cfg.ContextRotation.RequireConfirm)
 	addDiff("context_rotation.confirm_timeout_sec", defaults.ContextRotation.ConfirmTimeoutSec, cfg.ContextRotation.ConfirmTimeoutSec)
 	addDiff("context_rotation.default_confirm_action", defaults.ContextRotation.DefaultConfirmAction, cfg.ContextRotation.DefaultConfirmAction)
 

@@ -103,10 +103,7 @@ func newRotationChecker(session, workDir string, coordCfg CoordinatorConfig, ntm
 		thresholds = ntmCfg.Rotation.Thresholds
 	}
 	// The checker decides eligibility itself and only uses the Rotator's
-	// pending/confirm machinery; Enabled/RequireConfirm reflect that entry
-	// point regardless of the [context_rotation] scrollback-driven settings.
-	rotCfg.Enabled = true
-	rotCfg.RequireConfirm = true
+	// pending/confirm machinery and rotation path.
 
 	ctxMonitor := ntmctx.NewContextMonitor(ntmctx.DefaultMonitorConfig())
 	rotator := ntmctx.NewRotator(ntmctx.RotatorConfig{
