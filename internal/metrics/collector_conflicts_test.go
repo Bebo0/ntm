@@ -31,7 +31,6 @@ func TestGenerateReportCountsConflictsFromTracker(t *testing.T) {
 	stubFileConflicts(t, 3)
 
 	c := NewCollector(nil, "sess")
-	t.Cleanup(c.Close)
 
 	report, err := c.GenerateReport()
 	if err != nil {
@@ -47,7 +46,6 @@ func TestFileConflictTargetCanFail(t *testing.T) {
 	stubFileConflicts(t, 4)
 
 	c := NewCollector(nil, "sess")
-	t.Cleanup(c.Close)
 
 	report, err := c.GenerateReport()
 	if err != nil {
@@ -76,7 +74,6 @@ func TestFileConflictTargetMetWhenClean(t *testing.T) {
 	stubFileConflicts(t, 0)
 
 	c := NewCollector(nil, "sess")
-	t.Cleanup(c.Close)
 
 	report, err := c.GenerateReport()
 	if err != nil {
@@ -101,7 +98,6 @@ func TestGenerateReportPassesSessionToConflictSource(t *testing.T) {
 	t.Cleanup(func() { countFileConflicts = previous })
 
 	c := NewCollector(nil, "my-session")
-	t.Cleanup(c.Close)
 	if _, err := c.GenerateReport(); err != nil {
 		t.Fatalf("GenerateReport: %v", err)
 	}

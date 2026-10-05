@@ -12,7 +12,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/Dicklesworthstone/ntm/internal/events"
 	"github.com/Dicklesworthstone/ntm/internal/state"
 	"github.com/Dicklesworthstone/ntm/internal/tracker"
 )
@@ -26,13 +25,12 @@ var countFileConflicts = func(session string) int64 {
 	return int64(len(tracker.ConflictsSince(time.Now().Add(-FileConflictWindow), session)))
 }
 
-// Collector tracks success metrics for NTM orchestration.
-// It subscribes to the event bus and persists metrics to the state store.
+// Collector tracks success metrics for NTM orchestration and persists them to
+// the state store.
 type Collector struct {
-	store       *state.Store
-	sessionID   string
-	mu          sync.RWMutex
-	unsubscribe events.UnsubscribeFunc
+	store     *state.Store
+	sessionID string
+	mu        sync.RWMutex
 
 	// In-memory counters for fast access
 	apiCalls        map[string]int64 // tool:operation -> count
@@ -52,30 +50,13 @@ func NewCollector(store *state.Store, sessionID string) *Collector {
 		apiCalls:  make(map[string]int64),
 		latencies: make(map[string][]float64),
 	}
-	c.subscribeToEvents()
 	return c
 }
 
-// subscribeToEvents registers handlers for relevant events.
-func (c *Collector) subscribeToEvents() {
-	c.unsubscribe = events.SubscribeAll(func(e events.BusEvent) {
-		switch evt := e.(type) {
-		case events.AgentErrorEvent:
-			if evt.ErrorType == "blocked_command" {
-				c.RecordBlockedCommand(evt.AgentID, evt.Message, "policy")
-			}
-		}
-	})
-}
-
-// Close releases resources and unsubscribes from events.
-func (c *Collector) Close() {
-	if c.unsubscribe != nil {
-		c.unsubscribe()
-	}
-}
-
-// RecordBlockedCommand records a blocked command event.
+// RecordBlockedCommand records a blocked command event. Its producer is the
+// dcg check on the send path (cli recordBlockedCommandMetric); the event-bus
+// subscription that used to feed it listened for an event nothing published,
+// so destructive_cmd_incidents stayed at zero for every session.
 func (c *Collector) RecordBlockedCommand(agentID, command, reason string) {
 	c.mu.Lock()
 	c.blockedCommands++

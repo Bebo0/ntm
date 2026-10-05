@@ -3618,6 +3618,7 @@ func maybeBlockSendWithDCG(prompt, session string, panes []tmux.Pane) error {
 			if reason == "" {
 				reason = "blocked by dcg"
 			}
+			recordBlockedCommandMetric(session, command, reason, panes)
 			return fmt.Errorf("blocked by dcg: %s", reason)
 		}
 	}
@@ -4291,6 +4292,15 @@ func logDCGBlocked(command, session string, panes []tmux.Pane, blocked *tools.Bl
 		output = "blocked"
 	}
 
+	for _, paneLabel := range dcgBlockedPaneLabels(panes) {
+		_ = logger.LogBlocked(command, paneLabel, session, rule, output)
+	}
+}
+
+// dcgBlockedPaneLabels names the panes a dcg block applies to: the non-Claude
+// agents, which dcg guards from the send side.
+func dcgBlockedPaneLabels(panes []tmux.Pane) []string {
+	var labels []string
 	for _, p := range panes {
 		if !isNonClaudeAgent(p) {
 			continue
@@ -4303,8 +4313,25 @@ func logDCGBlocked(command, session string, panes []tmux.Pane, blocked *tools.Bl
 				paneLabel = fmt.Sprintf("pane_%d", p.Index)
 			}
 		}
-		_ = logger.LogBlocked(command, paneLabel, session, rule, output)
+		labels = append(labels, paneLabel)
 	}
+	return labels
+}
+
+// recordBlockedCommandMetric counts a dcg-blocked send toward the session's
+// blocked_commands, which `ntm metrics` reports as destructive_cmd_incidents.
+// It was fed only by an event-bus type nothing published, so every session
+// showed zero blocked commands and a met Tier-0 target.
+func recordBlockedCommandMetric(session, command, reason string, panes []tmux.Pane) {
+	store, collector, err := getMetricsCollector(session)
+	if err != nil {
+		slog.Default().Debug("blocked-command metric unavailable", "session", session, "error", err)
+		return
+	}
+	if store != nil {
+		defer store.Close()
+	}
+	collector.RecordBlockedCommand(strings.Join(dcgBlockedPaneLabels(panes), ","), command, "dcg: "+reason)
 }
 
 func resolveSendSessionForCommandContext(ctx context.Context, session string) (string, bool, error) {

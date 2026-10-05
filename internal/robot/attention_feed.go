@@ -1823,39 +1823,6 @@ func (f *AttentionFeed) PublishBusEvent(event ntmevents.BusEvent) (published Att
 	return f.Append(normalized), true
 }
 
-// PublishBusEvents normalizes and appends event-bus events in order, skipping unsupported entries.
-func (f *AttentionFeed) PublishBusEvents(events []ntmevents.BusEvent) []AttentionEvent {
-	if len(events) == 0 {
-		return nil
-	}
-	published := make([]AttentionEvent, 0, len(events))
-	for _, event := range events {
-		if normalized, ok := f.PublishBusEvent(event); ok {
-			published = append(published, normalized)
-		}
-	}
-	return published
-}
-
-// PublishBusHistory replays event-bus history into the feed oldest-first so cursors
-// reflect the original event chronology.
-func (f *AttentionFeed) PublishBusHistory(bus *ntmevents.EventBus, limit int) []AttentionEvent {
-	if bus == nil {
-		bus = ntmevents.DefaultBus
-	}
-	history := bus.History(limit)
-	if len(history) == 0 {
-		return nil
-	}
-	published := make([]AttentionEvent, 0, len(history))
-	for i := len(history) - 1; i >= 0; i-- {
-		if normalized, ok := f.PublishBusEvent(history[i]); ok {
-			published = append(published, normalized)
-		}
-	}
-	return published
-}
-
 // SubscribeEventBus forwards live event-bus events into the feed using the shared
 // normalization logic.
 func (f *AttentionFeed) SubscribeEventBus(bus *ntmevents.EventBus) func() {
@@ -2656,119 +2623,6 @@ func NewLoggedAttentionEvent(event ntmevents.Event) (AttentionEvent, bool) {
 // suppressed from the high-level operator feed.
 func NewBusAttentionEvent(event ntmevents.BusEvent) (AttentionEvent, bool) {
 	switch e := event.(type) {
-	case ntmevents.ProfileAssignedEvent:
-		return attentionFromBusStruct(e.BaseEvent, "event_bus.profile", attentionDetailsFromStruct(e), EventCategoryAgent, EventTypeAgentStateChange, ActionabilityInteresting, SeverityInfo, fmt.Sprintf("profile %s assigned to %s", e.Profile, e.AgentID), []NextAction{attentionStatusNextAction("Inspect the updated agent profile")}), true
-	case ntmevents.ProfileSwitchedEvent:
-		return attentionFromBusStruct(e.BaseEvent, "event_bus.profile", attentionDetailsFromStruct(e), EventCategoryAgent, EventTypeAgentStateChange, ActionabilityInteresting, SeverityInfo, fmt.Sprintf("profile switched for %s from %s to %s", e.AgentID, e.OldProfile, e.NewProfile), []NextAction{attentionStatusNextAction("Inspect the updated agent profile")}), true
-	case ntmevents.ContextWarningEvent:
-		actionability := ActionabilityInteresting
-		if e.UsagePercent >= 90 {
-			actionability = ActionabilityActionRequired
-		}
-		return attentionFromBusStruct(e.BaseEvent, "event_bus.context", attentionDetailsFromStruct(e), EventCategoryAlert, EventTypeAlertWarning, actionability, SeverityWarning, fmt.Sprintf("context usage high for %s (%.1f%%)", e.AgentID, e.UsagePercent), attentionContextActions(e.Session, "Inspect context pressure before the agent stalls")), true
-	case ntmevents.RotationStartedEvent:
-		return attentionFromBusStruct(e.BaseEvent, "event_bus.rotation", attentionDetailsFromStruct(e), EventCategoryAgent, EventTypeAgentCompacted, ActionabilityInteresting, SeverityInfo, fmt.Sprintf("rotation started for %s", e.AgentID), attentionContextActions(e.Session, "Inspect context pressure during rotation")), true
-	case ntmevents.RotationCompletedEvent:
-		eventType := EventTypeAgentRecovered
-		actionability := ActionabilityInteresting
-		severity := SeverityInfo
-		oldAgentID := strings.TrimSpace(e.OldAgentID)
-		newAgentID := strings.TrimSpace(e.NewAgentID)
-		summary := "rotation completed"
-		switch {
-		case oldAgentID != "" && newAgentID != "":
-			summary = fmt.Sprintf("rotation completed from %s to %s", oldAgentID, newAgentID)
-		case oldAgentID != "":
-			summary = fmt.Sprintf("rotation completed for %s", oldAgentID)
-		case newAgentID != "":
-			summary = fmt.Sprintf("rotation completed to %s", newAgentID)
-		}
-		nextActions := []NextAction{attentionStatusNextAction("Inspect rotated agents")}
-		if !e.Success {
-			eventType = EventTypeAgentError
-			actionability = ActionabilityActionRequired
-			severity = SeverityError
-			failedAgentID := oldAgentID
-			if failedAgentID == "" {
-				failedAgentID = newAgentID
-			}
-			if failedAgentID == "" {
-				failedAgentID = "unknown agent"
-			}
-			summary = fmt.Sprintf("rotation failed for %s", failedAgentID)
-		}
-		return attentionFromBusStruct(e.BaseEvent, "event_bus.rotation", attentionDetailsFromStruct(e), EventCategoryAgent, eventType, actionability, severity, summary, nextActions), true
-	case ntmevents.CheckpointCreatedEvent:
-		return attentionFromBusStruct(e.BaseEvent, "event_bus.checkpoint", attentionDetailsFromStruct(e), EventCategorySystem, EventTypeSystemHealthChange, ActionabilityInteresting, SeverityInfo, fmt.Sprintf("checkpoint %s created", e.Name), nil), true
-	case ntmevents.CheckpointRestoredEvent:
-		return attentionFromBusStruct(e.BaseEvent, "event_bus.checkpoint", attentionDetailsFromStruct(e), EventCategorySystem, EventTypeSystemHealthChange, ActionabilityInteresting, SeverityInfo, fmt.Sprintf("checkpoint %s restored", e.Name), []NextAction{attentionStatusNextAction("Inspect restored agent state")}), true
-	case ntmevents.WorkflowStartedEvent:
-		return attentionFromBusStruct(e.BaseEvent, "event_bus.workflow", attentionDetailsFromStruct(e), EventCategorySystem, EventTypeSystemHealthChange, ActionabilityInteresting, SeverityInfo, fmt.Sprintf("workflow %s started", e.Workflow), nil), true
-	case ntmevents.StageTransitionEvent:
-		return attentionFromBusStruct(e.BaseEvent, "event_bus.workflow", attentionDetailsFromStruct(e), EventCategorySystem, EventTypeSystemHealthChange, ActionabilityInteresting, SeverityInfo, fmt.Sprintf("workflow %s moved from %s to %s", e.Workflow, e.FromStage, e.ToStage), nil), true
-	case ntmevents.WorkflowPausedEvent:
-		return attentionFromBusStruct(e.BaseEvent, "event_bus.workflow", attentionDetailsFromStruct(e), EventCategoryAlert, EventTypeAlertWarning, ActionabilityActionRequired, SeverityWarning, fmt.Sprintf("workflow %s paused: %s", e.Workflow, e.Reason), []NextAction{attentionStatusNextAction("Inspect paused workflow state")}), true
-	case ntmevents.WorkflowCompletedEvent:
-		category := EventCategorySystem
-		eventType := EventTypeSystemHealthChange
-		actionability := ActionabilityInteresting
-		severity := SeverityInfo
-		summary := fmt.Sprintf("workflow %s completed", e.Workflow)
-		nextActions := []NextAction(nil)
-		if !e.Success {
-			category = EventCategoryAlert
-			eventType = EventTypeAlertWarning
-			actionability = ActionabilityActionRequired
-			severity = SeverityError
-			summary = fmt.Sprintf("workflow %s failed", e.Workflow)
-			nextActions = []NextAction{attentionStatusNextAction("Inspect failed workflow state")}
-		}
-		return attentionFromBusStruct(e.BaseEvent, "event_bus.workflow", attentionDetailsFromStruct(e), category, eventType, actionability, severity, summary, nextActions), true
-	case ntmevents.AgentStallEvent:
-		return attentionFromBusStruct(e.BaseEvent, "event_bus.agent", attentionDetailsFromStruct(e), EventCategoryAgent, EventTypeAgentStalled, ActionabilityActionRequired, SeverityWarning, fmt.Sprintf("agent %s stalled for %.0fs", e.AgentID, e.StallDuration), attentionContextActions(e.Session, "Inspect context pressure for the stalled agent")), true
-	case ntmevents.AgentErrorEvent:
-		return attentionFromBusStruct(e.BaseEvent, "event_bus.agent", attentionDetailsFromStruct(e), EventCategoryAgent, EventTypeAgentError, ActionabilityActionRequired, SeverityError, fmt.Sprintf("agent %s error: %s", e.AgentID, e.Message), attentionTailOrStatusActions(e.Session, "", "Inspect the failing agent output")), true
-	case ntmevents.AlertEvent:
-		eventType := EventTypeAlertInfo
-		actionability := ActionabilityInteresting
-		severity := SeverityInfo
-		switch strings.ToLower(e.Severity) {
-		case "critical":
-			eventType = EventTypeAlertAttentionRequired
-			actionability = ActionabilityActionRequired
-			severity = SeverityCritical
-		case "error":
-			eventType = EventTypeAlertAttentionRequired
-			actionability = ActionabilityActionRequired
-			severity = SeverityError
-		case "warning":
-			eventType = EventTypeAlertWarning
-			actionability = ActionabilityActionRequired
-			severity = SeverityWarning
-		}
-		return attentionFromBusStruct(e.BaseEvent, "event_bus.alert", attentionDetailsFromStruct(e), EventCategoryAlert, eventType, actionability, severity, e.Message, []NextAction{attentionStatusNextAction("Inspect the active alerts")}), true
-	case ntmevents.ReservationConflictEvent:
-		holders := strings.Join(e.Holders, ", ")
-		summary := fmt.Sprintf("reservation conflict on %s: %s blocked by [%s]", e.Path, e.RequestorAgent, holders)
-		details := map[string]any{
-			"path":            e.Path,
-			"requestor_agent": e.RequestorAgent,
-			"requestor_pane":  e.RequestorPane,
-			"holders":         e.Holders,
-			"conflict_kind":   "reservation",
-		}
-		nextActions := attentionReservationConflictActions(e.Session, details, "Inspect the conflicting reservation state")
-		return attentionFromBusStruct(e.BaseEvent, "event_bus.conflict", details, EventCategoryFile, EventTypeFileConflict, ActionabilityActionRequired, SeverityWarning, summary, nextActions), true
-	case ntmevents.FileConflictEvent:
-		agents := strings.Join(e.Agents, ", ")
-		summary := fmt.Sprintf("file conflict on %s: agents [%s] editing concurrently", e.Path, agents)
-		details := map[string]any{
-			"path":          e.Path,
-			"agents":        e.Agents,
-			"conflict_kind": "file",
-		}
-		nextActions := attentionConflictActions(e.Session, e.Path, "Compare agent outputs for conflict resolution")
-		return attentionFromBusStruct(e.BaseEvent, "event_bus.conflict", details, EventCategoryFile, EventTypeFileConflict, ActionabilityActionRequired, SeverityWarning, summary, nextActions), true
 	case ntmevents.WebhookEvent:
 		return attentionFromWebhookEvent(e), true
 	case ntmevents.BaseEvent:
@@ -3218,12 +3072,9 @@ func deriveAttentionSignal(event AttentionEvent) (string, string, map[string]any
 	case EventTypeAlertAttentionRequired, EventTypeAlertWarning, EventTypeAlertInfo:
 		if isContextHotAttentionEvent(event) {
 			usage := attentionFloatDetail(event.Details, "usage_percent")
-			reason := "context pressure warning emitted by the event bus"
-			if usage > 0 {
-				reason = fmt.Sprintf("context usage %.1f%% crossed the operator warning heuristic", usage)
-				if usage >= attentionContextHotActionThreshold {
-					reason = fmt.Sprintf("context usage %.1f%% is at or above the %.0f%% action threshold", usage, attentionContextHotActionThreshold)
-				}
+			reason := fmt.Sprintf("context usage %.1f%% crossed the operator warning heuristic", usage)
+			if usage >= attentionContextHotActionThreshold {
+				reason = fmt.Sprintf("context usage %.1f%% is at or above the %.0f%% action threshold", usage, attentionContextHotActionThreshold)
 			}
 			return attentionSignalContextHot, reason, map[string]any{
 				"signal_threshold_percent":   attentionContextHotActionThreshold,
@@ -3272,9 +3123,6 @@ func deriveConflictSignal(event AttentionEvent) (string, string, map[string]any)
 }
 
 func isContextHotAttentionEvent(event AttentionEvent) bool {
-	if event.Source == "event_bus.context" {
-		return true
-	}
 	return attentionFloatDetail(event.Details, "usage_percent") > 0 &&
 		strings.Contains(strings.ToLower(event.Summary), "context usage")
 }

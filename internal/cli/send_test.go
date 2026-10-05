@@ -22,6 +22,7 @@ import (
 	"github.com/Dicklesworthstone/ntm/internal/robot"
 	sessionPkg "github.com/Dicklesworthstone/ntm/internal/session"
 	"github.com/Dicklesworthstone/ntm/internal/tmux"
+	"github.com/Dicklesworthstone/ntm/internal/tools"
 	"github.com/Dicklesworthstone/ntm/tests/testutil"
 )
 
@@ -2884,5 +2885,66 @@ exec /bin/sh -c "$3"
 				t.Fatalf("remote session was not killed: %s", calls)
 			}
 		})
+	}
+}
+
+// A dcg-blocked send must count toward the session's destructive_cmd_incidents
+// in `ntm metrics`. The metric's only feed used to be an event-bus type nothing
+// published, so it reported zero blocked commands and a met target forever.
+func TestMaybeBlockSendWithDCGRecordsBlockedCommandMetric(t *testing.T) {
+	root := t.TempDir()
+	t.Setenv("HOME", root)
+	t.Setenv("NTM_CONFIG", filepath.Join(root, "ntm", "config.toml"))
+
+	binDir := t.TempDir()
+	script := `#!/bin/sh
+if [ "${1:-}" = "--version" ]; then
+  echo "dcg 0.5.0"
+  exit 0
+fi
+if [ "${1:-}" = "--robot" ] && [ "${2:-}" = "test" ]; then
+  echo '{"command":"git reset --hard","reason":"destroys uncommitted work"}'
+  exit 1
+fi
+exit 0
+`
+	if err := os.WriteFile(filepath.Join(binDir, "dcg"), []byte(script), 0o755); err != nil {
+		t.Fatalf("write fake dcg: %v", err)
+	}
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	adapter := tools.NewDCGAdapter()
+	adapter.InvalidateAvailabilityCache()
+	t.Cleanup(adapter.InvalidateAvailabilityCache)
+
+	oldCfg := cfg
+	cfg = config.Default()
+	cfg.Integrations.DCG.Enabled = true
+	t.Cleanup(func() { cfg = oldCfg })
+
+	panes := []tmux.Pane{{ID: "%2", Index: 2, Title: "dcgmetric__cod_1", Type: tmux.AgentCodex}}
+	err := maybeBlockSendWithDCG("git reset --hard", "dcgmetric", panes)
+	if err == nil || !strings.Contains(err.Error(), "blocked by dcg: destroys uncommitted work") {
+		t.Fatalf("maybeBlockSendWithDCG error = %v, want the dcg block", err)
+	}
+
+	store, collector, err := getMetricsCollector("dcgmetric")
+	if err != nil {
+		t.Fatalf("getMetricsCollector: %v", err)
+	}
+	if store == nil {
+		t.Fatal("state store did not open under NTM_CONFIG")
+	}
+	defer store.Close()
+	report, err := collector.GenerateReport()
+	if err != nil {
+		t.Fatalf("GenerateReport: %v", err)
+	}
+	if report.BlockedCommands != 1 {
+		t.Fatalf("BlockedCommands = %d, want the one dcg-blocked send", report.BlockedCommands)
+	}
+	for _, target := range report.TargetComparison {
+		if target.Metric == "destructive_cmd_incidents" && target.Status == "met" {
+			t.Fatalf("destructive_cmd_incidents reported %q with a blocked command recorded", target.Status)
+		}
 	}
 }

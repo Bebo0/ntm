@@ -30,11 +30,9 @@ func TestReportCountsBlockedCommandsFromStore(t *testing.T) {
 	recorder := NewCollector(store, "sess")
 	recorder.RecordBlockedCommand("agent-1", "rm -rf /", "destructive")
 	recorder.RecordBlockedCommand("agent-1", "git reset --hard", "safety")
-	recorder.Close()
 
 	// A fresh collector, as the CLI builds: nothing in memory.
 	reporter := NewCollector(store, "sess")
-	t.Cleanup(reporter.Close)
 
 	report, err := reporter.GenerateReport()
 	if err != nil {
@@ -51,10 +49,8 @@ func TestDestructiveTargetCanFail(t *testing.T) {
 
 	recorder := NewCollector(store, "sess")
 	recorder.RecordBlockedCommand("agent-1", "rm -rf /", "destructive")
-	recorder.Close()
 
 	reporter := NewCollector(store, "sess")
-	t.Cleanup(reporter.Close)
 	report, err := reporter.GenerateReport()
 	if err != nil {
 		t.Fatalf("GenerateReport: %v", err)
@@ -85,10 +81,8 @@ func TestBlockedCommandsAreSessionScoped(t *testing.T) {
 
 	other := NewCollector(store, "other-session")
 	other.RecordBlockedCommand("agent-9", "rm -rf /", "destructive")
-	other.Close()
 
 	reporter := NewCollector(store, "sess")
-	t.Cleanup(reporter.Close)
 	report, err := reporter.GenerateReport()
 	if err != nil {
 		t.Fatalf("GenerateReport: %v", err)
@@ -102,7 +96,6 @@ func TestBlockedCommandsAreSessionScoped(t *testing.T) {
 // reported rather than overwritten by an unmeasured zero.
 func TestReportFallsBackToInMemoryCountWithoutStore(t *testing.T) {
 	c := NewCollector(nil, "sess")
-	t.Cleanup(c.Close)
 	c.RecordBlockedCommand("agent-1", "rm -rf /", "destructive")
 
 	report, err := c.GenerateReport()
@@ -120,7 +113,6 @@ func TestReportFallsBackToInMemoryCountWithoutStore(t *testing.T) {
 // getMetricsCollector builds exactly that collector when state.db will not open.
 func TestNilStoreDoesNotPanic(t *testing.T) {
 	c := NewCollector(nil, "sess")
-	t.Cleanup(c.Close)
 
 	c.RecordBlockedCommand("agent-1", "rm -rf /", "destructive")
 	if _, err := c.GenerateReport(); err != nil {

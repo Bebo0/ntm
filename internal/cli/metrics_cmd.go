@@ -201,7 +201,6 @@ func runMetricsShow(sessionID string, showTargets bool) error {
 		defer store.Close()
 	}
 	if collector != nil {
-		defer collector.Close()
 	}
 
 	report, err := collector.GenerateReport()
@@ -266,7 +265,6 @@ func runMetricsCompare(sessionID, baselineName string) error {
 		defer store.Close()
 	}
 	if collector != nil {
-		defer collector.Close()
 	}
 
 	currentReport, err := collector.GenerateReport()
@@ -347,7 +345,6 @@ func runMetricsExport(sessionID, format, outputFile string) error {
 		defer store.Close()
 	}
 	if collector != nil {
-		defer collector.Close()
 	}
 
 	report, err := collector.GenerateReport()
@@ -421,7 +418,6 @@ func runMetricsSnapshotSave(sessionID, name string) error {
 		defer store.Close()
 	}
 	if collector != nil {
-		defer collector.Close()
 	}
 
 	if err := collector.SaveSnapshot(name); err != nil {
@@ -453,7 +449,6 @@ func runMetricsSnapshotList(sessionID string) error {
 		defer store.Close()
 	}
 	if collector != nil {
-		defer collector.Close()
 	}
 	if store == nil {
 		// state.Open failed, so there is no metric_snapshots table to query.

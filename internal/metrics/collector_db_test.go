@@ -65,7 +65,6 @@ func TestCollectorWithStore_GetDB(t *testing.T) {
 	createTestSession(t, store, "db-test")
 
 	c := NewCollector(store, "db-test")
-	defer c.Close()
 
 	// getDB should return a non-nil DB
 	db := c.getDB()
@@ -81,7 +80,6 @@ func TestCollectorWithStore_InsertBlockedCommand(t *testing.T) {
 	createTestAgents(t, store, "db-blocked-test", "agent-1", "agent-2")
 
 	c := NewCollector(store, "db-blocked-test")
-	defer c.Close()
 
 	// Record blocked commands — exercises insertBlockedCommand
 	c.RecordBlockedCommand("agent-1", "rm -rf /", "destructive")
@@ -127,7 +125,6 @@ func TestCollectorWithStore_SaveAndLoadSnapshot(t *testing.T) {
 	createTestAgents(t, store, "db-snapshot-test", "agent-1", "a", "b")
 
 	c := NewCollector(store, "db-snapshot-test")
-	defer c.Close()
 
 	// Record some data
 	recordAPICallForTest(c, "bv", "triage")
@@ -178,7 +175,6 @@ func TestCollectorWithStore_LoadSnapshot_NotFound(t *testing.T) {
 	createTestSession(t, store, "db-notfound-test")
 
 	c := NewCollector(store, "db-notfound-test")
-	defer c.Close()
 
 	// Loading a non-existent snapshot should error
 	_, err := c.LoadSnapshot("nonexistent")
@@ -193,7 +189,6 @@ func TestCollectorWithStore_SaveMultipleSnapshots(t *testing.T) {
 	createTestSession(t, store, "db-multi-snap-test")
 
 	c := NewCollector(store, "db-multi-snap-test")
-	defer c.Close()
 
 	// Save first snapshot
 	recordAPICallForTest(c, "bv", "triage")
@@ -238,7 +233,6 @@ func TestCollectorWithStore_CompareSnapshots_RoundTrip(t *testing.T) {
 	createTestSession(t, store, "db-compare-test")
 
 	c := NewCollector(store, "db-compare-test")
-	defer c.Close()
 
 	// Create baseline
 	recordLatencyForTest(c, "op1", 500*time.Millisecond)
@@ -274,7 +268,6 @@ func TestCollectorWithStore_FullCycle(t *testing.T) {
 	createTestAgents(t, store, "full-cycle-test", "agent-1", "agent-2")
 
 	c := NewCollector(store, "full-cycle-test")
-	defer c.Close()
 
 	// Exercise all recording functions with store
 	recordAPICallForTest(c, "bv", "triage")
@@ -346,7 +339,6 @@ func TestCollectorWithStore_ListSnapshots(t *testing.T) {
 	createTestSession(t, store, "db-list-snap-other")
 
 	c := NewCollector(store, "db-list-snap-test")
-	defer c.Close()
 
 	// Empty DB: empty non-nil slice, no error.
 	snaps, err := c.ListSnapshots()
@@ -368,7 +360,6 @@ func TestCollectorWithStore_ListSnapshots(t *testing.T) {
 		t.Fatalf("SaveSnapshot second: %v", err)
 	}
 	other := NewCollector(store, "db-list-snap-other")
-	defer other.Close()
 	if err := other.SaveSnapshot("foreign"); err != nil {
 		t.Fatalf("SaveSnapshot foreign: %v", err)
 	}
@@ -399,7 +390,6 @@ func TestCollectorWithStore_ListSnapshots(t *testing.T) {
 func TestCollectorNoStore_ListSnapshots(t *testing.T) {
 	t.Parallel()
 	c := NewCollector(nil, "no-store")
-	defer c.Close()
 
 	if _, err := c.ListSnapshots(); err == nil {
 		t.Fatal("ListSnapshots with nil store: want error, got nil")
