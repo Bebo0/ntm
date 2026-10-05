@@ -83,6 +83,7 @@ type rotationChecker struct {
 	// Seams (default to real implementations).
 	getPanes        func(session string) ([]tmux.Pane, error)
 	paneCwd         func(paneID string) (string, bool)
+	processUsage    func(agentType string, panePID int) (*ntmctx.TranscriptUsage, bool)
 	transcriptUsage func(agentType, cwd string) (*ntmctx.TranscriptUsage, bool)
 	capturePane     func(paneID string, lines int) (string, error)
 	contextLimit    func(model string) int
@@ -155,6 +156,7 @@ func newRotationChecker(session, workDir string, coordCfg CoordinatorConfig, ntm
 			cwd = strings.TrimSpace(cwd)
 			return cwd, cwd != ""
 		},
+		processUsage: ntmctx.ProcessTranscriptUsage,
 		transcriptUsage: func(agentType, cwd string) (*ntmctx.TranscriptUsage, bool) {
 			return ntmctx.LatestAgentTranscriptUsage(agentType, cwd, time.Time{})
 		},
@@ -485,28 +487,22 @@ func rotationSafetySkipReason(captured string, pane tmux.Pane) string {
 }
 
 // resolvePaneTranscripts correlates panes with their agent CLI's own session
-// transcripts by (agent type, pane working directory), returning usage keyed
-// by pane ID.
+// transcripts, returning usage keyed by pane ID, under the same attribution
+// rule as robot's context and snapshot views (ntmctx.AttributePaneTranscripts).
 //
-// This mirrors the semantics of internal/robot's unexported
-// resolvePaneTranscripts (robot.go): correlation is by (agent type, cwd), so
-// when SEVERAL panes of the same agent type share one directory — the normal
-// NTM swarm layout — the newest transcript cannot be attributed to any
-// specific pane and those panes get NO transcript reading (the check simply
-// does not fire for them) rather than all being assigned the same session's
-// numbers. Lookups are memoized per (type, cwd) group so a tick over many
-// panes costs one filesystem probe per group. robot does not export the
-// helper, hence this local implementation (kept in lockstep by the shared
-// ambiguity rule above).
+// A pane whose agent process names its session (Claude Code's per-process
+// session record, a resumed session id) reads exactly that transcript, even
+// when several panes of its type share one directory — the normal NTM swarm
+// layout. Otherwise correlation is by (agent type, cwd) and only for a pane
+// that is the sole pane of its type there; panes left ambiguous get NO reading
+// (the check simply does not fire for them) rather than another pane's.
 //
 // Oh My Pi panes are read from their own composer-border context gauge first
 // (ntmctx.OmpStatusBarUsage, the same reading robot's snapshot and context
 // views prefer): it is the agent's own live accounting and belongs to the
-// captured pane, so the shared-directory ambiguity never applies. Only an omp
-// pane whose gauge is not visible falls back to (type, cwd) transcripts.
+// captured pane by construction.
 func (rc *rotationChecker) resolvePaneTranscripts(panes []tmux.Pane) map[string]*ntmctx.TranscriptUsage {
-	type paneKey struct{ agentType, cwd string }
-	groups := make(map[paneKey][]string)
+	refs := make([]ntmctx.PaneTranscriptRef, 0, len(panes))
 	gauges := make(map[string]*ntmctx.TranscriptUsage)
 	for _, pane := range panes {
 		var agentType string
@@ -534,21 +530,8 @@ func (rc *rotationChecker) resolvePaneTranscripts(panes []tmux.Pane) map[string]
 			// transcript-only confidence gate excludes them.
 			continue
 		}
-		cwd, ok := rc.paneCwd(pane.ID)
-		if !ok {
-			continue
-		}
-		groups[paneKey{agentType: agentType, cwd: cwd}] = append(groups[paneKey{agentType: agentType, cwd: cwd}], pane.ID)
+		cwd, _ := rc.paneCwd(pane.ID)
+		refs = append(refs, ntmctx.PaneTranscriptRef{PaneID: pane.ID, AgentType: agentType, PID: pane.PID, Cwd: cwd})
 	}
-
-	result := gauges
-	for key, paneIDs := range groups {
-		if len(paneIDs) != 1 {
-			continue // ambiguous attribution: no transcript beats a wrong one
-		}
-		if usage, ok := rc.transcriptUsage(key.agentType, key.cwd); ok && usage != nil {
-			result[paneIDs[0]] = usage
-		}
-	}
-	return result
+	return ntmctx.AttributePaneTranscripts(refs, gauges, rc.processUsage, rc.transcriptUsage)
 }

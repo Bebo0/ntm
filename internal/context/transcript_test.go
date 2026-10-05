@@ -292,6 +292,71 @@ func TestOmpStatusBarUsage(t *testing.T) {
 	}
 }
 
+func TestAttributePaneTranscripts(t *testing.T) {
+	reading := func(path string) *TranscriptUsage { return &TranscriptUsage{Path: path, Tokens: 1} }
+	gauge := reading("gauge:%9")
+	byProcess := func(agentType string, pid int) (*TranscriptUsage, bool) {
+		if agentType == "claude" && pid == 11 {
+			return reading("session-of-pid-11"), true
+		}
+		return nil, false
+	}
+	cwdCalls := map[string]int{}
+	byCwd := func(agentType, cwd string) (*TranscriptUsage, bool) {
+		cwdCalls[agentType+"@"+cwd]++
+		return reading("newest:" + agentType + "@" + cwd), true
+	}
+	panes := []PaneTranscriptRef{
+		// Swarm directory: three Claude panes, one bound through its process.
+		{PaneID: "%1", AgentType: "claude", PID: 11, Cwd: "/swarm"},
+		{PaneID: "%2", AgentType: "claude", PID: 12, Cwd: "/swarm"},
+		{PaneID: "%3", AgentType: "claude", PID: 13, Cwd: "/swarm"},
+		// Sole pane of its type in a directory: the cwd rule applies.
+		{PaneID: "%4", AgentType: "codex", Cwd: "/swarm"},
+		// A bound pane alone in its directory keeps its exact reading; the
+		// cwd fallback is neither consulted nor allowed to override it.
+		{PaneID: "%5", AgentType: "claude", PID: 11, Cwd: "/solo"},
+		// A pane with a known reading counts toward its directory: its
+		// unbound omp sibling may be looking at the gauged pane's transcript.
+		{PaneID: "%9", AgentType: "omp", Cwd: "/omp"},
+		{PaneID: "%10", AgentType: "omp", Cwd: "/omp"},
+		// No cwd and no binding: nothing to read.
+		{PaneID: "%11", AgentType: "claude"},
+	}
+
+	got := AttributePaneTranscripts(panes, map[string]*TranscriptUsage{"%9": gauge}, byProcess, byCwd)
+
+	want := map[string]string{
+		"%1": "session-of-pid-11",
+		"%4": "newest:codex@/swarm",
+		"%5": "session-of-pid-11",
+		"%9": "gauge:%9",
+	}
+	if len(got) != len(want) {
+		t.Errorf("attributed %d panes, want %d: %+v", len(got), len(want), got)
+	}
+	for paneID, path := range want {
+		if got[paneID] == nil || got[paneID].Path != path {
+			t.Errorf("pane %s = %+v, want reading %q", paneID, got[paneID], path)
+		}
+	}
+	for _, paneID := range []string{"%2", "%3", "%10", "%11"} {
+		if got[paneID] != nil {
+			t.Errorf("pane %s was handed %q; an ambiguous or unlocatable pane must get no reading", paneID, got[paneID].Path)
+		}
+	}
+	// Only unambiguous, unresolved groups cost a lookup.
+	if len(cwdCalls) != 1 || cwdCalls["codex@/swarm"] != 1 {
+		t.Errorf("cwd lookups = %v, want exactly one for codex@/swarm", cwdCalls)
+	}
+
+	// Without a cwd lookup, process bindings and known readings still apply.
+	got = AttributePaneTranscripts(panes, nil, byProcess, nil)
+	if len(got) != 2 || got["%1"] == nil || got["%5"] == nil {
+		t.Errorf("process-only attribution = %+v, want %%1 and %%5", got)
+	}
+}
+
 func TestTranscriptConfidence(t *testing.T) {
 	now := time.Now()
 	if got := TranscriptConfidence(now.Add(-time.Minute), now); got != "high" {

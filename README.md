@@ -366,8 +366,11 @@ returns its saved result, while a failed or interrupted choice remains visible i
 `pending`. Inspect the affected panes before using the same action with `--retry`.
 Native compaction preserves the conversation and requires fresh provider context
 accounting to prove a reduction; it does not automatically clear history. Claude
-compaction refuses ambiguous transcript scope, including another Claude pane in a
-different session using the same transcript directory.
+compaction reads the transcript the pane's own Claude process names in its
+session record, so it works when many Claude panes share one project directory.
+Without that binding it falls back to the directory's newest transcript and
+refuses ambiguous scope, including another Claude pane in a different session
+using the same transcript directory.
 
 ### 3. Work Graph Triage and Assignment
 

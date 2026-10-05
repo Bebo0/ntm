@@ -357,6 +357,56 @@ func TestRotationChecker_AmbiguousCwdIsIgnored(t *testing.T) {
 	}
 }
 
+// TestRotationChecker_SharedCwdPanesBindThroughTheirProcess verifies that in
+// the swarm layout (several Claude panes in one directory, where the cwd rule
+// must stay silent) a pane whose agent process names its own session is still
+// judged, from exactly that transcript, while its unbound sibling is not
+// handed the directory's newest transcript.
+func TestRotationChecker_SharedCwdPanesBindThroughTheirProcess(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	redirectPendingStore(t)
+	cwd := "/Users/x/proj"
+	// The directory's newest transcript (95.4%) belongs to neither reading.
+	seedClaudeTranscript(t, home, cwd,
+		claudeUsageLine("claude-opus-4-6", 1, 1312, 190000, 1528))
+	boundPath := filepath.Join(t.TempDir(), "bound-session.jsonl")
+	if err := os.WriteFile(boundPath, []byte(claudeUsageLine("claude-opus-4-6", 1, 1312, 170000, 1528)+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	bound, unbound := ccPane("%1", "rotsess__cc_1"), ccPane("%2", "rotsess__cc_2")
+	bound.PID, unbound.PID = 101, 102
+	env := newRotationTestEnv(t, 50, false,
+		[]tmux.Pane{bound, unbound},
+		map[string]string{"%1": cwd, "%2": cwd},
+		map[string]string{"%1": idleCapture, "%2": idleCapture},
+		nil,
+	)
+	env.rc.processUsage = func(agentType string, panePID int) (*ntmctx.TranscriptUsage, bool) {
+		if agentType != "claude" || panePID != 101 {
+			return nil, false
+		}
+		usage, err := ntmctx.ReadLatestTranscriptUsage(boundPath)
+		return usage, err == nil && usage != nil
+	}
+
+	decisions := env.rc.runOnce(t.Context())
+	if len(decisions) != 1 {
+		t.Fatalf("decisions = %+v, want exactly the bound pane judged", decisions)
+	}
+	d := decisions[0]
+	if d.PaneID != "%1" || d.Action != "enqueued" || d.Source != boundPath || d.Tokens != 1+1312+170000+1528 {
+		t.Fatalf("decision = %+v, want %%1 enqueued from %s with 172841 tokens", d, boundPath)
+	}
+
+	// Production wiring binds through the process tree too.
+	prod := newRotationChecker("rotsess", t.TempDir(), CoordinatorConfig{RotationUsageThreshold: 50}, nil)
+	if prod == nil || prod.processUsage == nil {
+		t.Fatal("production rotation checker has no process-session binding")
+	}
+}
+
 // ompGaugeCapture renders a live Oh My Pi composer (captured from omp v18.2.3,
 // unicode symbol preset) whose border gauge reports pct of a 262K window.
 // spinner is "" for an idle pane or e.g. "⠧ 1s > " for a running turn.

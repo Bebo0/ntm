@@ -1718,6 +1718,14 @@ func (r *Rotator) compactLivePane(ctx stdcontext.Context, session, agentID, pane
 			}
 			return reading, nil
 		}
+		// An agent process that names its own session transcript binds this
+		// pane exactly, however many other panes share its project directory.
+		if reading, ok := paneProcessTranscriptUsage(agentTypeLong(string(pane.Type)), pane.PID); ok && reading != nil {
+			if time.Since(reading.UpdatedAt) > TranscriptFreshness {
+				return nil, errors.New("fresh provider context accounting is unavailable; use rotate")
+			}
+			return reading, nil
+		}
 		cwd, err := tmux.DefaultClient.RunContext(ctx, "display-message", "-p", "-t", tmux.ExactTarget(pane.ID), "#{pane_current_path}")
 		cwd = strings.TrimSpace(cwd)
 		if err != nil || !filepath.IsAbs(cwd) {
@@ -1765,6 +1773,10 @@ func (r *Rotator) compactLivePane(ctx stdcontext.Context, session, agentID, pane
 	return runNativeCompaction(ctx, session, pane, commands[0], r.compactor, timeout, rotationReadyPoll,
 		transport.GetPanesContext, tmux.CapturePaneVisibleContext, transport.SendKeysContext, usage)
 }
+
+// paneProcessTranscriptUsage reads the transcript of the session the agent
+// process under a pane is writing. Overridable for tests.
+var paneProcessTranscriptUsage = ProcessTranscriptUsage
 
 type rotationUsageReader func(stdcontext.Context, string, *TranscriptUsage) (*TranscriptUsage, error)
 

@@ -10620,15 +10620,11 @@ var transcriptUsageForProcess = ntmctx.ProcessTranscriptUsage
 // binding: Claude Code's per-process session record, a resumed session id)
 // reads that transcript: exact per pane even where several panes of one agent
 // type share a directory, the normal NTM swarm layout. Otherwise correlation
-// falls back to (agent type, cwd), but only for a pane that is the sole pane
-// of its type in that directory; with several, the newest transcript there may
-// belong to any of them, so those panes get NO transcript (scrollback
-// estimation stands) rather than another pane's numbers. Fallback lookups run
-// once per (type, cwd) group, not per pane.
+// falls back to (agent type, cwd) under ntmctx.AttributePaneTranscripts'
+// sole-pane rule, so a pane never shows another pane's numbers (scrollback
+// estimation stands instead).
 func ResolvePaneTranscripts(panes []tmux.Pane) map[string]*ntmctx.TranscriptUsage {
-	type paneKey struct{ agentType, cwd string }
-	groups := make(map[paneKey][]string)
-	result := make(map[string]*ntmctx.TranscriptUsage)
+	refs := make([]ntmctx.PaneTranscriptRef, 0, len(panes))
 	for _, pane := range panes {
 		if pane.IsServicePane() {
 			continue
@@ -10637,28 +10633,10 @@ func ResolvePaneTranscripts(panes []tmux.Pane) map[string]*ntmctx.TranscriptUsag
 		if agentType == "unknown" || agentType == "user" {
 			continue
 		}
-		if usage, ok := transcriptUsageForProcess(agentType, pane.PID); ok {
-			result[pane.ID] = usage
-		}
-		cwd, ok := paneCurrentPath(pane.ID)
-		if !ok {
-			continue
-		}
-		// Bound panes still count toward their directory: the newest
-		// transcript there may be theirs.
-		key := paneKey{agentType: agentType, cwd: cwd}
-		groups[key] = append(groups[key], pane.ID)
+		cwd, _ := paneCurrentPath(pane.ID)
+		refs = append(refs, ntmctx.PaneTranscriptRef{PaneID: pane.ID, AgentType: agentType, PID: pane.PID, Cwd: cwd})
 	}
-
-	for key, paneIDs := range groups {
-		if len(paneIDs) != 1 || result[paneIDs[0]] != nil {
-			continue // ambiguous attribution: no transcript beats a wrong one
-		}
-		if usage, ok := transcriptUsageForCwd(key.agentType, key.cwd); ok {
-			result[paneIDs[0]] = usage
-		}
-	}
-	return result
+	return ntmctx.AttributePaneTranscripts(refs, nil, transcriptUsageForProcess, transcriptUsageForCwd)
 }
 
 // ompStatusBarUsage reads an omp pane's live context gauge (see

@@ -540,6 +540,60 @@ func ProcessTranscriptUsage(agentType string, panePID int) (*TranscriptUsage, bo
 	return usage, true
 }
 
+// PaneTranscriptRef is one agent pane for AttributePaneTranscripts.
+type PaneTranscriptRef struct {
+	PaneID    string
+	AgentType string // transcript agent type: "claude", "codex", "omp"
+	PID       int    // the pane's shell PID; 0 when unknown
+	Cwd       string // the pane's working directory; "" when unknown
+}
+
+// AttributePaneTranscripts attributes session transcript usage to panes,
+// keyed by pane ID. It is the one attribution rule every reader of pane
+// transcripts shares (robot context and snapshot, the coordinator's rotation
+// trigger).
+//
+// known holds readings already attributed to a pane by other means (omp's own
+// context gauge). byProcess binds a pane through its agent process's session
+// (exact per pane; may be nil). byCwd finds the newest transcript for an agent
+// type in a directory, which is only trustworthy for a pane that is the sole
+// pane of its type there: with several, it may belong to any of them, so those
+// panes get no reading rather than another pane's. Panes resolved through
+// known or byProcess still count toward their directory for that rule.
+func AttributePaneTranscripts(panes []PaneTranscriptRef, known map[string]*TranscriptUsage, byProcess func(agentType string, pid int) (*TranscriptUsage, bool), byCwd func(agentType, cwd string) (*TranscriptUsage, bool)) map[string]*TranscriptUsage {
+	type group struct{ agentType, cwd string }
+	groups := make(map[group][]string)
+	result := make(map[string]*TranscriptUsage, len(panes))
+	for paneID, usage := range known {
+		if usage != nil {
+			result[paneID] = usage
+		}
+	}
+	for _, pane := range panes {
+		if result[pane.PaneID] == nil && byProcess != nil && pane.PID > 0 {
+			if usage, ok := byProcess(pane.AgentType, pane.PID); ok && usage != nil {
+				result[pane.PaneID] = usage
+			}
+		}
+		if pane.Cwd != "" {
+			key := group{agentType: pane.AgentType, cwd: pane.Cwd}
+			groups[key] = append(groups[key], pane.PaneID)
+		}
+	}
+	if byCwd == nil {
+		return result
+	}
+	for key, paneIDs := range groups {
+		if len(paneIDs) != 1 || result[paneIDs[0]] != nil {
+			continue // ambiguous attribution: no transcript beats a wrong one
+		}
+		if usage, ok := byCwd(key.agentType, key.cwd); ok && usage != nil {
+			result[paneIDs[0]] = usage
+		}
+	}
+	return result
+}
+
 // TranscriptConfidence maps transcript freshness to a confidence label:
 // "high" when the transcript was updated within TranscriptFreshness of now,
 // "medium" otherwise (the session may have moved on or ended).

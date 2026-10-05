@@ -439,6 +439,60 @@ func TestNativeCompactionRejectsProviderInAnotherSession(t *testing.T) {
 	}
 }
 
+// TestNativeCompactionBindsThroughTheAgentProcess verifies the swarm layout
+// that the directory rule must refuse (another Claude pane, in another
+// session, shares the project directory) still compacts when the pane's own
+// agent process names its session transcript: the baseline and the
+// post-compaction reading both come from exactly that transcript.
+func TestNativeCompactionBindsThroughTheAgentProcess(t *testing.T) {
+	workDir, logPath := setupRotationTmux(t)
+	t.Setenv("HOME", workDir)
+	t.Setenv("ROTATION_ORIGINAL_PRESENT", "1")
+	t.Setenv("ROTATION_GLOBAL_CONFLICT", "1")
+	t.Setenv("ROTATION_CAPTURE", rotationReadyClaudeScreen)
+	transcript := filepath.Join(workDir, ".claude", "projects", MungeProjectPath(workDir), "bound-session.jsonl")
+	if err := os.MkdirAll(filepath.Dir(transcript), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(transcript, []byte(`{"type":"assistant","message":{"model":"claude-opus-4","usage":{"input_tokens":150000}}}`+"\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	// The baseline must predate the compaction's own write.
+	written := time.Now().Add(-5 * time.Second)
+	if err := os.Chtimes(transcript, written, written); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("ROTATION_COMPACTED_TRANSCRIPT", transcript)
+	t.Setenv("ROTATION_COMPACTED_LINE", `{"type":"assistant","message":{"model":"claude-opus-4","usage":{"input_tokens":30000}}}`)
+
+	original := paneProcessTranscriptUsage
+	t.Cleanup(func() { paneProcessTranscriptUsage = original })
+	paneProcessTranscriptUsage = func(agentType string, panePID int) (*TranscriptUsage, bool) {
+		if agentType != "claude" || panePID != 123 {
+			return nil, false
+		}
+		usage, err := ReadLatestTranscriptUsage(transcript)
+		return usage, err == nil && usage != nil
+	}
+
+	monitor := NewContextMonitor(DefaultMonitorConfig())
+	monitor.RegisterAgent("test__cc_1_architect", "%1", "claude-opus-4")
+	r := NewRotator(RotatorConfig{Monitor: monitor, Spawner: NewDefaultPaneSpawner(config.Default()), Config: config.DefaultContextRotationConfig()})
+	ctx, cancel := stdcontext.WithTimeout(t.Context(), 20*time.Second)
+	defer cancel()
+	result := r.tryCompactionContext(ctx, "test", "test__cc_1_architect", "%1", tmux.AgentClaude)
+	if result == nil || !result.Success || result.Method != CompactionBuiltin || result.TokensBefore != 150000 || result.TokensAfter != 30000 {
+		t.Fatalf("process-bound compaction = %+v, want builtin success 150000 -> 30000", result)
+	}
+	commands, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(commands), "list-panes -a") {
+		t.Fatalf("an exact process binding still fell back to directory attribution:\n%s", commands)
+	}
+}
+
 func TestDefaultPaneSpawner_RejectsInvalidLaunchBeforePaneCreation(t *testing.T) {
 	for _, tc := range []struct {
 		name    string
@@ -579,6 +633,9 @@ case "$1" in
     else
       printf '%s\n' "$ROTATION_CAPTURE"
     fi
+    ;;
+  send-keys)
+    if [ -n "$ROTATION_COMPACTED_TRANSCRIPT" ]; then printf '%s\n' "$ROTATION_COMPACTED_LINE" >> "$ROTATION_COMPACTED_TRANSCRIPT"; fi
     ;;
   load-buffer) cat > "$ROTATION_TMUX_LOG.buffer" ;;
   paste-buffer)
