@@ -4937,7 +4937,7 @@ func GetSnapshotWithOptions(cfg *config.Config, opts PaginationOptions) (*Snapsh
 
 		// Ground-truth transcript usage, unambiguous panes only (memoized
 		// per agent-type+cwd group).
-		paneTranscripts := resolvePaneTranscripts(panes)
+		paneTranscripts := ResolvePaneTranscripts(panes)
 
 		for _, pane := range panes {
 			// A tagged service pane is not an agent: keep it out of the agent
@@ -10609,18 +10609,26 @@ var transcriptUsageForCwd = func(agentType, cwd string) (*ntmctx.TranscriptUsage
 	return ntmctx.LatestAgentTranscriptUsage(agentType, cwd, time.Time{})
 }
 
-// resolvePaneTranscripts correlates panes with their agent CLI's own session
-// transcripts via each pane's working directory, returning usage keyed by
-// pane ID. Correlation is by (agent type, cwd), so when SEVERAL panes of the
-// same agent type share one directory — the normal NTM swarm layout — the
-// newest transcript cannot be attributed to any specific pane; those panes
-// get NO transcript (scrollback estimation stands) rather than all being
-// assigned the same session's numbers. Transcript lookups are memoized per
-// (type, cwd) so a snapshot over many panes costs one filesystem probe per
-// group, not per pane.
-func resolvePaneTranscripts(panes []tmux.Pane) map[string]*ntmctx.TranscriptUsage {
+// transcriptUsageForProcess reads the transcript of the session the agent
+// process under a pane is writing. Overridable for tests.
+var transcriptUsageForProcess = ntmctx.ProcessTranscriptUsage
+
+// ResolvePaneTranscripts correlates panes with their agent CLI's own session
+// transcripts, returning usage keyed by pane ID.
+//
+// A pane whose agent process names its session (agentsession process-tree
+// binding: Claude Code's per-process session record, a resumed session id)
+// reads that transcript: exact per pane even where several panes of one agent
+// type share a directory, the normal NTM swarm layout. Otherwise correlation
+// falls back to (agent type, cwd), but only for a pane that is the sole pane
+// of its type in that directory; with several, the newest transcript there may
+// belong to any of them, so those panes get NO transcript (scrollback
+// estimation stands) rather than another pane's numbers. Fallback lookups run
+// once per (type, cwd) group, not per pane.
+func ResolvePaneTranscripts(panes []tmux.Pane) map[string]*ntmctx.TranscriptUsage {
 	type paneKey struct{ agentType, cwd string }
 	groups := make(map[paneKey][]string)
+	result := make(map[string]*ntmctx.TranscriptUsage)
 	for _, pane := range panes {
 		if pane.IsServicePane() {
 			continue
@@ -10629,17 +10637,21 @@ func resolvePaneTranscripts(panes []tmux.Pane) map[string]*ntmctx.TranscriptUsag
 		if agentType == "unknown" || agentType == "user" {
 			continue
 		}
+		if usage, ok := transcriptUsageForProcess(agentType, pane.PID); ok {
+			result[pane.ID] = usage
+		}
 		cwd, ok := paneCurrentPath(pane.ID)
 		if !ok {
 			continue
 		}
+		// Bound panes still count toward their directory: the newest
+		// transcript there may be theirs.
 		key := paneKey{agentType: agentType, cwd: cwd}
 		groups[key] = append(groups[key], pane.ID)
 	}
 
-	result := make(map[string]*ntmctx.TranscriptUsage)
 	for key, paneIDs := range groups {
-		if len(paneIDs) != 1 {
+		if len(paneIDs) != 1 || result[paneIDs[0]] != nil {
 			continue // ambiguous attribution: no transcript beats a wrong one
 		}
 		if usage, ok := transcriptUsageForCwd(key.agentType, key.cwd); ok {
@@ -10699,7 +10711,7 @@ func GetContext(session string, lines int) (*ContextOutput, error) {
 
 	// Ground-truth transcripts, resolved once for the whole pane set
 	// (memoized per agent-type+cwd group; ambiguous groups get none).
-	paneTranscripts := resolvePaneTranscripts(panes)
+	paneTranscripts := ResolvePaneTranscripts(panes)
 
 	for _, pane := range panes {
 		// Tagged service panes are not agents and hold no agent context

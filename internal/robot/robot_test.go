@@ -23,6 +23,7 @@ import (
 	"github.com/Dicklesworthstone/ntm/internal/alerts"
 	"github.com/Dicklesworthstone/ntm/internal/bv"
 	"github.com/Dicklesworthstone/ntm/internal/config"
+	ntmctx "github.com/Dicklesworthstone/ntm/internal/context"
 	"github.com/Dicklesworthstone/ntm/internal/privacy"
 	"github.com/Dicklesworthstone/ntm/internal/robot/adapters"
 	"github.com/Dicklesworthstone/ntm/internal/state"
@@ -3494,6 +3495,43 @@ esac
 	}
 	if got := countCalls(); got != refreshCalls {
 		t.Fatalf("tracker tools ran %d more time(s) after the refresh; the read must restore, not recollect", got-refreshCalls)
+	}
+}
+
+// GH #338: an exact process binding attributes a transcript even where panes
+// of one agent type share a directory. The (type, cwd) fallback serves only a
+// pane alone in its directory, never one whose neighbour may own the newest
+// transcript there.
+func TestResolvePaneTranscriptsPrefersExactBindingAndKeepsAmbiguityRule(t *testing.T) {
+	prevProcess, prevCwd, prevPath := transcriptUsageForProcess, transcriptUsageForCwd, paneCurrentPath
+	t.Cleanup(func() {
+		transcriptUsageForProcess, transcriptUsageForCwd, paneCurrentPath = prevProcess, prevCwd, prevPath
+	})
+	cwds := map[string]string{"%1": "/shared", "%2": "/shared", "%3": "/alone", "%4": "/pair", "%5": "/pair"}
+	paneCurrentPath = func(id string) (string, bool) { cwd, ok := cwds[id]; return cwd, ok }
+	bound := map[int]*ntmctx.TranscriptUsage{101: {Tokens: 101}, 104: {Tokens: 104}}
+	transcriptUsageForProcess = func(_ string, pid int) (*ntmctx.TranscriptUsage, bool) { usage, ok := bound[pid]; return usage, ok }
+	transcriptUsageForCwd = func(string, string) (*ntmctx.TranscriptUsage, bool) {
+		return &ntmctx.TranscriptUsage{Tokens: 999}, true
+	}
+
+	got := ResolvePaneTranscripts([]tmux.Pane{
+		{ID: "%1", PID: 101, Type: tmux.AgentClaude}, // bound, shares /shared
+		{ID: "%2", PID: 102, Type: tmux.AgentClaude}, // unbound, shares /shared
+		{ID: "%3", PID: 103, Type: tmux.AgentClaude}, // unbound, alone in /alone
+		{ID: "%4", PID: 104, Type: tmux.AgentClaude}, // bound, /pair
+		{ID: "%5", PID: 105, Type: tmux.AgentClaude}, // unbound, /pair with a bound neighbour
+	})
+	tokensOf := func(id string) int {
+		if usage := got[id]; usage != nil {
+			return usage.Tokens
+		}
+		return 0
+	}
+	for id, want := range map[string]int{"%1": 101, "%2": 0, "%3": 999, "%4": 104, "%5": 0} {
+		if have := tokensOf(id); have != want {
+			t.Errorf("pane %s transcript tokens = %d, want %d", id, have, want)
+		}
 	}
 }
 

@@ -9,6 +9,13 @@ func TestGetContextLimit_ExactMatch(t *testing.T) {
 	}{
 		{"claude-opus-4", 200000},
 		{"claude-sonnet-4-5", 200000},
+		{"claude-haiku-4-5", 200000},
+		// Current Claude models run a 1M window (GH #338).
+		{"claude-opus-5-5", 1000000},
+		{"claude-sonnet-5-5", 1000000},
+		{"claude-fable-5-1", 1000000},
+		{"claude-opus-4-8", 1000000},
+		{"claude-sonnet-4-6", 1000000},
 		{"gpt-4", 128000},
 		{"gpt-5", 256000},
 		{"gpt-5-codex", 256000},

@@ -522,6 +522,24 @@ func LatestAgentTranscriptUsage(agentType, cwd string, newerThan time.Time) (*Tr
 	return usage, true
 }
 
+// ProcessTranscriptUsage reads usage from the transcript of the session the
+// agent process under panePID is writing, found through the pane's process
+// tree (agentsession.DiscoverProcessSession). That binding is exact per pane,
+// so it holds where (agent type, cwd) correlation cannot attribute a
+// transcript: several panes of one agent type sharing a directory, the normal
+// NTM swarm layout. It reports false when there is no exact binding.
+func ProcessTranscriptUsage(agentType string, panePID int) (*TranscriptUsage, bool) {
+	info := agentsession.DiscoverProcessSession(agentType, panePID)
+	if info == nil || info.SourcePath == "" {
+		return nil, false
+	}
+	usage, err := ReadLatestTranscriptUsage(info.SourcePath)
+	if err != nil || usage == nil {
+		return nil, false
+	}
+	return usage, true
+}
+
 // TranscriptConfidence maps transcript freshness to a confidence label:
 // "high" when the transcript was updated within TranscriptFreshness of now,
 // "medium" otherwise (the session may have moved on or ended).

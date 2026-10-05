@@ -5,7 +5,9 @@ import (
 	"time"
 
 	"github.com/Dicklesworthstone/ntm/internal/config"
+	ntmctx "github.com/Dicklesworthstone/ntm/internal/context"
 	"github.com/Dicklesworthstone/ntm/internal/tmux"
+	"github.com/Dicklesworthstone/ntm/internal/tokens"
 	"github.com/Dicklesworthstone/ntm/internal/tui/icons"
 	"github.com/Dicklesworthstone/ntm/internal/tui/theme"
 )
@@ -239,5 +241,31 @@ func TestPaneIsControllerByTypeNotIndex(t *testing.T) {
 				t.Errorf("paneIsController(%+v) = %v, want %v", tc.pane, got, tc.want)
 			}
 		})
+	}
+}
+
+// GH #338: a pane whose agent's transcript was resolved reports what that
+// transcript measured, not a scrollback guess; no pane capture is needed.
+func TestEstimatePaneContextUsagePrefersTheTranscript(t *testing.T) {
+	pane := tmux.Pane{ID: "%9", Type: tmux.AgentClaude, Variant: "claude-opus-4"}
+	usage, ok := estimatePaneContextUsage(pane, &ntmctx.TranscriptUsage{Tokens: 108_000, Model: "claude-opus-4", ContextWindow: 200_000})
+	if !ok || usage.Source != contextSourceTranscript || usage.Tokens != 108_000 || usage.Percent != 54 || usage.Limit != 200_000 {
+		t.Fatalf("usage = %+v, %v; want the transcript's 108K of 200K (54%%)", usage, ok)
+	}
+}
+
+func TestTranscriptContextUsage(t *testing.T) {
+	// The window a transcript reports wins.
+	if got := transcriptContextUsage(&ntmctx.TranscriptUsage{Tokens: 50_000, Model: "gpt-5-codex", ContextWindow: 200_000}, "pane-model"); got.Percent != 25 || got.Limit != 200_000 || got.Model != "gpt-5-codex" {
+		t.Errorf("reported window: %+v, want 25%% of 200K under the transcript's model", got)
+	}
+	// Otherwise the model's window; the pane's model fills a missing name.
+	limit := tokens.GetContextLimit("claude-opus-4")
+	if got := transcriptContextUsage(&ntmctx.TranscriptUsage{Tokens: limit / 4}, "claude-opus-4"); got.Limit != limit || got.Model != "claude-opus-4" || got.Percent != 25 {
+		t.Errorf("model window: %+v, want 25%% of %d", got, limit)
+	}
+	// Over 100% means the window is wrong, not that the context overflowed.
+	if got := transcriptContextUsage(&ntmctx.TranscriptUsage{Tokens: 500_000, ContextWindow: 200_000}, ""); got.Percent != 100 {
+		t.Errorf("over-full reading = %v%%, want capped at 100", got.Percent)
 	}
 }

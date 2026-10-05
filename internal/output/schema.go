@@ -93,6 +93,10 @@ type PaneResponse struct {
 	ContextLimit   int     `json:"context_limit,omitempty"`
 	ContextPercent float64 `json:"context_percent,omitempty"`
 	ContextModel   string  `json:"context_model,omitempty"`
+	// ContextSource says how the context reading was taken: "status_bar"
+	// (the agent's own gauge), "transcript" (the agent's session transcript)
+	// or "scrollback_estimate" (a guess from what is still on screen).
+	ContextSource string `json:"context_source,omitempty"`
 }
 
 // AgentCountsResponse is the standard format for agent counts.

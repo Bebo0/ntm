@@ -610,7 +610,102 @@ func agentProcessStartMillis(panePID int, provider string) int64 {
 // inspected in numeric fd order, with Codex subagent thread files excluded.
 // Linux uses /proc, macOS uses lsof, and other platforms fall through to
 // CASR/native discovery.
-func discoverProcessSession(agentType, provider, _ string, panePID int) *Info {
+// claudeSessionIDPattern is the shape of a Claude Code session id (a UUID); it
+// also keeps the id safe to use as a file name.
+var claudeSessionIDPattern = regexp.MustCompile(`^[A-Za-z0-9-]{8,128}$`)
+
+// claudeProcessSession binds a running Claude Code process to the session it
+// is writing. Claude Code records each interactive process in
+// ~/.claude/sessions/<pid>.json with its session id, working directory and
+// kernel start time. Requiring that start time to match the live process
+// rejects a record left behind by an earlier process with the same PID. Panes
+// sharing one directory each resolve to their own session this way, where the
+// newest transcript in the directory cannot tell them apart. Off Linux the
+// start time cannot be checked, so no binding is made.
+func claudeProcessSession(agentType, home string, pid int) *Info {
+	if home == "" || pid <= 0 {
+		return nil
+	}
+	start, ok := linuxProcessStartTicks(pid)
+	if !ok {
+		return nil
+	}
+	file, err := os.Open(filepath.Join(home, ".claude", "sessions", strconv.Itoa(pid)+".json"))
+	if err != nil {
+		return nil
+	}
+	defer file.Close()
+	var record struct {
+		PID       int    `json:"pid"`
+		SessionID string `json:"sessionId"`
+		Cwd       string `json:"cwd"`
+		ProcStart string `json:"procStart"`
+	}
+	if err := json.NewDecoder(io.LimitReader(file, 64<<10)).Decode(&record); err != nil {
+		return nil
+	}
+	id := strings.TrimSpace(record.SessionID)
+	if record.PID != pid || strings.TrimSpace(record.ProcStart) != start || !claudeSessionIDPattern.MatchString(id) {
+		return nil
+	}
+	info := &Info{
+		AgentType: canonicalAgentType(agentType, "claude"),
+		SessionID: id,
+		Provider:  "claude",
+		Source:    DiscoverySourceProcessTree,
+	}
+	if cwd := strings.TrimSpace(record.Cwd); filepath.IsAbs(cwd) {
+		path := filepath.Join(home, ".claude", "projects", encodeClaudeProjectDir(cwd), id+".jsonl")
+		if st, err := os.Stat(path); err == nil && st.Mode().IsRegular() {
+			info.SourcePath, info.UpdatedAt = path, st.ModTime()
+		}
+	}
+	return info
+}
+
+// linuxProcessStartTicks returns a process's start time in clock ticks since
+// boot (field 22 of /proc/<pid>/stat), the value Claude Code records as
+// procStart. It reports false off Linux or once the process is gone.
+func linuxProcessStartTicks(pid int) (string, bool) {
+	if runtime.GOOS != "linux" || pid <= 0 {
+		return "", false
+	}
+	data, err := os.ReadFile("/proc/" + strconv.Itoa(pid) + "/stat")
+	if err != nil {
+		return "", false
+	}
+	// The command name (field 2) may contain spaces and parentheses, so the
+	// remaining fields are counted from the last ')': index 0 is field 3.
+	end := bytes.LastIndexByte(data, ')')
+	if end < 0 {
+		return "", false
+	}
+	fields := strings.Fields(string(data[end+1:]))
+	if len(fields) < 20 {
+		return "", false
+	}
+	return fields[19], true
+}
+
+// DiscoverProcessSession binds a pane to its agent's session through the
+// pane's process tree only: a session record or resumed session id of the
+// agent process itself. Unlike Discoverer.DiscoverContext it never falls back
+// to the newest session in the working directory, so a nil result means "no
+// exact binding", never another pane's session.
+func DiscoverProcessSession(agentType string, panePID int) *Info {
+	provider := ResumeProvider(agentType)
+	if provider == "" || panePID <= 0 {
+		return nil
+	}
+	home, _ := os.UserHomeDir()
+	info := discoverProcessSession(agentType, provider, home, panePID)
+	if info != nil && info.Source == "" {
+		info.Source = DiscoverySourceProcessTree
+	}
+	return info
+}
+
+func discoverProcessSession(agentType, provider, home string, panePID int) *Info {
 	if (runtime.GOOS != "linux" && runtime.GOOS != "darwin") || panePID <= 0 {
 		return nil
 	}
@@ -624,7 +719,15 @@ func discoverProcessSession(agentType, provider, _ string, panePID int) *Info {
 	for len(queue) > 0 {
 		node := queue[0]
 		queue = queue[1:]
-		if info := processNodeSession(agentType, provider, processutil.GetCmdline(node.pid), func() []string {
+		argv := processutil.GetCmdline(node.pid)
+		// Claude Code's own session record names the session the process is
+		// writing now, which outlives a --resume argument after /clear.
+		if provider == "claude" && argvMatchesProvider(provider, argv) {
+			if info := claudeProcessSession(agentType, home, node.pid); info != nil {
+				return info
+			}
+		}
+		if info := processNodeSession(agentType, provider, argv, func() []string {
 			return openSessionFiles(node.pid, provider)
 		}); info != nil {
 			return info

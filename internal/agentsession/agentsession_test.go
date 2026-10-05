@@ -4,8 +4,11 @@ import (
 	"context"
 	"encoding/json"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"reflect"
+	"runtime"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -1438,5 +1441,110 @@ func TestDiscoverOmpNativeStore(t *testing.T) {
 	next := discoverer.Discover("omp", "/data/projects/demo", 7)
 	if next == nil || next.SessionID != ompSessionUUID {
 		t.Fatalf("second omp pane = %+v, want %s", next, ompSessionUUID)
+	}
+}
+
+// startFakeClaude runs a real process whose argv names it claude, so process
+// tree discovery and /proc start times are exercised for real.
+func startFakeClaude(t *testing.T) int {
+	t.Helper()
+	if runtime.GOOS != "linux" {
+		t.Skip("Claude session records are verified against /proc start times")
+	}
+	sleepPath, err := exec.LookPath("sleep")
+	if err != nil {
+		t.Skip("sleep unavailable")
+	}
+	data, err := os.ReadFile(sleepPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	claude := filepath.Join(t.TempDir(), "claude")
+	if err := os.WriteFile(claude, data, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command(claude, "60")
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_ = cmd.Process.Kill()
+		_ = cmd.Wait()
+	})
+	return cmd.Process.Pid
+}
+
+func writeClaudeSessionRecord(t *testing.T, home string, pid int, sessionID, cwd, procStart string) {
+	t.Helper()
+	dir := filepath.Join(home, ".claude", "sessions")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	record, _ := json.Marshal(map[string]any{"pid": pid, "sessionId": sessionID, "cwd": cwd, "procStart": procStart, "kind": "interactive"})
+	if err := os.WriteFile(filepath.Join(dir, strconv.Itoa(pid)+".json"), record, 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// GH #338: Claude panes sharing one directory must each bind to their own
+// session. The process's own session record names it exactly; the newest
+// transcript in the directory belongs to whichever pane wrote last.
+func TestClaudeProcessSessionBindsThroughTheSessionRecord(t *testing.T) {
+	pid := startFakeClaude(t)
+	start, ok := linuxProcessStartTicks(pid)
+	if !ok {
+		t.Fatal("no /proc start time for a live process")
+	}
+	home, cwd := t.TempDir(), "/data/projects/demo"
+	const mine, newer = "11111111-1111-4111-8111-111111111111", "22222222-2222-4222-8222-222222222222"
+	projDir := filepath.Join(home, ".claude", "projects", encodeClaudeProjectDir(cwd))
+	if err := os.MkdirAll(projDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	for _, id := range []string{mine, newer} {
+		if err := os.WriteFile(filepath.Join(projDir, id+".jsonl"), []byte("{}\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// The other pane's transcript is the newer one.
+	later := time.Now().Add(time.Minute)
+	if err := os.Chtimes(filepath.Join(projDir, newer+".jsonl"), later, later); err != nil {
+		t.Fatal(err)
+	}
+	writeClaudeSessionRecord(t, home, pid, mine, cwd, start)
+
+	info := discoverProcessSession("cc", "claude", home, pid)
+	if info == nil || info.SessionID != mine || info.SourcePath != filepath.Join(projDir, mine+".jsonl") || info.Source != DiscoverySourceProcessTree {
+		t.Fatalf("binding = %+v, want this process's own session %s", info, mine)
+	}
+}
+
+func TestClaudeProcessSessionRejectsRecordsItCannotTrust(t *testing.T) {
+	pid := startFakeClaude(t)
+	start, ok := linuxProcessStartTicks(pid)
+	if !ok {
+		t.Fatal("no /proc start time for a live process")
+	}
+	const id = "11111111-1111-4111-8111-111111111111"
+	for name, write := range map[string]func(home string){
+		// A record left by an earlier process that had this PID.
+		"reused pid": func(home string) { writeClaudeSessionRecord(t, home, pid, id, "/data/projects/demo", start+"0") },
+		"pid mismatch": func(home string) {
+			writeClaudeSessionRecord(t, home, pid, id, "/data/projects/demo", start)
+			record, _ := json.Marshal(map[string]any{"pid": pid + 1, "sessionId": id, "cwd": "/data/projects/demo", "procStart": start})
+			_ = os.WriteFile(filepath.Join(home, ".claude", "sessions", strconv.Itoa(pid)+".json"), record, 0o600)
+		},
+		"unsafe session id": func(home string) {
+			writeClaudeSessionRecord(t, home, pid, "../../etc/passwd", "/data/projects/demo", start)
+		},
+		"no record": func(string) {},
+	} {
+		t.Run(name, func(t *testing.T) {
+			home := t.TempDir()
+			write(home)
+			if info := claudeProcessSession("cc", home, pid); info != nil {
+				t.Fatalf("binding = %+v, want none", info)
+			}
+		})
 	}
 }

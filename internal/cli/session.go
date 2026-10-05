@@ -20,6 +20,7 @@ import (
 	"github.com/Dicklesworthstone/ntm/internal/assignment"
 	"github.com/Dicklesworthstone/ntm/internal/cli/suggestions"
 	"github.com/Dicklesworthstone/ntm/internal/config"
+	ntmctx "github.com/Dicklesworthstone/ntm/internal/context"
 	"github.com/Dicklesworthstone/ntm/internal/handoff"
 	"github.com/Dicklesworthstone/ntm/internal/kernel"
 	"github.com/Dicklesworthstone/ntm/internal/output"
@@ -70,11 +71,19 @@ type SessionAttachInput struct {
 	Session string `json:"session"`
 }
 
+// Context usage sources, named as --robot-context reports them.
+const (
+	contextSourceStatusBar  = "status_bar"
+	contextSourceTranscript = "transcript"
+	contextSourceEstimate   = "scrollback_estimate"
+)
+
 type paneContextUsage struct {
 	Tokens  int
 	Limit   int
 	Percent float64
 	Model   string
+	Source  string
 }
 
 type contextRow struct {
@@ -83,6 +92,7 @@ type contextRow struct {
 	Tokens  int
 	Limit   int
 	Model   string
+	Source  string
 }
 
 func sessionPanePresentation(pane tmux.Pane, th theme.Theme, ic icons.IconSet) (string, string) {
@@ -682,7 +692,24 @@ func coerceStatusResponse(result any) (output.StatusResponse, error) {
 	}
 }
 
-func estimatePaneContextUsage(p tmux.Pane) (paneContextUsage, bool) {
+// paneContextUsages measures every agent pane's context usage, preferring the
+// agent's own accounting: omp's composer gauge, then the transcript of the
+// session the pane's agent is writing (robot.ResolvePaneTranscripts, the same
+// resolver --robot-context uses), and only then a scrollback estimate. The
+// estimate sees only what is still on screen, so it understates any long
+// session (GH #338); it is labeled as such.
+func paneContextUsages(panes []tmux.Pane) map[string]paneContextUsage {
+	transcripts := robot.ResolvePaneTranscripts(panes)
+	usages := make(map[string]paneContextUsage, len(panes))
+	for _, p := range panes {
+		if usage, ok := estimatePaneContextUsage(p, transcripts[p.ID]); ok {
+			usages[p.ID] = usage
+		}
+	}
+	return usages
+}
+
+func estimatePaneContextUsage(p tmux.Pane, transcript *ntmctx.TranscriptUsage) (paneContextUsage, bool) {
 	if p.Type == tmux.AgentUser {
 		return paneContextUsage{}, false
 	}
@@ -690,9 +717,14 @@ func estimatePaneContextUsage(p tmux.Pane) (paneContextUsage, bool) {
 		// omp reports its own context gauge ("6%…262K") in the composer's
 		// status line, which is exact where the transcript-size estimate below
 		// is not, and works without knowing omp's configured model.
-		return ompPaneContextUsage(p)
+		if usage, ok := ompPaneContextUsage(p); ok {
+			return usage, true
+		}
 	}
 	modelName := modelNameForPane(p)
+	if transcript != nil {
+		return transcriptContextUsage(transcript, modelName), true
+	}
 	if modelName == "" {
 		return paneContextUsage{}, false
 	}
@@ -715,7 +747,28 @@ func estimatePaneContextUsage(p tmux.Pane) (paneContextUsage, bool) {
 		Limit:   usage.ContextLimit,
 		Percent: usage.UsagePercent,
 		Model:   usage.Model,
+		Source:  contextSourceEstimate,
 	}, true
+}
+
+// transcriptContextUsage turns a transcript's last usage record into a
+// reading. The window is the one the transcript reports (Codex) or the
+// model's; a reading over 100% means that window is wrong for this session,
+// so it is capped rather than shown as more than full.
+func transcriptContextUsage(t *ntmctx.TranscriptUsage, paneModel string) paneContextUsage {
+	model := t.Model
+	if model == "" {
+		model = paneModel
+	}
+	limit := t.ContextWindow
+	if limit <= 0 {
+		limit = tokens.GetContextLimit(model)
+	}
+	usage := paneContextUsage{Tokens: t.Tokens, Limit: limit, Model: model, Source: contextSourceTranscript, Percent: 100}
+	if limit > 0 {
+		usage.Percent = min(float64(t.Tokens)*100/float64(limit), 100)
+	}
+	return usage
 }
 
 // ompPaneContextUsage reads the context gauge omp renders in its composer's
@@ -736,7 +789,7 @@ func ompPaneContextUsage(p tmux.Pane) (paneContextUsage, bool) {
 	if model == "" {
 		model = "omp"
 	}
-	usage := paneContextUsage{Percent: usedPct, Limit: int(window), Model: model}
+	usage := paneContextUsage{Percent: usedPct, Limit: int(window), Model: model, Source: contextSourceStatusBar}
 	if window > 0 {
 		usage.Tokens = int(float64(window) * usedPct / 100)
 	}
@@ -807,15 +860,8 @@ func buildStatusResponse(ctx context.Context, session string, opts statusOptions
 		incrementAgentCounts(&counts, p.Type)
 	}
 
-	// Estimate context usage per pane (best-effort)
-	contextByPaneID := make(map[string]paneContextUsage)
-	for _, p := range panes {
-		usage, ok := estimatePaneContextUsage(p)
-		if !ok {
-			continue
-		}
-		contextByPaneID[p.ID] = usage
-	}
+	// Context usage per pane (best-effort; see paneContextUsages for sources)
+	contextByPaneID := paneContextUsages(panes)
 
 	// Load assignments if requested (or if filtering/summary requires them)
 	var assignmentStore *assignment.AssignmentStore
@@ -865,6 +911,7 @@ func buildStatusResponse(ctx context.Context, session string, opts statusOptions
 			paneResp.ContextLimit = usage.Limit
 			paneResp.ContextPercent = usage.Percent
 			paneResp.ContextModel = usage.Model
+			paneResp.ContextSource = usage.Source
 		}
 		resp.Panes = append(resp.Panes, paneResp)
 	}
@@ -1161,15 +1208,8 @@ func runStatusOnce(ctx context.Context, w io.Writer, session string, opts status
 	userCount := counts.User
 	otherCount := counts.Other
 
-	// Estimate context usage per pane (best-effort)
-	contextByPaneID := make(map[string]paneContextUsage)
-	for _, p := range panes {
-		usage, ok := estimatePaneContextUsage(p)
-		if !ok {
-			continue
-		}
-		contextByPaneID[p.ID] = usage
-	}
+	// Context usage per pane (best-effort; see paneContextUsages for sources)
+	contextByPaneID := paneContextUsages(panes)
 
 	// Load assignments if requested (or if filtering/summary requires them)
 	var assignmentStore *assignment.AssignmentStore
@@ -1388,6 +1428,7 @@ func runStatusOnce(ctx context.Context, w io.Writer, session string, opts status
 			Tokens:  usage.Tokens,
 			Limit:   usage.Limit,
 			Model:   model,
+			Source:  usage.Source,
 		})
 	}
 
@@ -1426,10 +1467,17 @@ func runStatusOnce(ctx context.Context, w io.Writer, session string, opts status
 				warnMark = fmt.Sprintf(" %s%s%s", percentColor, ic.Warning, reset)
 			}
 
+			// Say when a reading is only a scrollback guess (GH #338): it
+			// sees what is on screen, not the whole session.
+			sourceMark := ""
+			if row.Source == contextSourceEstimate {
+				sourceMark = fmt.Sprintf(" %s(estimate)%s", subtext, reset)
+			}
+
 			bar := renderProgressBar(row.Percent, barWidth)
-			fmt.Fprintf(w, "    %s%-12s%s %s of %s context%s %s%s\n",
+			fmt.Fprintf(w, "    %s%-12s%s %s of %s context%s %s%s%s\n",
 				text, row.Label, reset,
-				percentText, row.Model, tokenInfo, bar, warnMark)
+				percentText, row.Model, tokenInfo, bar, warnMark, sourceMark)
 		}
 		fmt.Fprintln(w)
 	}
