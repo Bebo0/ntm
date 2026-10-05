@@ -1202,7 +1202,6 @@ rotate_threshold = 0.90
 summary_max_tokens = 3000
 try_compact_first = false
 confirm_timeout_sec = 120
-default_confirm_action = "compact"
 `
 	configPath := createTempConfig(t, configContent)
 	cfg, err := Load(configPath)
@@ -1219,8 +1218,8 @@ default_confirm_action = "compact"
 	if cfg.ContextRotation.TryCompactFirst {
 		t.Error("Expected try_compact_first = false")
 	}
-	if cfg.ContextRotation.ConfirmTimeoutSec != 120 || cfg.ContextRotation.DefaultConfirmAction != "compact" {
-		t.Errorf("Expected confirm_timeout_sec 120 / default_confirm_action compact, got %+v", cfg.ContextRotation)
+	if cfg.ContextRotation.ConfirmTimeoutSec != 120 {
+		t.Errorf("Expected confirm_timeout_sec 120, got %+v", cfg.ContextRotation)
 	}
 }
 
@@ -2801,29 +2800,10 @@ func TestValidateContextRotationConfig_MissingBranches(t *testing.T) {
 			wantErr: true,
 		},
 		{
-			name: "invalid default_confirm_action",
+			name: "confirm_timeout_sec zero uses the default",
 			cfg: ContextRotationConfig{
-				RotateThreshold:      0.95,
-				SummaryMaxTokens:     2000,
-				DefaultConfirmAction: "invalid",
-			},
-			wantErr: true,
-		},
-		{
-			name: "empty default_confirm_action is valid",
-			cfg: ContextRotationConfig{
-				RotateThreshold:      0.95,
-				SummaryMaxTokens:     2000,
-				DefaultConfirmAction: "",
-			},
-			wantErr: false,
-		},
-		{
-			name: "compact default_confirm_action is valid",
-			cfg: ContextRotationConfig{
-				RotateThreshold:      0.95,
-				SummaryMaxTokens:     2000,
-				DefaultConfirmAction: "compact",
+				RotateThreshold:  0.95,
+				SummaryMaxTokens: 2000,
 			},
 			wantErr: false,
 		},

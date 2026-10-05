@@ -208,13 +208,16 @@ summary_max_tokens = 2000
 min_session_age_sec = 300
 try_compact_first = true
 require_confirm = false
+confirm_timeout_sec = 60
+default_confirm_action = "rotate"
 `)
 	wantKeys := map[string]string{
-		"agents.plugins.mytool":                readerlessKnobPrefixes["agents.plugins"],
-		"context_rotation.enabled":             readerlessKnobExact["context_rotation.enabled"],
-		"context_rotation.warning_threshold":   noReader,
-		"context_rotation.min_session_age_sec": noReader,
-		"context_rotation.require_confirm":     readerlessKnobExact["context_rotation.require_confirm"],
+		"context_rotation.default_confirm_action": readerlessKnobExact["context_rotation.default_confirm_action"],
+		"agents.plugins.mytool":                   readerlessKnobPrefixes["agents.plugins"],
+		"context_rotation.enabled":                readerlessKnobExact["context_rotation.enabled"],
+		"context_rotation.warning_threshold":      noReader,
+		"context_rotation.min_session_age_sec":    noReader,
+		"context_rotation.require_confirm":        readerlessKnobExact["context_rotation.require_confirm"],
 	}
 
 	_, _, err := loadCapturingStderr(t, path)
@@ -250,7 +253,7 @@ require_confirm = false
 	if err != nil {
 		t.Fatalf("migrated config must load: %v", err)
 	}
-	if cfg.ContextRotation.RotateThreshold != 0.90 || cfg.ContextRotation.SummaryMaxTokens != 2000 {
+	if cfg.ContextRotation.RotateThreshold != 0.90 || cfg.ContextRotation.SummaryMaxTokens != 2000 || cfg.ContextRotation.ConfirmTimeoutSec != 60 {
 		t.Errorf("migrate must keep live [context_rotation] keys, got %+v", cfg.ContextRotation)
 	}
 }

@@ -17,9 +17,6 @@ internal/ratelimit/tracker.go:CodexThrottle.ClearAffectedPane	bd-vsubm	CodexThro
 internal/ratelimit/tracker.go:CodexThrottle.MayLaunch	bd-vsubm	CodexThrottle is never constructed in production; delete pending operator approval (removes tracker_helpers_test.go)
 internal/ratelimit/tracker.go:CodexThrottle.Reset	bd-vsubm	CodexThrottle is never constructed in production; delete pending operator approval (removes tracker_helpers_test.go)
 internal/resilience/monitor.go:Monitor.SetCodexThrottle	bd-vsubm	only attach point for the never-constructed CodexThrottle; goes with it
-internal/context/rotation.go:Rotator.processExpiredPending	bd-fka4c	pending-rotation timeout executor; its only caller was the dead CheckAndRotate (bd-syx9t); wire or delete per the operator decision
-internal/context/rotation.go:Rotator.resolveLiveAgentType	bd-fka4c	used only by processExpiredPending; follows its disposition
-internal/context/rotation.go:Rotator.tryCompaction	bd-fka4c	used only by processExpiredPending; follows its disposition
 # permanent: test-helper
 internal/config/liveness.go:RegisterReader	permanent	liveness_audit exclusion: called only from liveness_claims*.go, which the gate's -tags liveness_audit build drops by design (bd-ir0li)
 internal/backpressure/heatmap.go:BackpressureSnapshot.LoadSheddingContract	permanent	reached by the permanent backpressure Evaluate chain (snapshot builds LoadShedding/Heatmap fields for the kept verification-matrix harness)

@@ -37,14 +37,12 @@ func TestRotationConfirmPanel_SetData(t *testing.T) {
 			SessionName:    "myproject",
 			ContextPercent: 92.5,
 			TimeoutAt:      time.Now().Add(30 * time.Second),
-			DefaultAction:  context.ConfirmRotate,
 		},
 		{
 			AgentID:        "myproject__cc_2",
 			SessionName:    "myproject",
 			ContextPercent: 88.0,
 			TimeoutAt:      time.Now().Add(60 * time.Second),
-			DefaultAction:  context.ConfirmCompact,
 		},
 	}
 
@@ -247,7 +245,6 @@ func TestRotationConfirmPanel_ViewRendering(t *testing.T) {
 			SessionName:    "myproject",
 			ContextPercent: 92.5,
 			TimeoutAt:      now.Add(45 * time.Second),
-			DefaultAction:  context.ConfirmRotate,
 		},
 	}
 	panel.SetData(pending, nil)
@@ -264,9 +261,13 @@ func TestRotationConfirmPanel_ViewRendering(t *testing.T) {
 		t.Error("expected context percentage in view")
 	}
 
-	// Check that default action is shown
-	if !strings.Contains(view, "rotate") {
-		t.Error("expected default action in view")
+	// A lapsing request runs nothing on its own (bd-fka4c): the panel says it
+	// is waiting on the operator instead of promising a default action.
+	if !strings.Contains(view, "awaiting confirmation") {
+		t.Error("expected the request to read as awaiting confirmation")
+	}
+	if strings.Contains(view, "→ rotate") {
+		t.Error("view still advertises a default action that never runs")
 	}
 }
 

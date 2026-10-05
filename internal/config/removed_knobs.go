@@ -220,6 +220,9 @@ var readerlessKnobExact = map[string]string{
 	"context_rotation.warning_threshold":   noReader,
 	"context_rotation.min_session_age_sec": noReader,
 	"context_rotation.require_confirm":     noReader + " (coordinator rotations always wait for confirmation unless [rotation] auto_confirm is set)",
+	// bd-fka4c: stored on each pending rotation and displayed, but no code ever
+	// ran it when the request lapsed.
+	"context_rotation.default_confirm_action": "removed, no replacement — a lapsed pending rotation never ran it; confirm with `ntm rotate context confirm` or the dashboard, or set [rotation] auto_confirm",
 }
 
 // readerlessKnobPrefixes holds the claims-audit batch's tables.
@@ -290,7 +293,7 @@ var deadKeyTiers = []deadKeyTier{
 		prefixes: readerlessKnobPrefixes,
 		// Cites the bead, not a release, for the reason the recovery-alias
 		// batch gives above.
-		provenance: "removed in the reader-less key sweep (bd-syx9t); `ntm config migrate` deletes it",
+		provenance: "removed in the reader-less key sweep (bd-syx9t, bd-fka4c); `ntm config migrate` deletes it",
 	},
 }
 

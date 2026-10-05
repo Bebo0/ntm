@@ -113,8 +113,7 @@ func TestRotator_EnqueuePendingRotation(t *testing.T) {
 	t.Cleanup(func() { DefaultPendingRotationStore = origStore })
 
 	r := NewRotator(RotatorConfig{Config: config.ContextRotationConfig{
-		ConfirmTimeoutSec:    300,
-		DefaultConfirmAction: "rotate",
+		ConfirmTimeoutSec: 300,
 	}})
 
 	p := r.EnqueuePendingRotation("sess", "sess__cc_1", "%3", 91.5, "/work")
@@ -125,8 +124,8 @@ func TestRotator_EnqueuePendingRotation(t *testing.T) {
 		p.ContextPercent != 91.5 || p.WorkDir != "/work" {
 		t.Fatalf("pending = %+v", p)
 	}
-	if p.DefaultAction != ConfirmRotate {
-		t.Errorf("default action = %q, want rotate", p.DefaultAction)
+	if remaining := p.RemainingSeconds(); remaining < 290 || remaining > 300 {
+		t.Errorf("request lifetime = %ds, want the configured 300s", remaining)
 	}
 	if !r.HasPendingRotation("sess__cc_1") {
 		t.Error("pending rotation missing from rotator memory")

@@ -7,7 +7,6 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
-	"sync/atomic"
 	"testing"
 	"time"
 
@@ -18,59 +17,6 @@ import (
 )
 
 const rotationReadyClaudeScreen = "Welcome to Claude Code\n────────────────────────\n❯ \n────────────────────────\n  ⏵⏵ bypass permissions on (shift+tab to cycle)\n"
-
-func TestExpiredProductionConfirmationSharesDurableOwnership(t *testing.T) {
-	for _, mode := range []string{"already_acknowledged", "failed_legacy_identity"} {
-		t.Run(mode, func(t *testing.T) {
-			originalStore := DefaultPendingRotationStore
-			DefaultPendingRotationStore = NewPendingRotationStoreWithPath(filepath.Join(t.TempDir(), "pending.jsonl"))
-			t.Cleanup(func() { DefaultPendingRotationStore = originalStore })
-			pending := &PendingRotation{
-				AgentID: "test__cc_1", SessionName: "test", PaneID: "%1",
-				CreatedAt: time.Now().Add(-time.Minute), TimeoutAt: time.Now().Add(time.Minute),
-				DefaultAction: ConfirmIgnore,
-			}
-			if mode == "failed_legacy_identity" {
-				pending.DefaultAction = ConfirmRotate
-				pending.TimeoutAt = time.Now().Add(-time.Second)
-			}
-			if err := AddPendingRotation(pending); err != nil {
-				t.Fatal(err)
-			}
-			r := NewRotator(RotatorConfig{
-				Monitor: NewContextMonitor(DefaultMonitorConfig()),
-				Spawner: NewDefaultPaneSpawner(config.Default()),
-				Config:  config.DefaultContextRotationConfig(),
-			})
-			stale := clonePendingRotation(pending)
-			stale.TimeoutAt = time.Now().Add(-time.Second)
-			r.pending[pending.AgentID] = stale
-			if mode == "already_acknowledged" {
-				result := ConfirmPendingRotationContext(stdcontext.Background(), pending.AgentID, ConfirmIgnore, 0, false, config.Default())
-				if !result.Success {
-					t.Fatalf("manual acknowledgment: %+v", result)
-				}
-			}
-			r.processExpiredPending("test", t.TempDir())
-			if mode == "already_acknowledged" {
-				if r.HasPendingRotation(pending.AgentID) {
-					t.Fatal("expiry retained stale in-memory request after completed receipt replay")
-				}
-				return
-			}
-			stored, err := GetPendingRotationByID(pending.AgentID)
-			if err != nil || stored == nil || stored.ExecutionState != RotationStateFailed || stored.Result == nil || !strings.Contains(stored.Result.Error, "process identity") {
-				t.Fatalf("expiry lost failed choice: %+v, %v", stored, err)
-			}
-			executionID := stored.ExecutionID
-			r.processExpiredPending("test", t.TempDir())
-			stored, err = GetPendingRotationByID(pending.AgentID)
-			if err != nil || stored == nil || stored.ExecutionID != executionID {
-				t.Fatalf("expiry retried unresolved execution: %+v, %v", stored, err)
-			}
-		})
-	}
-}
 
 func TestNativeCompactionRequiresFreshAccountingAndCompletedInputState(t *testing.T) {
 	for _, mode := range []string{"reduced", "busy_then_reduced", "stale", "same_usage", "different_transcript", "identity_changed", "canceled", "missing_baseline"} {
@@ -1184,7 +1130,7 @@ func TestTryCompaction_PreservesHistoryWhenNativeCommandDoesNotReduceUsage(t *te
 		Config:    config.DefaultContextRotationConfig(),
 	})
 
-	result := r.tryCompaction("test__cc_1", "%0", tmux.AgentClaude)
+	result := r.tryCompactionContext(stdcontext.Background(), "", "test__cc_1", "%0", tmux.AgentClaude)
 	if result == nil {
 		t.Fatal("expected compaction result, got nil")
 	}
@@ -1223,7 +1169,6 @@ func TestToPendingRotation(t *testing.T) {
 		ContextPercent: 85.5,
 		CreatedAt:      now,
 		TimeoutAt:      timeout,
-		DefaultAction:  ConfirmRotate,
 		WorkDir:        "/data/project",
 	}
 
@@ -1247,9 +1192,6 @@ func TestToPendingRotation(t *testing.T) {
 	if !pending.TimeoutAt.Equal(stored.TimeoutAt) {
 		t.Errorf("TimeoutAt mismatch")
 	}
-	if pending.DefaultAction != stored.DefaultAction {
-		t.Errorf("DefaultAction = %q, want %q", pending.DefaultAction, stored.DefaultAction)
-	}
 	if pending.WorkDir != stored.WorkDir {
 		t.Errorf("WorkDir = %q, want %q", pending.WorkDir, stored.WorkDir)
 	}
@@ -1268,7 +1210,6 @@ func TestFromPendingRotation(t *testing.T) {
 		ContextPercent: 92.0,
 		CreatedAt:      now,
 		TimeoutAt:      timeout,
-		DefaultAction:  ConfirmCompact,
 		WorkDir:        "/home/user/project",
 	}
 
@@ -1280,8 +1221,8 @@ func TestFromPendingRotation(t *testing.T) {
 	if stored.ContextPercent != pending.ContextPercent {
 		t.Errorf("ContextPercent = %f, want %f", stored.ContextPercent, pending.ContextPercent)
 	}
-	if stored.DefaultAction != pending.DefaultAction {
-		t.Errorf("DefaultAction = %q, want %q", stored.DefaultAction, pending.DefaultAction)
+	if !stored.TimeoutAt.Equal(pending.TimeoutAt) {
+		t.Errorf("TimeoutAt = %v, want %v", stored.TimeoutAt, pending.TimeoutAt)
 	}
 }
 
@@ -1322,260 +1263,6 @@ func TestEnqueuePendingRotationRecordsSessionAndWorkDir(t *testing.T) {
 	}
 }
 
-func TestProcessExpiredPending_UsesStoredSession(t *testing.T) {
-	oldStore := DefaultPendingRotationStore
-	DefaultPendingRotationStore = NewPendingRotationStoreWithPath(filepath.Join(t.TempDir(), "pending.jsonl"))
-	t.Cleanup(func() {
-		DefaultPendingRotationStore = oldStore
-	})
-
-	monitor := NewContextMonitor(DefaultMonitorConfig())
-	monitor.RegisterAgent("test__cc_1", "%0", "claude-opus-4")
-
-	spawner := NewMockPaneSpawner()
-	spawner.panesError = errors.New("boom")
-
-	r := NewRotator(RotatorConfig{
-		Monitor: monitor,
-		Spawner: spawner,
-		Config:  config.DefaultContextRotationConfig(),
-	})
-
-	pending := &PendingRotation{
-		AgentID:       "test__cc_1",
-		SessionName:   "stored-session",
-		PaneID:        "%0",
-		TimeoutAt:     time.Now().Add(-time.Minute),
-		DefaultAction: ConfirmRotate,
-		WorkDir:       "/stored/workdir",
-	}
-	r.pending[pending.AgentID] = pending
-
-	r.processExpiredPending("caller-session", "/caller/workdir")
-
-	if len(spawner.getPanesFor) != 1 {
-		t.Fatalf("GetPanes called %d times, want 1", len(spawner.getPanesFor))
-	}
-	if spawner.getPanesFor[0] != "stored-session" {
-		t.Fatalf("GetPanes session = %q, want %q", spawner.getPanesFor[0], "stored-session")
-	}
-	if !r.HasPendingRotation(pending.AgentID) {
-		t.Fatal("failed live-pane preflight removed the expired pending rotation")
-	}
-}
-
-// Prompt delivery support does not establish native compaction support.
-// A mixed batch must preserve its choices when one provider cannot compact;
-// sending a summarization prompt would not reclaim that provider's context.
-func TestProcessExpiredPending_MixedGrokBatchRejectsUnsupportedCompaction(t *testing.T) {
-	oldStore := DefaultPendingRotationStore
-	DefaultPendingRotationStore = NewPendingRotationStoreWithPath(filepath.Join(t.TempDir(), "pending.jsonl"))
-	t.Cleanup(func() {
-		DefaultPendingRotationStore = oldStore
-	})
-
-	monitor := NewContextMonitor(DefaultMonitorConfig())
-	monitor.RegisterAgent("custom-claude-pane", "%1", "claude-opus-4")
-	monitor.RegisterAgent("custom-grok-pane", "%2", "grok-3")
-	monitor.RecordMessage("custom-claude-pane", 1000, 1000)
-	monitor.RecordMessage("custom-grok-pane", 1000, 1000)
-	spawner := NewMockPaneSpawner()
-	spawner.panes = []tmux.Pane{
-		{ID: "%1", Index: 1, Title: "custom-claude-pane", Type: tmux.AgentClaude},
-		{ID: "%2", Index: 2, Title: "custom-grok-pane", Type: tmux.AgentGrok},
-	}
-	r := NewRotator(RotatorConfig{
-		Monitor: monitor,
-		Compactor: NewCompactor(monitor, CompactorConfig{
-			MinReduction:     0.10,
-			BuiltinTimeout:   time.Millisecond,
-			SummarizeTimeout: time.Millisecond,
-		}),
-		Spawner: spawner,
-		Config:  config.DefaultContextRotationConfig(),
-	})
-	now := time.Now()
-	pending := []*PendingRotation{
-		{
-			AgentID:       "custom-claude-pane",
-			SessionName:   "test",
-			PaneID:        "%1",
-			TimeoutAt:     now.Add(-2 * time.Minute),
-			DefaultAction: ConfirmCompact,
-			WorkDir:       "/tmp",
-		},
-		{
-			AgentID:       "custom-grok-pane",
-			SessionName:   "test",
-			PaneID:        "%2",
-			TimeoutAt:     now.Add(-time.Minute),
-			DefaultAction: ConfirmCompact,
-			WorkDir:       "/tmp",
-		},
-	}
-	for _, item := range pending {
-		r.pending[item.AgentID] = item
-		// Persist with a future timeout (the store's Get filters expired
-		// entries) so removal after commit is actually observable.
-		stored := clonePendingRotation(item)
-		stored.TimeoutAt = now.Add(time.Hour)
-		if err := AddPendingRotation(stored); err != nil {
-			t.Fatalf("AddPendingRotation(%s) error = %v", item.AgentID, err)
-		}
-	}
-
-	r.processExpiredPending("caller-session", "/caller/workdir")
-
-	for _, item := range pending {
-		if !r.HasPendingRotation(item.AgentID) {
-			t.Fatalf("unsupported compaction consumed pending rotation %s", item.AgentID)
-		}
-		stored, err := GetPendingRotationByID(item.AgentID)
-		if err != nil {
-			t.Fatalf("GetPendingRotationByID(%s) error = %v", item.AgentID, err)
-		}
-		if stored == nil {
-			t.Fatalf("unsupported compaction removed persisted request %s", item.AgentID)
-		}
-	}
-	if len(spawner.sentKeys) != 0 || len(spawner.sentBuffers) != 0 {
-		t.Fatalf("unsupported compaction batch delivered input: keys=%v buffers=%v", spawner.sentKeys, spawner.sentBuffers)
-	}
-	if len(spawner.spawnedPanes) != 0 || len(spawner.killedPanes) != 0 {
-		t.Fatalf("compaction batch spawned/killed panes: spawned=%v killed=%v", spawner.spawnedPanes, spawner.killedPanes)
-	}
-}
-
-func TestProcessExpiredPendingDoesNotActAfterConcurrentPostpone(t *testing.T) {
-	oldStore := DefaultPendingRotationStore
-	DefaultPendingRotationStore = NewPendingRotationStoreWithPath(filepath.Join(t.TempDir(), "pending.jsonl"))
-	t.Cleanup(func() {
-		DefaultPendingRotationStore = oldStore
-	})
-
-	const agentID = "test__cc_1"
-	monitor := NewContextMonitor(DefaultMonitorConfig())
-	monitor.RegisterAgent(agentID, "%1", "claude-opus-4")
-
-	preflightStarted := make(chan struct{})
-	releasePreflight := make(chan struct{})
-	var getPanesCalls atomic.Int32
-	spawner := NewMockPaneSpawner()
-	spawner.panes = []tmux.Pane{{
-		ID:    "%1",
-		Index: 1,
-		Title: agentID,
-		Type:  tmux.AgentClaude,
-	}}
-	spawner.sendError = errors.New("stale rotation reached pane mutation")
-	spawner.getPanesFunc = func(string) ([]tmux.Pane, error) {
-		if getPanesCalls.Add(1) == 1 {
-			close(preflightStarted)
-			<-releasePreflight
-		}
-		return spawner.panes, nil
-	}
-
-	r := NewRotator(RotatorConfig{
-		Monitor: monitor,
-		Spawner: spawner,
-		Config:  config.DefaultContextRotationConfig(),
-	})
-	pending := &PendingRotation{
-		AgentID:       agentID,
-		SessionName:   "test-session",
-		PaneID:        "%1",
-		TimeoutAt:     time.Now().Add(-time.Minute),
-		DefaultAction: ConfirmRotate,
-		WorkDir:       "/tmp",
-	}
-	r.pending[agentID] = pending
-	if err := AddPendingRotation(clonePendingRotation(pending)); err != nil {
-		t.Fatalf("AddPendingRotation error = %v", err)
-	}
-
-	expiredDone := make(chan struct{})
-	go func() {
-		defer close(expiredDone)
-		r.processExpiredPending("caller-session", "/caller/workdir")
-	}()
-
-	select {
-	case <-preflightStarted:
-	case <-time.After(2 * time.Second):
-		t.Fatal("expired rotation preflight did not start")
-	}
-	result := r.ConfirmRotation(agentID, ConfirmPostpone, 10)
-	if !result.Success || result.State != RotationStatePending {
-		t.Fatalf("ConfirmRotation(postpone) result = %+v", result)
-	}
-	close(releasePreflight)
-	select {
-	case <-expiredDone:
-	case <-time.After(2 * time.Second):
-		t.Fatal("expired rotation processing did not finish")
-	}
-
-	if got := getPanesCalls.Load(); got != 1 {
-		t.Fatalf("GetPanes calls = %d, want only the blocked preflight", got)
-	}
-	if len(spawner.sentKeys) != 0 || len(spawner.sentBuffers) != 0 || len(spawner.spawnedPanes) != 0 || len(spawner.killedPanes) != 0 {
-		t.Fatalf("stale expired action mutated panes: keys=%v buffers=%v spawned=%v killed=%v",
-			spawner.sentKeys, spawner.sentBuffers, spawner.spawnedPanes, spawner.killedPanes)
-	}
-	inMemory := r.GetPendingRotation(agentID)
-	if inMemory == nil || !inMemory.TimeoutAt.After(time.Now().Add(9*time.Minute)) {
-		t.Fatalf("postponed in-memory rotation = %+v, want timeout about 10 minutes ahead", inMemory)
-	}
-	stored, err := GetPendingRotationByID(agentID)
-	if err != nil {
-		t.Fatalf("GetPendingRotationByID error = %v", err)
-	}
-	if stored == nil || !stored.TimeoutAt.Equal(inMemory.TimeoutAt) {
-		t.Fatalf("persisted postponed rotation = %+v, want timeout %s", stored, inMemory.TimeoutAt)
-	}
-}
-
-func TestProcessExpiredPending_AllowsIgnoreAndPostpone(t *testing.T) {
-	oldStore := DefaultPendingRotationStore
-	DefaultPendingRotationStore = NewPendingRotationStoreWithPath(filepath.Join(t.TempDir(), "pending.jsonl"))
-	t.Cleanup(func() {
-		DefaultPendingRotationStore = oldStore
-	})
-
-	spawner := NewMockPaneSpawner()
-	r := NewRotator(RotatorConfig{Spawner: spawner, Config: config.DefaultContextRotationConfig()})
-	now := time.Now()
-	r.pending["test__grok_1"] = &PendingRotation{
-		AgentID:       "test__grok_1",
-		SessionName:   "test",
-		TimeoutAt:     now.Add(-time.Minute),
-		DefaultAction: ConfirmIgnore,
-	}
-	r.pending["test__grok_2"] = &PendingRotation{
-		AgentID:       "test__grok_2",
-		SessionName:   "test",
-		TimeoutAt:     now.Add(-time.Minute),
-		DefaultAction: ConfirmPostpone,
-	}
-
-	r.processExpiredPending("test", "/tmp")
-
-	if r.HasPendingRotation("test__grok_1") {
-		t.Fatal("expired ignore action should remove the pending rotation")
-	}
-	postponed := r.GetPendingRotation("test__grok_2")
-	if postponed == nil {
-		t.Fatal("expired postpone action should retain the pending rotation")
-	}
-	if !postponed.TimeoutAt.After(now.Add(29 * time.Minute)) {
-		t.Fatalf("postponed timeout = %s, want about 30 minutes in the future", postponed.TimeoutAt)
-	}
-	if len(spawner.sentKeys) != 0 || len(spawner.sentBuffers) != 0 || len(spawner.spawnedPanes) != 0 || len(spawner.killedPanes) != 0 {
-		t.Fatalf("ignore/postpone mutated panes: keys=%v buffers=%v spawned=%v killed=%v", spawner.sentKeys, spawner.sentBuffers, spawner.spawnedPanes, spawner.killedPanes)
-	}
-}
-
 func TestConfirmRotation_PostponeUpdatesTimeout(t *testing.T) {
 	oldStore := DefaultPendingRotationStore
 	DefaultPendingRotationStore = NewPendingRotationStoreWithPath(filepath.Join(t.TempDir(), "pending.jsonl"))
@@ -1586,10 +1273,9 @@ func TestConfirmRotation_PostponeUpdatesTimeout(t *testing.T) {
 	r := NewRotator(RotatorConfig{})
 	originalTimeout := time.Now().Add(2 * time.Minute)
 	r.pending["agent-1"] = &PendingRotation{
-		AgentID:       "agent-1",
-		SessionName:   "test-session",
-		TimeoutAt:     originalTimeout,
-		DefaultAction: ConfirmRotate,
+		AgentID:     "agent-1",
+		SessionName: "test-session",
+		TimeoutAt:   originalTimeout,
 	}
 
 	result := r.ConfirmRotation("agent-1", ConfirmPostpone, 10)
@@ -1723,7 +1409,6 @@ func TestPendingRotationRoundTrip(t *testing.T) {
 		ContextPercent: 77.3,
 		CreatedAt:      now,
 		TimeoutAt:      timeout,
-		DefaultAction:  ConfirmIgnore,
 		WorkDir:        "/tmp/round-trip",
 	}
 
@@ -1738,9 +1423,6 @@ func TestPendingRotationRoundTrip(t *testing.T) {
 	}
 	if restored.ContextPercent != original.ContextPercent {
 		t.Errorf("ContextPercent mismatch after round trip")
-	}
-	if restored.DefaultAction != original.DefaultAction {
-		t.Errorf("DefaultAction mismatch after round trip")
 	}
 	if restored.WorkDir != original.WorkDir {
 		t.Errorf("WorkDir mismatch after round trip")

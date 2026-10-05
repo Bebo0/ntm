@@ -10482,8 +10482,7 @@ type ContextPendingRotationInfo struct {
 	PaneID         string  `json:"pane_id"`
 	ContextPercent float64 `json:"context_percent"`
 	CreatedAt      string  `json:"created_at"`
-	TimeoutAt      string  `json:"timeout_at"`
-	DefaultAction  string  `json:"default_action"`
+	TimeoutAt      string  `json:"timeout_at"` // the request lapses unconfirmed; nothing runs on its own
 	WorkDir        string  `json:"work_dir,omitempty"`
 }
 
@@ -10842,7 +10841,6 @@ func GetContext(session string, lines int) (*ContextOutput, error) {
 			ContextPercent: p.ContextPercent,
 			CreatedAt:      p.CreatedAt.Format(time.RFC3339),
 			TimeoutAt:      p.TimeoutAt.Format(time.RFC3339),
-			DefaultAction:  string(p.DefaultAction),
 			WorkDir:        p.WorkDir,
 		})
 	}

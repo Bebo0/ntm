@@ -349,7 +349,6 @@ type PendingRotationInfo struct {
 	SessionName    string  `json:"session_name"`
 	ContextPercent float64 `json:"context_percent"`
 	TimeoutSeconds int     `json:"timeout_seconds"`
-	DefaultAction  string  `json:"default_action"`
 	CreatedAt      string  `json:"created_at"`
 	SelectedAction string  `json:"selected_action,omitempty"`
 	ExecutionState string  `json:"execution_state,omitempty"`
@@ -380,7 +379,6 @@ func (r *PendingRotationsResult) Text(w io.Writer) error {
 		fmt.Fprintf(w, "  Session: %s\n", p.SessionName)
 		fmt.Fprintf(w, "  Context: %.1f%%\n", p.ContextPercent)
 		fmt.Fprintf(w, "  Timeout: %s%ds%s\n", colorize(timeoutColor), p.TimeoutSeconds, colorize(t.Text))
-		fmt.Fprintf(w, "  Default: %s\n", p.DefaultAction)
 		fmt.Fprintf(w, "  Created: %s\n", p.CreatedAt)
 		if p.ExecutionState != "" {
 			fmt.Fprintf(w, "  Confirmation: %s (%s)\n", p.SelectedAction, p.ExecutionState)
@@ -431,7 +429,6 @@ func runContextRotationPending(ctx context.Context, sessionFilter string) error 
 			SessionName:    p.SessionName,
 			ContextPercent: p.ContextPercent,
 			TimeoutSeconds: p.RemainingSeconds(),
-			DefaultAction:  string(p.DefaultAction),
 			CreatedAt:      p.CreatedAt.Local().Format("15:04:05"),
 			SelectedAction: string(p.SelectedAction),
 			ExecutionState: string(p.ExecutionState),

@@ -2312,7 +2312,6 @@ func TestDashboardSidebarRendersRotationConfirmPanelWhenPending(t *testing.T) {
 			SessionName:    "proj",
 			ContextPercent: 93,
 			TimeoutAt:      now.Add(30 * time.Second),
-			DefaultAction:  ctxmon.ConfirmRotate,
 		},
 	}, nil)
 
@@ -2349,7 +2348,6 @@ func TestDashboardRotationConfirmShortcutsOverrideGlobalBindings(t *testing.T) {
 					SessionName:    "proj",
 					ContextPercent: 93,
 					TimeoutAt:      now.Add(30 * time.Second),
-					DefaultAction:  ctxmon.ConfirmRotate,
 				},
 			}, nil)
 			_ = m.renderSidebar(60, 28)
@@ -2385,21 +2383,18 @@ func TestDashboardRotationConfirmNavigationMovesSingleStep(t *testing.T) {
 			SessionName:    "proj",
 			ContextPercent: 93,
 			TimeoutAt:      now.Add(30 * time.Second),
-			DefaultAction:  ctxmon.ConfirmRotate,
 		},
 		{
 			AgentID:        "proj__cc_2",
 			SessionName:    "proj",
 			ContextPercent: 94,
 			TimeoutAt:      now.Add(45 * time.Second),
-			DefaultAction:  ctxmon.ConfirmRotate,
 		},
 		{
 			AgentID:        "proj__cc_3",
 			SessionName:    "proj",
 			ContextPercent: 95,
 			TimeoutAt:      now.Add(60 * time.Second),
-			DefaultAction:  ctxmon.ConfirmRotate,
 		},
 	}, nil)
 	_ = m.renderSidebar(60, 28)

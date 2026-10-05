@@ -2817,7 +2817,6 @@ func TestRunContextRotationPendingNormalizesExplicitPrefix(t *testing.T) {
 		ContextPercent: 91.2,
 		CreatedAt:      time.Now(),
 		TimeoutAt:      time.Now().Add(5 * time.Minute),
-		DefaultAction:  ctxmon.ConfirmRotate,
 		WorkDir:        projectDir,
 	}); err != nil {
 		t.Fatalf("AddPendingRotation() error = %v", err)

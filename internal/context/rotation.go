@@ -99,9 +99,8 @@ type PendingRotation struct {
 	PaneID         string          `json:"pane_id"`
 	ContextPercent float64         `json:"context_percent"`
 	CreatedAt      time.Time       `json:"created_at"`
-	TimeoutAt      time.Time       `json:"timeout_at"`
-	DefaultAction  ConfirmAction   `json:"default_action"`
-	WorkDir        string          `json:"-"` // Not serialized
+	TimeoutAt      time.Time       `json:"timeout_at"` // the request lapses here; nothing runs on its own
+	WorkDir        string          `json:"-"`          // Not serialized
 	PanePID        int             `json:"pane_pid,omitempty"`
 	PaneType       string          `json:"pane_type,omitempty"`
 	Remote         string          `json:"remote,omitempty"`
@@ -109,19 +108,6 @@ type PendingRotation struct {
 	ExecutionState RotationState   `json:"execution_state,omitempty"`
 	ExecutionID    string          `json:"execution_id,omitempty"`
 	Result         *RotationResult `json:"result,omitempty"`
-}
-
-// PendingRotationOutput provides robot mode JSON output for pending rotations.
-type PendingRotationOutput struct {
-	Type             string   `json:"type"`
-	AgentID          string   `json:"agent_id"`
-	SessionName      string   `json:"session_name"`
-	ContextPercent   float64  `json:"context_percent"`
-	AwaitingConfirm  bool     `json:"awaiting_confirmation"`
-	TimeoutSeconds   int      `json:"timeout_seconds"`
-	DefaultAction    string   `json:"default_action"`
-	AvailableActions []string `json:"available_actions"`
-	GeneratedAt      string   `json:"generated_at"`
 }
 
 // RemainingSeconds returns the seconds remaining before timeout.
@@ -903,10 +889,6 @@ func findLiveAgentPane(panes []tmux.Pane, agentID, paneID string) (tmux.Pane, er
 	return tmux.Pane{}, fmt.Errorf("pane not found for agent %s", agentID)
 }
 
-func (r *Rotator) resolveLiveAgentType(session, agentID, paneID string) (agent.AgentType, error) {
-	return r.resolveLiveAgentTypeContext(stdcontext.Background(), session, agentID, paneID)
-}
-
 func (r *Rotator) resolveLiveAgentTypeContext(ctx stdcontext.Context, session, agentID, paneID string) (agent.AgentType, error) {
 	if r.spawner == nil {
 		return agent.AgentTypeUnknown, errors.New("no spawner available")
@@ -1040,14 +1022,11 @@ func NewRotator(cfg RotatorConfig) *Rotator {
 // createPendingRotation creates a pending rotation entry for an agent.
 func (r *Rotator) createPendingRotation(session, agentID, paneID string, contextPercent float64, workDir string) *PendingRotation {
 	now := time.Now()
+	// How long the request stays open. Nothing runs when it lapses: the
+	// coordinator re-requests if the agent is still over its threshold.
 	timeoutSec := r.config.ConfirmTimeoutSec
 	if timeoutSec <= 0 {
-		timeoutSec = 60 // Default to 60 seconds if not configured
-	}
-
-	defaultAction := ConfirmAction(r.config.DefaultConfirmAction)
-	if defaultAction == "" {
-		defaultAction = ConfirmRotate
+		timeoutSec = config.DefaultContextRotationConfig().ConfirmTimeoutSec
 	}
 
 	pending := &PendingRotation{
@@ -1057,7 +1036,6 @@ func (r *Rotator) createPendingRotation(session, agentID, paneID string, context
 		ContextPercent: contextPercent,
 		CreatedAt:      now,
 		TimeoutAt:      now.Add(time.Duration(timeoutSec) * time.Second),
-		DefaultAction:  defaultAction,
 		WorkDir:        workDir,
 	}
 	if _, ok := r.spawner.(*DefaultPaneSpawner); ok {
@@ -1082,133 +1060,6 @@ func (r *Rotator) createPendingRotation(session, agentID, paneID string, context
 	}
 
 	return pending
-}
-
-// processExpiredPending handles pending rotations that have timed out.
-func (r *Rotator) processExpiredPending(_, _ string) {
-	type expiredPendingAction struct {
-		source    *PendingRotation
-		snapshot  *PendingRotation
-		action    ConfirmAction
-		agentType agent.AgentType
-	}
-
-	now := time.Now()
-	postponed := make([]*PendingRotation, 0)
-	actions := make([]expiredPendingAction, 0)
-
-	r.mu.RLock()
-	for _, pending := range r.pending {
-		if !pending.IsExpired() {
-			continue
-		}
-		actions = append(actions, expiredPendingAction{
-			source:   pending,
-			snapshot: clonePendingRotation(pending),
-			action:   pending.DefaultAction,
-		})
-	}
-	r.mu.RUnlock()
-	if spawner, ok := r.spawner.(*DefaultPaneSpawner); ok && !r.durableConfirmation {
-		for _, action := range actions {
-			result := confirmStoredRotation(stdcontext.Background(), action.snapshot.AgentID, action.action, 30, false, spawner.config, r, true)
-			if !result.Success {
-				slog.Warn("expired pending confirmation failed", "agent", action.snapshot.AgentID, "action", action.action, "error", result.Error)
-			}
-		}
-		return
-	}
-
-	// Validate every expired lifecycle action before changing pending state.
-	// A supported action must not run merely because map iteration encountered it
-	// before a later unsupported Grok action in the same batch.
-	for i := range actions {
-		pendingAction := &actions[i]
-		var err error
-		switch pendingAction.action {
-		case ConfirmRotate:
-			pendingAction.agentType, err = r.resolveLiveAgentType(
-				pendingAction.snapshot.SessionName,
-				pendingAction.snapshot.AgentID,
-				pendingAction.snapshot.PaneID,
-			)
-			if err == nil {
-				err = validateAutomatedRotation(pendingAction.agentType)
-			}
-		case ConfirmCompact:
-			pendingAction.agentType, err = r.resolveLiveAgentType(
-				pendingAction.snapshot.SessionName,
-				pendingAction.snapshot.AgentID,
-				pendingAction.snapshot.PaneID,
-			)
-			if err == nil {
-				err = pendingAction.agentType.ValidateAutomatedPromptDelivery()
-			}
-			if err == nil && !GetAgentCapabilities(string(pendingAction.agentType)).SupportsBuiltinCompact {
-				err = fmt.Errorf("native context-preserving compaction is unavailable for %s; use rotate", pendingAction.agentType)
-			}
-		}
-		if err != nil {
-			slog.Warn("expired pending rotation batch rejected",
-				"agent", pendingAction.snapshot.AgentID,
-				"action", pendingAction.action,
-				"error", err,
-			)
-			return
-		}
-	}
-
-	committedActions := make([]expiredPendingAction, 0, len(actions))
-	r.mu.Lock()
-	for _, pendingAction := range actions {
-		pending := r.pending[pendingAction.snapshot.AgentID]
-		if pending == nil ||
-			pending != pendingAction.source ||
-			pending.ExecutionState != "" ||
-			!pending.TimeoutAt.Equal(pendingAction.snapshot.TimeoutAt) ||
-			pending.DefaultAction != pendingAction.action ||
-			!now.After(pending.TimeoutAt) {
-			continue
-		}
-		switch pendingAction.action {
-		case ConfirmPostpone:
-			pending.TimeoutAt = now.Add(30 * time.Minute)
-			postponed = append(postponed, clonePendingRotation(pending))
-		default:
-			delete(r.pending, pendingAction.snapshot.AgentID)
-			committedActions = append(committedActions, pendingAction)
-		}
-	}
-	r.mu.Unlock()
-
-	for _, pending := range postponed {
-		if err := AddPendingRotation(pending); err != nil {
-			slog.Warn("failed to persist postponed rotation", "agent", pending.AgentID, "error", err)
-		}
-	}
-
-	for _, action := range committedActions {
-		pending := action.snapshot
-		switch action.action {
-		case ConfirmRotate:
-			result := r.rotateAgent(pending.SessionName, pending.AgentID, pending.WorkDir)
-			if !result.Success {
-				slog.Warn("auto-rotation from expired pending failed", "agent", pending.AgentID, "error", result.Error)
-			}
-		case ConfirmCompact:
-			if paneID := pending.PaneID; paneID != "" {
-				r.tryCompaction(pending.AgentID, paneID, action.agentType)
-			}
-		case ConfirmIgnore:
-			// Do nothing, just remove from pending
-		case ConfirmPostpone:
-			continue
-		}
-
-		if err := RemovePendingRotation(pending.AgentID); err != nil {
-			slog.Warn("failed to remove pending rotation from store", "agent", pending.AgentID, "error", err)
-		}
-	}
 }
 
 // rotateAgent performs the full rotation flow for a single agent.
@@ -1558,11 +1409,6 @@ func recordRotationToHistory(result RotationResult, session, agentType string, c
 	if err := RecordRotation(historyRecord); err != nil {
 		slog.Warn("failed to persist rotation history", "agent", result.OldAgentID, "error", err)
 	}
-}
-
-// tryCompaction attempts to compact the agent's context.
-func (r *Rotator) tryCompaction(agentID, paneID string, agentType agent.AgentType) *CompactionResult {
-	return r.tryCompactionContext(stdcontext.Background(), "", agentID, paneID, agentType)
 }
 
 // compactLivePane obtains fresh provider accounting rather than comparing the
@@ -1979,24 +1825,17 @@ func (r *Rotator) ConfirmRotation(agentID string, action ConfirmAction, postpone
 // lifecycle as coordinator rotation. The durable claim spans all effects and
 // stores the actual result, so a reported success can be replayed safely.
 func ConfirmPendingRotationContext(ctx stdcontext.Context, agentID string, action ConfirmAction, minutes int, retry bool, cfg *config.Config) RotationResult {
-	return confirmStoredRotation(ctx, agentID, action, minutes, retry, cfg, nil, false)
+	return confirmStoredRotation(ctx, agentID, action, minutes, retry, cfg, nil)
 }
 
-func confirmStoredRotation(ctx stdcontext.Context, agentID string, action ConfirmAction, minutes int, retry bool, cfg *config.Config, owner *Rotator, allowExpired bool) (result RotationResult) {
+func confirmStoredRotation(ctx stdcontext.Context, agentID string, action ConfirmAction, minutes int, retry bool, cfg *config.Config, owner *Rotator) (result RotationResult) {
 	started := time.Now()
 	result = RotationResult{OldAgentID: agentID, State: RotationStateFailed, Timestamp: started}
 	if action == ConfirmPostpone && minutes <= 0 {
 		result.Error = "postpone minutes must be positive"
 		return result
 	}
-	var pending *PendingRotation
-	var release func()
-	var err error
-	if allowExpired {
-		pending, release, err = DefaultPendingRotationStore.BeginExpiredConfirmation(ctx, agentID, action)
-	} else {
-		pending, release, err = DefaultPendingRotationStore.BeginConfirmation(ctx, agentID, action, retry)
-	}
+	pending, release, err := DefaultPendingRotationStore.BeginConfirmation(ctx, agentID, action, retry)
 	if err != nil {
 		result.Error = err.Error()
 		return result
@@ -2094,10 +1933,10 @@ func confirmStoredRotation(ctx stdcontext.Context, agentID string, action Confir
 		rotCfg.Monitor, rotCfg.Compactor, rotCfg.Summary, rotCfg.Spawner, rotCfg.Config = owner.monitor, owner.compactor, owner.summary, owner.spawner, owner.config
 		monitor = owner.monitor
 	}
-	if action == ConfirmRotate && owner == nil && !allowExpired {
+	if action == ConfirmRotate && owner == nil {
 		// An explicit CLI/dashboard choice must replace the agent even when
 		// automatic rotation prefers compaction. Modify this execution's copy;
-		// coordinator auto-confirm and timeout policy keep their preference.
+		// coordinator auto-confirm keeps its preference.
 		rotCfg.Config.TryCompactFirst = false
 	}
 	model := ""
@@ -2134,7 +1973,7 @@ func (r *Rotator) ConfirmRotationContext(ctx stdcontext.Context, agentID string,
 	// All production confirmations, including coordinator auto-confirm, own
 	// the same persisted claim. A CLI claim must never race a second engine.
 	if spawner, ok := r.spawner.(*DefaultPaneSpawner); ok && !r.durableConfirmation {
-		return confirmStoredRotation(ctx, agentID, action, postponeMinutes, false, spawner.config, r, false)
+		return confirmStoredRotation(ctx, agentID, action, postponeMinutes, false, spawner.config, r)
 	}
 	r.mu.Lock()
 	pending := r.pending[agentID]

@@ -38,7 +38,6 @@ type StoredPendingRotation struct {
 	ContextPercent float64         `json:"context_percent"`
 	CreatedAt      time.Time       `json:"created_at"`
 	TimeoutAt      time.Time       `json:"timeout_at"`
-	DefaultAction  ConfirmAction   `json:"default_action"`
 	WorkDir        string          `json:"work_dir"`
 	PanePID        int             `json:"pane_pid,omitempty"`
 	PaneType       string          `json:"pane_type,omitempty"`
@@ -58,7 +57,6 @@ func (s *StoredPendingRotation) ToPendingRotation() *PendingRotation {
 		ContextPercent: s.ContextPercent,
 		CreatedAt:      s.CreatedAt,
 		TimeoutAt:      s.TimeoutAt,
-		DefaultAction:  s.DefaultAction,
 		WorkDir:        s.WorkDir,
 		PanePID:        s.PanePID,
 		PaneType:       s.PaneType,
@@ -79,7 +77,6 @@ func FromPendingRotation(p *PendingRotation) *StoredPendingRotation {
 		ContextPercent: p.ContextPercent,
 		CreatedAt:      p.CreatedAt,
 		TimeoutAt:      p.TimeoutAt,
-		DefaultAction:  p.DefaultAction,
 		WorkDir:        p.WorkDir,
 		PanePID:        p.PanePID,
 		PaneType:       p.PaneType,
@@ -270,16 +267,6 @@ func (s *PendingRotationStore) lock(ctx context.Context) (func(), error) {
 // explicit interrupted attempt rather than an apparently untouched request.
 // The caller must retain release until FinishConfirmation has saved its result.
 func (s *PendingRotationStore) BeginConfirmation(ctx context.Context, agentID string, action ConfirmAction, retry bool) (*PendingRotation, func(), error) {
-	return s.beginConfirmation(ctx, agentID, action, retry, false)
-}
-
-// BeginExpiredConfirmation admits the configured timeout action without
-// reopening any choice the operator or a previous executor already made.
-func (s *PendingRotationStore) BeginExpiredConfirmation(ctx context.Context, agentID string, action ConfirmAction) (*PendingRotation, func(), error) {
-	return s.beginConfirmation(ctx, agentID, action, false, true)
-}
-
-func (s *PendingRotationStore) beginConfirmation(ctx context.Context, agentID string, action ConfirmAction, retry, allowExpired bool) (*PendingRotation, func(), error) {
 	if ctx == nil {
 		return nil, nil, errors.New("confirmation context is required")
 	}
@@ -321,12 +308,8 @@ func (s *PendingRotationStore) beginConfirmation(ctx context.Context, agentID st
 		if !pendingAgentIDEqual(entry.AgentID, agentID) {
 			continue
 		}
-		if !storedPendingRetained(*entry, time.Now()) && !allowExpired && !retry {
+		if !storedPendingRetained(*entry, time.Now()) && !retry {
 			return nil, nil, fmt.Errorf("pending rotation for %s has expired", agentID)
-		}
-		if allowExpired && entry.ExecutionState == RotationStateCompleted && entry.Result != nil {
-			claimed = true
-			return entry.ToPendingRotation(), release, nil
 		}
 		if entry.SelectedAction != "" && entry.SelectedAction != action && !(action == ConfirmIgnore && retry && entry.ExecutionState != RotationStateCompleted) {
 			return nil, nil, fmt.Errorf("confirmation for %s already selected %s; cannot change it to %s", agentID, entry.SelectedAction, action)
@@ -334,9 +317,6 @@ func (s *PendingRotationStore) beginConfirmation(ctx context.Context, agentID st
 		if entry.ExecutionState == RotationStateCompleted && entry.Result != nil {
 			claimed = true
 			return entry.ToPendingRotation(), release, nil
-		}
-		if allowExpired && (entry.ExecutionState != "" || entry.SelectedAction != "" || entry.TimeoutAt.After(time.Now()) || entry.DefaultAction != action) {
-			return nil, nil, errors.New("timeout confirmation is no longer eligible")
 		}
 		if entry.ExecutionState != "" && !retry {
 			return nil, nil, fmt.Errorf("confirmation for %s is %s; inspect pending state and use --retry to explicitly retry the same action", agentID, entry.ExecutionState)

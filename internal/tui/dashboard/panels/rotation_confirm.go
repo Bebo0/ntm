@@ -387,12 +387,12 @@ func (p *RotationConfirmPanel) View() string {
 			timeStyle.Render(timeoutStr),
 		)
 
-		// Second line: context % and default action
+		// Second line: context %. Nothing runs when the request lapses; the
+		// coordinator re-requests while the agent stays over its threshold.
 		contextStr := fmt.Sprintf("%.0f%% context", pending.ContextPercent)
-		actionStr := fmt.Sprintf("→ %s", pending.DefaultAction)
 		line2 := fmt.Sprintf("   %s  %s",
 			lipgloss.NewStyle().Foreground(t.Subtext).Render(contextStr),
-			lipgloss.NewStyle().Foreground(t.Overlay).Italic(true).Render(actionStr),
+			lipgloss.NewStyle().Foreground(t.Overlay).Italic(true).Render("awaiting confirmation"),
 		)
 
 		content.WriteString(line1 + "\n")

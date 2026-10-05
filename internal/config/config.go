@@ -764,12 +764,14 @@ func DefaultContextConfig() ContextConfig {
 
 // ContextRotationConfig holds configuration for automatic context window rotation
 type ContextRotationConfig struct {
-	RotateThreshold      float64                  `toml:"rotate_threshold"`       // 0.0-1.0, rotate agent when usage exceeds this
-	SummaryMaxTokens     int                      `toml:"summary_max_tokens"`     // Max tokens for handoff summary
-	TryCompactFirst      bool                     `toml:"try_compact_first"`      // Try to compact before rotating
-	ConfirmTimeoutSec    int                      `toml:"confirm_timeout_sec"`    // Seconds to wait for confirmation (0 = no auto-rotate)
-	DefaultConfirmAction string                   `toml:"default_confirm_action"` // Action if timeout expires: "rotate", "ignore", "compact"
-	Recovery             CompactionRecoveryConfig `toml:"recovery"`               // Compaction-recovery prompt behaviour (issue #113)
+	RotateThreshold  float64 `toml:"rotate_threshold"`   // 0.0-1.0, rotate agent when usage exceeds this
+	SummaryMaxTokens int     `toml:"summary_max_tokens"` // Max tokens for handoff summary
+	TryCompactFirst  bool    `toml:"try_compact_first"`  // Try to compact before rotating
+	// ConfirmTimeoutSec is how long a pending rotation request stays open for
+	// confirmation (0 = the default). Nothing runs when it lapses; the
+	// coordinator re-requests while the agent stays over its threshold.
+	ConfirmTimeoutSec int                      `toml:"confirm_timeout_sec"`
+	Recovery          CompactionRecoveryConfig `toml:"recovery"` // Compaction-recovery prompt behaviour (issue #113)
 }
 
 // CompactionRecoveryConfig holds configuration for the compaction recovery
@@ -810,12 +812,13 @@ func DefaultCompactionRecoveryConfig() CompactionRecoveryConfig {
 // DefaultContextRotationConfig returns sensible defaults for context rotation
 func DefaultContextRotationConfig() ContextRotationConfig {
 	return ContextRotationConfig{
-		RotateThreshold:      0.95,     // Rotate at 95%
-		SummaryMaxTokens:     2000,     // 2000 tokens for handoff summary
-		TryCompactFirst:      true,     // Try compaction before rotation
-		ConfirmTimeoutSec:    60,       // 60 seconds timeout for confirmation
-		DefaultConfirmAction: "rotate", // Auto-rotate on timeout
-		Recovery:             DefaultCompactionRecoveryConfig(),
+		RotateThreshold:  0.95, // Rotate at 95%
+		SummaryMaxTokens: 2000, // 2000 tokens for handoff summary
+		TryCompactFirst:  true, // Try compaction before rotation
+		// Ten minutes to answer a pending rotation. At 60s an unattended
+		// request lapsed and was re-requested (and re-announced) every minute.
+		ConfirmTimeoutSec: 600,
+		Recovery:          DefaultCompactionRecoveryConfig(),
 	}
 }
 
@@ -829,10 +832,6 @@ func ValidateContextRotationConfig(cfg *ContextRotationConfig) error {
 	}
 	if cfg.ConfirmTimeoutSec < 0 {
 		return fmt.Errorf("confirm_timeout_sec must be non-negative, got %d", cfg.ConfirmTimeoutSec)
-	}
-	validActions := map[string]bool{"rotate": true, "ignore": true, "compact": true, "": true}
-	if !validActions[cfg.DefaultConfirmAction] {
-		return fmt.Errorf("default_confirm_action must be 'rotate', 'ignore', or 'compact', got %q", cfg.DefaultConfirmAction)
 	}
 	return nil
 }
@@ -5063,8 +5062,6 @@ func GetValue(cfg *Config, path string) (interface{}, error) {
 			return cfg.ContextRotation.TryCompactFirst, nil
 		case "confirm_timeout_sec":
 			return cfg.ContextRotation.ConfirmTimeoutSec, nil
-		case "default_confirm_action":
-			return cfg.ContextRotation.DefaultConfirmAction, nil
 		}
 	case "context":
 		if len(parts) < 2 {
@@ -5913,7 +5910,6 @@ func Diff(cfg *Config) []ConfigDiff {
 	addDiff("context_rotation.summary_max_tokens", defaults.ContextRotation.SummaryMaxTokens, cfg.ContextRotation.SummaryMaxTokens)
 	addDiff("context_rotation.try_compact_first", defaults.ContextRotation.TryCompactFirst, cfg.ContextRotation.TryCompactFirst)
 	addDiff("context_rotation.confirm_timeout_sec", defaults.ContextRotation.ConfirmTimeoutSec, cfg.ContextRotation.ConfirmTimeoutSec)
-	addDiff("context_rotation.default_confirm_action", defaults.ContextRotation.DefaultConfirmAction, cfg.ContextRotation.DefaultConfirmAction)
 
 	// Ensemble defaults
 	addDiff("ensemble.default_ensemble", defaults.Ensemble.DefaultEnsemble, cfg.Ensemble.DefaultEnsemble)

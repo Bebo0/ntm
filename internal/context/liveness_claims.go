@@ -16,6 +16,5 @@ func init() {
 	config.RegisterReader("context_rotation.try_compact_first", (*Rotator).rotateAgentContext)
 	// Pending-rotation record written by EnqueuePendingRotation.
 	config.RegisterReader("context_rotation.confirm_timeout_sec", (*Rotator).createPendingRotation)
-	config.RegisterReader("context_rotation.default_confirm_action", (*Rotator).createPendingRotation)
 	config.RegisterReader("context_rotation.summary_max_tokens", NewRotator)
 }

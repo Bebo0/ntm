@@ -182,7 +182,7 @@ func TestGetValue_ConfigServiceRemainingSections(t *testing.T) {
 		{"checkpoints.before_add_agents"},
 		{"notifications.webhook.method"},
 		{"resilience.rate_limit.detect"},
-		{"context_rotation.default_confirm_action"},
+		{"context_rotation.confirm_timeout_sec"},
 		{"recovery.max_recovery_tokens"},
 		{"cleanup.max_age_hours"},
 		{"assign.strategy"},
@@ -1741,7 +1741,7 @@ func TestDiff_ConfigServiceRemainingSections(t *testing.T) {
 	cfg.Integrations.ProcessTriage.UseRanoData = !defaults.Integrations.ProcessTriage.UseRanoData
 	cfg.Models.Codex = map[string]string{"max": "gpt-5.5-codex"}
 	cfg.Notifications.Webhook.Headers = map[string]string{"X-Test": "1"}
-	cfg.ContextRotation.DefaultConfirmAction = "compact"
+	cfg.ContextRotation.ConfirmTimeoutSec = defaults.ContextRotation.ConfirmTimeoutSec + 60
 	cfg.SessionRecovery.MaxRecoveryTokens = defaults.SessionRecovery.MaxRecoveryTokens + 500
 	cfg.Cleanup.MaxAgeHours = defaults.Cleanup.MaxAgeHours + 1
 	cfg.Assign.Strategy = "quality"
@@ -1761,7 +1761,7 @@ func TestDiff_ConfigServiceRemainingSections(t *testing.T) {
 		"integrations.process_triage.use_rano_data",
 		"models.codex",
 		"notifications.webhook.headers",
-		"context_rotation.default_confirm_action",
+		"context_rotation.confirm_timeout_sec",
 		"recovery.max_recovery_tokens",
 		"cleanup.max_age_hours",
 		"assign.strategy",

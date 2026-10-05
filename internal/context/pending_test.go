@@ -97,59 +97,20 @@ func TestPendingConfirmationInterruptedClaimSurvivesTimeout(t *testing.T) {
 	}
 }
 
-func TestPendingConfirmationExpiryReconcilesOperatorChoice(t *testing.T) {
+// TestPendingConfirmationLapsesWithoutAction: a pending rotation request that
+// passed its timeout simply lapses (bd-fka4c). It is no longer visible, it
+// cannot be confirmed without an explicit retry, and nothing ran on its own.
+func TestPendingConfirmationLapsesWithoutAction(t *testing.T) {
 	store := NewPendingRotationStoreWithPath(filepath.Join(t.TempDir(), "pending.jsonl"))
-	pending := makePending("demo__cc_1", "demo", "%3", time.Now().Add(time.Hour))
+	pending := makePending("lapsed__cc_1", "lapsed", "%3", time.Now().Add(-time.Minute))
 	if err := store.Add(pending); err != nil {
 		t.Fatal(err)
 	}
-	claimed, release, err := store.BeginConfirmation(t.Context(), pending.AgentID, ConfirmCompact, false)
-	if err != nil {
-		t.Fatal(err)
+	if got, err := store.Get(pending.AgentID); err != nil || got != nil {
+		t.Fatalf("lapsed request still visible: %+v (err %v)", got, err)
 	}
-	result := RotationResult{Success: true, State: RotationStateAborted, OldAgentID: pending.AgentID, OldPaneID: pending.PaneID}
-	if err := store.FinishConfirmation(t.Context(), claimed, result); err != nil {
-		t.Fatal(err)
-	}
-	release()
-	replayed, release, err := store.BeginExpiredConfirmation(t.Context(), pending.AgentID, ConfirmRotate)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if replayed.SelectedAction != ConfirmCompact || replayed.Result == nil || !replayed.Result.Success {
-		t.Fatalf("expiry replaced acknowledged operator choice: %+v", replayed)
-	}
-	release()
-	pending.AgentID = "demo__cc_2"
-	pending.TimeoutAt = time.Now().Add(-time.Minute)
-	pending.DefaultAction = ConfirmIgnore
-	if err := store.Add(pending); err != nil {
-		t.Fatal(err)
-	}
-	if _, _, err := store.BeginExpiredConfirmation(t.Context(), pending.AgentID, ConfirmRotate); err == nil {
-		t.Fatal("stale in-memory default replaced durable timeout choice")
-	}
-}
-
-func TestPendingConfirmationExpirySurvivesOtherSessionWrites(t *testing.T) {
-	store := NewPendingRotationStoreWithPath(filepath.Join(t.TempDir(), "pending.jsonl"))
-	pending := makePending("expired__cc_1", "expired", "%3", time.Now().Add(-time.Minute))
-	if err := store.Add(pending); err != nil {
-		t.Fatal(err)
-	}
-	if err := store.Add(makePending("other__cc_1", "other", "%4", time.Now().Add(time.Hour))); err != nil {
-		t.Fatal(err)
-	}
-	if err := store.Remove("other__cc_1"); err != nil {
-		t.Fatal(err)
-	}
-	claimed, release, err := store.BeginExpiredConfirmation(t.Context(), pending.AgentID, pending.DefaultAction)
-	if err != nil {
-		t.Fatalf("unrelated writes discarded a waiting timeout action: %v", err)
-	}
-	defer release()
-	if claimed.SelectedAction != ConfirmRotate {
-		t.Fatalf("wrong timeout action claimed: %+v", claimed)
+	if _, _, err := store.BeginConfirmation(t.Context(), pending.AgentID, ConfirmRotate, false); err == nil || !strings.Contains(err.Error(), "has expired") {
+		t.Fatalf("confirming a lapsed request = %v, want an expiry error", err)
 	}
 }
 
@@ -196,7 +157,6 @@ func makePending(agentID, session, pane string, timeout time.Time) *PendingRotat
 		ContextPercent: 85.5,
 		CreatedAt:      time.Now(),
 		TimeoutAt:      timeout,
-		DefaultAction:  ConfirmRotate,
 		WorkDir:        "/tmp/test",
 	}
 }
@@ -243,9 +203,6 @@ func TestPendingRotationStore_AddAndGet(t *testing.T) {
 	}
 	if got.SessionName != "sess-1" {
 		t.Errorf("SessionName = %q, want sess-1", got.SessionName)
-	}
-	if got.DefaultAction != ConfirmRotate {
-		t.Errorf("DefaultAction = %q, want rotate", got.DefaultAction)
 	}
 }
 
@@ -565,7 +522,6 @@ func TestStoredPendingRotation_ToPendingRotation(t *testing.T) {
 		ContextPercent: 90.0,
 		CreatedAt:      now,
 		TimeoutAt:      timeout,
-		DefaultAction:  ConfirmCompact,
 		WorkDir:        "/projects/test",
 	}
 
@@ -573,8 +529,8 @@ func TestStoredPendingRotation_ToPendingRotation(t *testing.T) {
 	if p.AgentID != "agent-1" {
 		t.Errorf("AgentID = %q, want agent-1", p.AgentID)
 	}
-	if p.DefaultAction != ConfirmCompact {
-		t.Errorf("DefaultAction = %q, want compact", p.DefaultAction)
+	if !p.TimeoutAt.Equal(timeout) {
+		t.Errorf("TimeoutAt = %v, want %v", p.TimeoutAt, timeout)
 	}
 	if p.WorkDir != "/projects/test" {
 		t.Errorf("WorkDir = %q, want /projects/test", p.WorkDir)
@@ -593,7 +549,6 @@ func TestFromPendingRotation_Fields(t *testing.T) {
 		ContextPercent: 75.5,
 		CreatedAt:      now,
 		TimeoutAt:      timeout,
-		DefaultAction:  ConfirmIgnore,
 		WorkDir:        "/projects/other",
 	}
 
@@ -601,8 +556,8 @@ func TestFromPendingRotation_Fields(t *testing.T) {
 	if stored.AgentID != "agent-2" {
 		t.Errorf("AgentID = %q, want agent-2", stored.AgentID)
 	}
-	if stored.DefaultAction != ConfirmIgnore {
-		t.Errorf("DefaultAction = %q, want ignore", stored.DefaultAction)
+	if !stored.TimeoutAt.Equal(timeout) {
+		t.Errorf("TimeoutAt = %v, want %v", stored.TimeoutAt, timeout)
 	}
 	if stored.WorkDir != "/projects/other" {
 		t.Errorf("WorkDir = %q, want /projects/other", stored.WorkDir)

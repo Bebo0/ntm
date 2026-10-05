@@ -66,7 +66,7 @@ func TestContextConfirmCommandExecutesPersistedChoice(t *testing.T) {
 				cfg, jsonOutput, tmux.DefaultClient = oldCfg, oldJSON, oldClient
 				ctxmon.DefaultPendingRotationStore, ctxmon.DefaultRotationHistoryStore = oldStore, oldHistory
 			})
-			pending := &ctxmon.PendingRotation{AgentID: "demo__cc_1", SessionName: "demo", PaneID: "%1", PanePID: 123, PaneType: "cc", WorkDir: workDir, ContextPercent: 75, CreatedAt: time.Now(), TimeoutAt: time.Now().Add(time.Hour), DefaultAction: ctxmon.ConfirmRotate}
+			pending := &ctxmon.PendingRotation{AgentID: "demo__cc_1", SessionName: "demo", PaneID: "%1", PanePID: 123, PaneType: "cc", WorkDir: workDir, ContextPercent: 75, CreatedAt: time.Now(), TimeoutAt: time.Now().Add(time.Hour)}
 			if err := ctxmon.AddPendingRotation(pending); err != nil {
 				t.Fatal(err)
 			}
