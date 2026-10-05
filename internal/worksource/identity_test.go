@@ -73,6 +73,12 @@ func TestCaptureTracksContentNotMtime(t *testing.T) {
 	if !before.Bound() || !errors.Is(before.Verify(after), ErrChanged) {
 		t.Fatal("same-size, same-mtime tracker replacement did not invalidate identity")
 	}
+	// The mismatch is its own remediation receipt: both digests, named.
+	var receipt *StaleError
+	if !errors.As(before.Verify(after), &receipt) || receipt.Expected == nil || receipt.Observed == nil ||
+		*receipt.Expected != before || *receipt.Observed != after || receipt.Expected.JSONLSHA256 == receipt.Observed.JSONLSHA256 {
+		t.Fatalf("mismatch receipt = %+v, want expected %+v and observed %+v", receipt, before, after)
+	}
 	if err := after.Verify(captureFixture(t, dir)); err != nil {
 		t.Fatal(err)
 	}

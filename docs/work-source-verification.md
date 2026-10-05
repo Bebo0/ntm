@@ -64,6 +64,13 @@ and the top recommendation, and retain available mismatch evidence. Optional
 triage enrichment must not swallow this failure. Cancellation and ordinary tool
 failures keep their actual error identity instead of being labeled mismatches.
 
+The mismatch evidence is a remediation receipt: the expected and observed
+identity (`project_dir`, `jsonl_path`, `jsonl_sha256`, `head_sha`) plus the
+reason. Work snapshots carry it as `verification.mismatch`. The assignment
+surfaces (`--robot-assign`, `--robot-bulk-assign`, `--robot-spawn` with
+assignment) report it as `work_source_mismatch` beside the error, having
+claimed, reserved and sent nothing.
+
 ## Live Agent Mail reservation evidence
 
 The live adapter reads project-wide reservations before eligibility, mutex

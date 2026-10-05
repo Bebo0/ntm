@@ -29,6 +29,7 @@ import (
 	"github.com/Dicklesworthstone/ntm/internal/state"
 	statuspkg "github.com/Dicklesworthstone/ntm/internal/status"
 	"github.com/Dicklesworthstone/ntm/internal/tmux"
+	"github.com/Dicklesworthstone/ntm/internal/worksource"
 )
 
 var (
@@ -166,6 +167,8 @@ type SpawnOutput struct {
 	Assignments         []SpawnAssignment `json:"assignments,omitempty"`
 	AssignStrategy      string            `json:"assign_strategy,omitempty"`
 	Recovery            *SpawnRecovery    `json:"recovery,omitempty"`
+	// WorkSourceMismatch is the STALE_WORK_COORDINATION remediation receipt.
+	WorkSourceMismatch *worksource.StaleError `json:"work_source_mismatch,omitempty"`
 	// Admission is the pre-spawn resource-pressure admission result.
 	Admission *pressure.SpawnAdmission `json:"admission,omitempty"`
 	// MonitorStarted reports whether the resilience session monitor was
@@ -689,6 +692,7 @@ func GetSpawn(ctx context.Context, opts SpawnOptions, cfg *config.Config) (*Spaw
 					code, hint = staleCode, staleHint
 				}
 				output.RobotResponse = NewErrorResponse(fmt.Errorf("%s", output.Error), code, hint)
+				output.WorkSourceMismatch = staleWorkReceipt(actionableErr)
 			}
 			return output, nil
 		}

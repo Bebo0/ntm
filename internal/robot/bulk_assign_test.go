@@ -2,6 +2,8 @@ package robot
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -3252,4 +3254,234 @@ func TestResolveLiveSessionProjectRejectsDistinctRealRepos(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "panes span multiple project roots") {
 		t.Fatalf("distinct real repos error = %v, want multiple-project-roots rejection", err)
 	}
+}
+
+// threeWayEligibleID is the only bead the canonical tracker allows dispatching.
+const threeWayEligibleID = "bd-ok"
+
+// threeWayCanonicalRows is a committed tracker holding one eligible bead and
+// one bead per canonical exclusion category (GH #283).
+var threeWayCanonicalRows = []string{
+	`{"id":"bd-ok","status":"open","issue_type":"task","labels":[]}`,
+	`{"id":"bd-closed","status":"closed","issue_type":"task"}`,
+	`{"id":"bd-busy","status":"in_progress","issue_type":"task","assignee":"OtherAgent","labels":["mutex:schema"]}`,
+	`{"id":"bd-owned","status":"open","issue_type":"task","assignee":"OtherAgent"}`,
+	`{"id":"bd-blocked","status":"open","issue_type":"task","dependencies":[{"depends_on_id":"bd-busy","type":"blocks"}]}`,
+	`{"id":"bd-epic","status":"open","issue_type":"epic"}`,
+	`{"id":"bd-pinned","status":"open","issue_type":"task","pinned":true}`,
+	`{"id":"bd-wisp","status":"open","issue_type":"task","ephemeral":true}`,
+	`{"id":"bd-template","status":"open","issue_type":"task","is_template":true}`,
+	`{"id":"bd-deferred","status":"open","issue_type":"task","defer_until":"2999-01-01T00:00:00Z"}`,
+	`{"id":"bd-private","status":"open","issue_type":"task","labels":["secret"]}`,
+	`{"id":"bd-mutex","status":"open","issue_type":"task","labels":["mutex:schema"]}`,
+}
+
+// threeWayStaleIDs is what an out-of-date br database and the bv views built
+// from it advertise as ready: every canonical row plus one the tracker never
+// had. Excluded beads lead the impact ranking, so any leak gets dispatched.
+var threeWayStaleIDs = []string{
+	"bd-phantom", "bd-closed", "bd-busy", "bd-owned", "bd-blocked", "bd-epic", "bd-pinned",
+	"bd-wisp", "bd-template", "bd-deferred", "bd-private", "bd-mutex", threeWayEligibleID,
+}
+
+// newThreeWayWorkProject commits rows as .beads/issues.jsonl in a fresh git
+// repository and installs fake bv and br that report threeWayStaleIDs as
+// ready. With drift set, bv appends a bead to the tracker while the plan is
+// collected, as a concurrent tracker writer would. It returns the project, the
+// tracker path, and the committed HEAD.
+func newThreeWayWorkProject(t *testing.T, rows []string, drift bool) (string, string, string) {
+	t.Helper()
+	project := t.TempDir()
+	runResolverGitCommand(t, project, "init", "-b", "main")
+	runResolverGitCommand(t, project, "config", "user.email", "test@test.com")
+	runResolverGitCommand(t, project, "config", "user.name", "Test")
+	jsonl := filepath.Join(project, ".beads", "issues.jsonl")
+	if err := os.MkdirAll(filepath.Dir(jsonl), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(jsonl, []byte(strings.Join(rows, "\n")+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	runResolverGitCommand(t, project, "add", ".beads/issues.jsonl")
+	runResolverGitCommand(t, project, "commit", "-m", "tracker")
+	headOut, err := exec.Command("git", "-C", project, "rev-parse", "HEAD").Output()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	type item struct {
+		ID            string   `json:"id"`
+		Title         string   `json:"title"`
+		Status        string   `json:"status"`
+		IssueType     string   `json:"issue_type,omitempty"`
+		Priority      int      `json:"priority"`
+		Labels        []string `json:"labels,omitempty"`
+		UnblocksCount int      `json:"unblocks_count,omitempty"`
+		Actionable    bool     `json:"actionable,omitempty"`
+	}
+	var recommendations, blockers, brRows []item
+	for rank, id := range threeWayStaleIDs {
+		recommendations = append(recommendations, item{ID: id, Title: id, Status: "open", Priority: 1})
+		blockers = append(blockers, item{ID: id, Title: id, UnblocksCount: 100 - rank, Actionable: true})
+		brRows = append(brRows, item{ID: id, Title: id, Status: "open", IssueType: "task", Priority: 1, Labels: []string{}})
+	}
+	encode := func(value any) string {
+		data, err := json.Marshal(value)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return string(data)
+	}
+	triage := encode(map[string]any{"triage": map[string]any{"recommendations": recommendations, "blockers_to_clear": blockers}})
+	plan := encode(map[string]any{"plan": map[string]any{
+		"tracks":  []any{map[string]any{"track_id": "one", "items": recommendations}},
+		"summary": map[string]any{"total_actionable": len(recommendations)},
+	}})
+	driftLine := ""
+	if drift {
+		driftLine = "printf '%s\\n' '{\"id\":\"bd-late\",\"status\":\"open\",\"issue_type\":\"task\"}' >> " + jsonl + "\n"
+	}
+	bvScript := "#!/bin/sh\ncase \"$*\" in\n" +
+		"  *--robot-triage*) cat <<'JSON'\n" + triage + "\nJSON\n;;\n" +
+		"  *--robot-plan*) " + driftLine + "cat <<'JSON'\n" + plan + "\nJSON\n;;\n" +
+		"  *) exit 1 ;;\nesac\n"
+	brScript := "#!/bin/sh\ncase \"$*\" in\n" +
+		"  *in_progress*) printf '[]\\n' ;;\n" +
+		"  *ready*|*open*|*--all*) cat <<'JSON'\n" + encode(brRows) + "\nJSON\n;;\n" +
+		"  *) printf '[]\\n' ;;\nesac\n"
+	bin := t.TempDir()
+	for name, script := range map[string]string{"bv": bvScript, "br": brScript} {
+		if err := os.WriteFile(filepath.Join(bin, name), []byte(script), 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	bv.InvalidateTriageCache()
+	t.Cleanup(bv.InvalidateTriageCache)
+	return project, jsonl, strings.TrimSpace(string(headOut))
+}
+
+// threeWayBulkAssign runs --robot-bulk-assign's production work readers over
+// the fixture project; only panes, claims, reservations and prompt delivery
+// are recorded instead of performed. It returns the output and the bead IDs
+// each side effect touched.
+func threeWayBulkAssign(t *testing.T, project string) (*BulkAssignOutput, []string, []string, int) {
+	t.Helper()
+	panes := []tmux.Pane{
+		{ID: "%1", Index: 1, Title: "threeway__cc_1", Type: tmux.AgentClaude},
+		{ID: "%2", Index: 2, Title: "threeway__cc_2", Type: tmux.AgentClaude},
+		{ID: "%3", Index: 3, Title: "threeway__cc_3", Type: tmux.AgentClaude},
+	}
+	var mu sync.Mutex
+	var claimed, sent []string
+	reservations := 0
+	deps := BulkAssignDependencies{
+		ListPanes:                func(context.Context, string) ([]tmux.Pane, error) { return panes, nil },
+		ResolveProject:           func(context.Context, string, []tmux.Pane) (string, error) { return project, nil },
+		LoadAssignmentPolicy:     func(string, string, bool) (*config.Config, error) { return config.Default(), nil },
+		GetBeadAssignmentDetails: bulkOpenAssignmentDetails,
+		GetBeadStatus:            func(context.Context, string, string) (string, error) { return "in_progress", nil },
+		FetchBeadTitle:           func(_ context.Context, _ string, beadID string) (string, error) { return beadID, nil },
+		FetchBeadDetails: func(_ context.Context, _ string, beadID string) (BeadDetails, error) {
+			return BeadDetails{Title: beadID, Type: "task"}, nil
+		},
+		ReadFile: func(string) ([]byte, error) { return []byte(defaultBulkAssignTemplate), nil },
+		DispatchDeliverer: bulkTestDeliverer(t, func(delivery dispatchsvc.Delivery) error {
+			mu.Lock()
+			defer mu.Unlock()
+			sent = append(sent, delivery.Target.Ref.ID)
+			return nil
+		}),
+	}
+	deps = bulkAtomicTestDeps(t, "threeway", bulkAssignPlan{}, deps)
+	claim := deps.ClaimBead
+	deps.ClaimBead = func(ctx context.Context, dir, beadID, actor string) (bv.BeadClaimResult, error) {
+		mu.Lock()
+		claimed = append(claimed, beadID)
+		mu.Unlock()
+		return claim(ctx, dir, beadID, actor)
+	}
+	deps.ReservationPort = testReservationFunc(func(_ context.Context, req assignment.ReservationRequest) (assignment.LeaseReceipt, error) {
+		mu.Lock()
+		reservations++
+		mu.Unlock()
+		expires := time.Now().UTC().Add(time.Hour)
+		return assignment.LeaseReceipt{AgentName: req.AgentName, Target: req.Target, Requested: append([]string(nil), req.RequestedPaths...), Granted: append([]string(nil), req.RequestedPaths...), ReservationIDs: []int{42}, ExpiresAt: &expires}, nil
+	})
+	output, err := GetBulkAssign(t.Context(), BulkAssignOptions{Session: "threeway", FromBV: true, Strategy: "impact", Deps: &deps})
+	if err != nil {
+		t.Fatalf("GetBulkAssign transport error: %v", err)
+	}
+	return output, claimed, sent, reservations
+}
+
+// TestBulkAssignThreeWayWorkSource is the GH #283 regression (bd-qicd1): the
+// committed tracker, an out-of-date br/bv view of it, and a concurrent
+// tracker write, through the bulk assignment dispatch surface.
+func TestBulkAssignThreeWayWorkSource(t *testing.T) {
+	t.Run("matching source dispatches only the eligible bead", func(t *testing.T) {
+		project, jsonl, _ := newThreeWayWorkProject(t, threeWayCanonicalRows, false)
+		before, err := os.ReadFile(jsonl)
+		if err != nil {
+			t.Fatal(err)
+		}
+		output, claimed, sent, _ := threeWayBulkAssign(t, project)
+		if !output.Success || output.WorkSourceMismatch != nil {
+			t.Fatalf("matching source output = %+v", output)
+		}
+		if len(output.Assignments) != 1 || output.Assignments[0].Bead != threeWayEligibleID || !output.Assignments[0].Claimed || !output.Assignments[0].PromptSent {
+			t.Fatalf("assignments = %+v, want only %s claimed and sent", output.Assignments, threeWayEligibleID)
+		}
+		if !reflect.DeepEqual(claimed, []string{threeWayEligibleID}) || len(sent) != 1 {
+			t.Fatalf("side effects: claimed %v, sent to %v; want one claim and one send for %s", claimed, sent, threeWayEligibleID)
+		}
+		if len(output.UnassignedBeads) != 0 {
+			t.Fatalf("excluded beads surfaced as unassigned work: %v", output.UnassignedBeads)
+		}
+		after, err := os.ReadFile(jsonl)
+		if err != nil || string(after) != string(before) {
+			t.Fatalf("dispatch planning modified the tracker: %v", err)
+		}
+	})
+
+	t.Run("tracker drift during collection stops dispatch with a receipt", func(t *testing.T) {
+		project, jsonl, head := newThreeWayWorkProject(t, threeWayCanonicalRows, true)
+		committed, err := os.ReadFile(jsonl)
+		if err != nil {
+			t.Fatal(err)
+		}
+		output, claimed, sent, reservations := threeWayBulkAssign(t, project)
+		if output.Success || output.ErrorCode != ErrCodeStaleWorkCoordination {
+			t.Fatalf("drifted source output = %+v, want %s", output.RobotResponse, ErrCodeStaleWorkCoordination)
+		}
+		if len(claimed) != 0 || len(sent) != 0 || reservations != 0 || len(output.Assignments) != 0 {
+			t.Fatalf("stale source reached dispatch: claimed %v, sent %v, reservations %d, assignments %+v", claimed, sent, reservations, output.Assignments)
+		}
+		drifted, err := os.ReadFile(jsonl)
+		if err != nil || string(drifted) == string(committed) {
+			t.Fatalf("fixture did not drift the tracker: %v", err)
+		}
+		receipt := output.WorkSourceMismatch
+		if receipt == nil || receipt.Expected == nil || receipt.Observed == nil {
+			t.Fatalf("stale output has no remediation receipt: %+v", output)
+		}
+		sum := func(data []byte) string { digest := sha256.Sum256(data); return hex.EncodeToString(digest[:]) }
+		if receipt.Expected.JSONLSHA256 != sum(committed) || receipt.Observed.JSONLSHA256 != sum(drifted) {
+			t.Fatalf("receipt digests = %s -> %s, want %s -> %s", receipt.Expected.JSONLSHA256, receipt.Observed.JSONLSHA256, sum(committed), sum(drifted))
+		}
+		if receipt.Expected.HeadSHA != head || receipt.Observed.HeadSHA != head {
+			t.Fatalf("receipt HEAD = %s -> %s, want %s", receipt.Expected.HeadSHA, receipt.Observed.HeadSHA, head)
+		}
+	})
+
+	t.Run("all-excluded tracker is a drained queue with no side effects", func(t *testing.T) {
+		project, _, _ := newThreeWayWorkProject(t, threeWayCanonicalRows[1:], false)
+		output, claimed, sent, reservations := threeWayBulkAssign(t, project)
+		if !output.Success || len(output.Assignments) != 0 || len(output.UnassignedBeads) != 0 {
+			t.Fatalf("all-excluded output = %+v, want an empty successful plan", output)
+		}
+		if len(claimed) != 0 || len(sent) != 0 || reservations != 0 {
+			t.Fatalf("all-excluded source reached dispatch: claimed %v, sent %v, reservations %d", claimed, sent, reservations)
+		}
+	})
 }

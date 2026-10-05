@@ -35,10 +35,13 @@ func (i Identity) Bound() bool { return i.JSONLSHA256 != "" }
 
 // Verify rejects a stale saved identity, including a tracker appearing or
 // disappearing between observations. It deliberately excludes filesystem mtimes
-// from equality: timestamps alone do not identify content.
+// from equality: timestamps alone do not identify content. The *StaleError it
+// returns carries both identities: the remediation receipt naming which JSONL
+// digest and HEAD moved.
 func (i Identity) Verify(current Identity) error {
 	if i != current {
-		return fmt.Errorf("%w: tracker or checkout changed; refresh work before dispatch", ErrChanged)
+		expected, observed := i, current
+		return &StaleError{Expected: &expected, Observed: &observed, Reason: "tracker or checkout changed; refresh work before dispatch"}
 	}
 	return nil
 }

@@ -68,6 +68,8 @@ type AssignOutput struct {
 	UnassignableBeads []UnassignableBead `json:"unassignable_beads,omitempty"`
 	Summary           AssignSummary      `json:"summary"`
 	AgentHints        *AssignAgentHints  `json:"_agent_hints,omitempty"`
+	// WorkSourceMismatch is the STALE_WORK_COORDINATION remediation receipt.
+	WorkSourceMismatch *worksource.StaleError `json:"work_source_mismatch,omitempty"`
 }
 
 // AssignRecommend is a single assignment recommendation
@@ -423,6 +425,17 @@ func staleWorkError(err error) (string, string, bool) {
 	return "", "", false
 }
 
+// staleWorkReceipt is the remediation receipt of a work-source mismatch: the
+// expected and observed JSONL digest and HEAD, as far as the source layer
+// recorded them. Assignment surfaces report it as work_source_mismatch.
+func staleWorkReceipt(err error) *worksource.StaleError {
+	var receipt *worksource.StaleError
+	if errors.As(err, &receipt) {
+		return receipt
+	}
+	return nil
+}
+
 func setAssignError(output *AssignOutput, err error, hint string) {
 	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 		output.RobotResponse = NewErrorResponse(err, ErrCodeTimeout, "Retry the command after cancellation")
@@ -430,6 +443,7 @@ func setAssignError(output *AssignOutput, err error, hint string) {
 	}
 	if code, staleHint, ok := staleWorkError(err); ok {
 		output.RobotResponse = NewErrorResponse(err, code, staleHint)
+		output.WorkSourceMismatch = staleWorkReceipt(err)
 		return
 	}
 	if assignmentDependencyMissing(err) {

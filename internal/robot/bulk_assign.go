@@ -24,6 +24,7 @@ import (
 	statuspkg "github.com/Dicklesworthstone/ntm/internal/status"
 	"github.com/Dicklesworthstone/ntm/internal/tmux"
 	"github.com/Dicklesworthstone/ntm/internal/util"
+	"github.com/Dicklesworthstone/ntm/internal/worksource"
 )
 
 const (
@@ -108,6 +109,8 @@ type BulkAssignOutput struct {
 	UnassignedPanes  []string               `json:"unassigned_panes"`
 	DryRun           bool                   `json:"dry_run,omitempty"`
 	AllocationSource string                 `json:"allocation_source,omitempty"`
+	// WorkSourceMismatch is the STALE_WORK_COORDINATION remediation receipt.
+	WorkSourceMismatch *worksource.StaleError `json:"work_source_mismatch,omitempty"`
 }
 
 // BulkAssignAssignment is a single pane-to-bead allocation.
@@ -320,6 +323,7 @@ func GetBulkAssign(ctx context.Context, opts BulkAssignOptions) (*BulkAssignOutp
 			code,
 			hint,
 		)
+		output.WorkSourceMismatch = staleWorkReceipt(err)
 		return output, nil
 	}
 	if err := ctx.Err(); err != nil {
