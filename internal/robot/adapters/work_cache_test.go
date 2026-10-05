@@ -101,6 +101,63 @@ func TestDurableWorkReopensWithoutRecollectingAndKeepsFullCounts(t *testing.T) {
 	}
 }
 
+// The robot projection refresh collects work for its own purposes. Publishing
+// that observation lets the next durable read serve it, re-verified, instead
+// of collecting the same tracker a second time.
+func TestPublishDurableWorkServesTheNextReadWithoutRecollecting(t *testing.T) {
+	store, _ := durableStoreFixture(t)
+	project, err := canonicalWorkSnapshotProject(durableProjectFixture(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	c := &durableCollectorFixture{project: project, input: snapshotCandidateFixture("blocked", "a", "b")}
+	batch, err := c.Collect(ctx)
+	if err != nil || batch == nil || batch.Work == nil {
+		t.Fatalf("verified collection: %+v %v", batch, err)
+	}
+
+	if err := PublishDurableWork(ctx, store, DefaultWorkCoordinationAdapterConfig(project), batch.Work); err != nil {
+		t.Fatalf("PublishDurableWork: %v", err)
+	}
+	c.collectErr = errors.New("tool must not execute after publication")
+	work, err := collectDurableWork(ctx, store, project, c, false, time.Now)
+	durableAssertReady(t, work, err, 2, true)
+	if c.collections != 1 || c.restores != 1 {
+		t.Fatalf("collections=%d restores=%d, want the published observation restored, not recollected", c.collections, c.restores)
+	}
+}
+
+// Publishing unavailable work stores the unavailable marker, so a newer
+// failure still replaces an older healthy observation, and the next read
+// collects afresh rather than trusting either.
+func TestPublishDurableWorkStoresUnavailableWorkAsAMarker(t *testing.T) {
+	store, _ := durableStoreFixture(t)
+	project, err := canonicalWorkSnapshotProject(durableProjectFixture(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	c := &durableCollectorFixture{project: project, input: snapshotCandidateFixture("a")}
+	if _, err := collectDurableWork(ctx, store, project, c, false, time.Now); err != nil {
+		t.Fatalf("healthy observation: %v", err)
+	}
+
+	err = PublishDurableWork(ctx, store, DefaultWorkCoordinationAdapterConfig(project), nil)
+	if !errors.Is(err, ErrWorkSnapshotUnavailable) {
+		t.Fatalf("PublishDurableWork(nil) = %v, want ErrWorkSnapshotUnavailable", err)
+	}
+	if _, err := collectDurableWork(ctx, store, project, c, false, time.Now); err != nil {
+		t.Fatalf("read after the marker: %v", err)
+	}
+	if c.collections != 2 {
+		t.Fatalf("collections = %d, want the marker to force a fresh collection", c.collections)
+	}
+	if err := PublishDurableWork(nil, store, DefaultWorkCoordinationAdapterConfig(project), nil); err == nil { //nolint:staticcheck // nil context is the case under test
+		t.Fatal("PublishDurableWork accepted a nil context")
+	}
+}
+
 func TestDurableWorkMismatchRequiresExplicitRefresh(t *testing.T) {
 	store, _ := durableStoreFixture(t)
 	project := durableProjectFixture(t)

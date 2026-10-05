@@ -79,6 +79,6 @@ These checks are not an atomic filesystem snapshot or a defense against every
 hostile concurrent rename.
 
 The default one-shot command is unchanged. `--watch` and `--wait-ready` are
-mutually exclusive. Legacy `--robot-status` and `--robot-snapshot` work-row
-consumers still require their separate migration; this command does not silently
-alter their schemas or claim their counts are now source-verified.
+mutually exclusive. `--robot-status` and `--robot-snapshot` read the same
+source-verified durable observation for their work counts and rows, without
+changing their schemas.

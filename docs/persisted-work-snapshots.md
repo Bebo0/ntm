@@ -49,11 +49,20 @@ reservation gates are still mandatory before dispatch.
 
 ## Current integration boundary
 
-This increment makes persistence and read-time verification reachable through
-`ntm work-snapshot` and `adapters.CollectDurableWork`. Existing `--robot-status`,
-`--robot-snapshot` and raw `RuntimeWork` inspection consumers are NOT migrated
-by this commit. The prepared follow-on integration patch for those consumers
-remains separate. The command does not claim their row-based results are safe.
+Persistence and read-time verification are reachable through
+`ntm work-snapshot`, `adapters.CollectDurableWork`, and the robot surfaces.
+The projection refresh that runs before each robot command publishes the work
+it collected and verified (`adapters.PublishDurableWork`). `--robot-snapshot`
+(its `work`, `beads_summary` and `summary.ready_work`) and projection-backed
+`--robot-status` then read work only through `CollectDurableWork`, which
+restores and re-verifies that observation instead of collecting again.
+
+When the cached observation no longer matches the tracker or checkout, these
+surfaces take one new verified observation. Anything else that cannot be
+verified is reported as unavailable work with its reason and no ready beads.
+The age-only `RuntimeWork` rows are never served as work. They remain only for
+the single-bead `--robot-inspect` view, and a blocked bead is never stored there
+as an unblocked row.
 
 Focused tests cover real serialized source evidence and SQLite close/reopen,
 project isolation, rollback, late writers, cancellation, expiry, corruption,

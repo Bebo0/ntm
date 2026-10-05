@@ -114,9 +114,10 @@ Reservation evidence is marked `not_checked` in this mode.
 
 ## Scope
 
-This change covers live adapter collection. Persisted SQLite `RuntimeWork`
-readers still need source-receipt storage and read-time validation; the receipt
-is not a claim that those readers are already protected. Active assignment-ledger
+This change covers live adapter collection. The robot snapshot and status no
+longer read work from the persisted `RuntimeWork` rows; they read the
+source-verified durable observation (see `persisted-work-snapshots.md`). The
+rows still back the single-bead `--robot-inspect` view only. Active assignment-ledger
 barriers are not imported into this filter. Reservation evidence is connected
 only to the live adapter, not the BV planning API. Strict policy fields are Go
 adapter options, not new CLI flags. Final atomic claim and reservation gates

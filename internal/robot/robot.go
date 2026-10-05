@@ -44,6 +44,7 @@ import (
 	"github.com/Dicklesworthstone/ntm/internal/tools"
 	"github.com/Dicklesworthstone/ntm/internal/tracker"
 	"github.com/Dicklesworthstone/ntm/internal/util"
+	"github.com/Dicklesworthstone/ntm/internal/worksource"
 )
 
 // CASSStatusOutput represents the output for --robot-cass-status
@@ -2429,10 +2430,6 @@ func buildProjectionBackedStatus(store *state.Store, cfg *config.Config, opts Pa
 		agentsBySession[sess.Name] = agents
 	}
 
-	workRows, err := store.ListFreshRuntimeWork("", 0)
-	if err != nil {
-		return nil, fmt.Errorf("status work: %w", err)
-	}
 	coordinationRows, err := store.ListFreshRuntimeCoordination("")
 	if err != nil {
 		return nil, fmt.Errorf("status coordination: %w", err)
@@ -2475,15 +2472,17 @@ func buildProjectionBackedStatus(store *state.Store, cfg *config.Config, opts Pa
 		}
 	}
 
-	for _, item := range workRows {
-		switch item.Status {
-		case "in_progress":
-			output.Summary.InProgress++
-		case "open":
-			if item.BlockedByCount == 0 {
-				output.Summary.ReadyWork++
-			}
-		}
+	// Work counts come only from a source-verified observation; unverifiable
+	// work reports none (GH #283). A failing work source is already named in
+	// the source-health rows the refresh records.
+	projectDir, err := resolveNormalizedProjectDir("")
+	if err != nil {
+		return nil, fmt.Errorf("status work: %w", err)
+	}
+	work := verifiedRobotWork(store, projectDir, 0)
+	if work.Available {
+		output.Summary.ReadyWork = work.Summary.Ready
+		output.Summary.InProgress = work.Summary.InProgress
 	}
 
 	for _, item := range coordinationRows {
@@ -5104,9 +5103,7 @@ func GetSnapshotWithOptions(cfg *config.Config, opts PaginationOptions) (*Snapsh
 		output.Alerts = append(output.Alerts, fmt.Sprintf("failed to list active incidents: %v", err))
 	}
 	if store := currentProjectionStore(); store != nil {
-		if workRows, err := store.ListFreshRuntimeWork("", 0); err == nil {
-			output.Work = snapshotWorkFromRuntime(workRows, BeadLimit)
-		}
+		output.Work = verifiedRobotWork(store, projectKey, BeadLimit)
 		if rows, err := store.GetAllSourceHealth(); err == nil {
 			applySnapshotSourceHealth(output, rows)
 		}
@@ -5143,9 +5140,7 @@ func buildProjectionBackedSnapshot(
 		return nil, err
 	}
 	output.Sessions = sessions
-	if workRows, err := store.ListFreshRuntimeWork("", 0); err == nil {
-		output.Work = snapshotWorkFromRuntime(workRows, BeadLimit)
-	}
+	output.Work = verifiedRobotWork(store, projectKey, BeadLimit)
 	if rows, err := store.GetAllSourceHealth(); err == nil {
 		applySnapshotSourceHealth(output, rows)
 	}
@@ -5182,11 +5177,7 @@ func buildProjectionBackedSnapshot(
 
 	output.Swarm = buildSwarmSnapshot(cfg, tmuxSessions)
 
-	if beads, err := snapshotBeadsSummaryFromRuntime(store, projectKey, BeadLimit); err == nil {
-		output.BeadsSummary = beads
-	} else if beads := bv.GetBeadsSummary("", BeadLimit); beads != nil {
-		output.BeadsSummary = beads
-	}
+	output.BeadsSummary = beadsSummaryFromWork(output.Work, projectKey, BeadLimit)
 
 	toolCtx, toolCancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer toolCancel()
@@ -5412,54 +5403,68 @@ func snapshotCoordinationFromRuntime(rows []state.RuntimeCoordination, handoff *
 	return summary
 }
 
-func snapshotWorkFromRuntime(rows []state.RuntimeWork, limit int) *adapters.WorkSection {
-	section := &adapters.WorkSection{
-		Ready:      []adapters.WorkItem{},
-		Blocked:    []adapters.WorkItem{},
-		InProgress: []adapters.WorkItem{},
-		Summary:    &adapters.WorkSummary{},
-		Available:  len(rows) > 0,
-	}
-	if len(rows) == 0 {
-		section.Reason = "runtime projection empty"
-		return section
-	}
+// robotWorkTimeout bounds the verified work read behind a snapshot or status.
+const robotWorkTimeout = 10 * time.Second
 
-	appendCapped := func(items []adapters.WorkItem, item adapters.WorkItem) []adapters.WorkItem {
-		if limit > 0 && len(items) >= limit {
-			return items
+// collectRobotWork is the verified work read behind verifiedRobotWork. It is a
+// seam so tests never read the tracker of the repository they run in.
+var collectRobotWork = adapters.CollectDurableWork
+
+// verifiedRobotWork is the project's work as the robot snapshot and status
+// report it: only a source-verified observation (adapters.CollectDurableWork),
+// never the RuntimeWork rows, which are fresh by age alone, carry no source
+// identity, and so could advertise work the tracker no longer has as ready
+// (GH #283).
+//
+// The projection refresh that precedes every robot command publishes its own
+// verified collection, so this is normally a re-verified read of that
+// observation. If the tracker or checkout has moved on since, one new verified
+// observation is taken: the old one is stale, not wrong to replace. Anything
+// still unverifiable is reported unavailable with its reason and no ready
+// work, never filled in from rows.
+func verifiedRobotWork(store *state.Store, projectDir string, limit int) *adapters.WorkSection {
+	ctx, cancel := context.WithTimeout(context.Background(), robotWorkTimeout)
+	defer cancel()
+
+	var work *adapters.WorkSection
+	err := errors.New("work projection store unavailable")
+	if store != nil {
+		cfg := adapters.DefaultWorkCoordinationAdapterConfig(projectDir)
+		if limit > 0 {
+			cfg.WorkItemLimit = limit
 		}
-		return append(items, item)
-	}
-
-	for _, row := range rows {
-		section.Summary.Total++
-		item := snapshotWorkItemFromRuntime(row)
-		switch row.Status {
-		case "open":
-			section.Summary.Open++
-			if row.BlockedByCount > 0 {
-				section.Summary.Blocked++
-				section.Blocked = appendCapped(section.Blocked, item)
-				continue
-			}
-			section.Summary.Ready++
-			section.Ready = appendCapped(section.Ready, item)
-		case "in_progress":
-			section.Summary.InProgress++
-			section.InProgress = appendCapped(section.InProgress, item)
-		case "closed":
-			section.Summary.Closed++
-		default:
-			section.Summary.Open++
-			if row.BlockedByCount > 0 {
-				section.Summary.Blocked++
-				section.Blocked = appendCapped(section.Blocked, item)
-			}
+		work, err = collectRobotWork(ctx, store, cfg, false)
+		if err != nil && errors.Is(err, worksource.ErrStale) && ctx.Err() == nil {
+			work, err = collectRobotWork(ctx, store, cfg, true)
 		}
 	}
-
-	return section
+	if work == nil {
+		work = &adapters.WorkSection{}
+	}
+	if err != nil {
+		work.Available = false
+		work.Ready = nil
+		if work.Summary != nil {
+			work.Summary.Ready = 0
+		}
+		if work.Reason == "" {
+			work.Reason = err.Error()
+		}
+	}
+	// Critical arrays are always present, empty when there is nothing.
+	if work.Ready == nil {
+		work.Ready = []adapters.WorkItem{}
+	}
+	if work.Blocked == nil {
+		work.Blocked = []adapters.WorkItem{}
+	}
+	if work.InProgress == nil {
+		work.InProgress = []adapters.WorkItem{}
+	}
+	if work.Summary == nil {
+		work.Summary = &adapters.WorkSummary{}
+	}
+	return work
 }
 
 func snapshotWorkItemFromRuntime(row state.RuntimeWork) adapters.WorkItem {
@@ -5612,65 +5617,49 @@ func buildProjectionBackedSnapshotSessions(store *state.Store, tmuxSessions []tm
 	return output, nil
 }
 
-func snapshotBeadsSummaryFromRuntime(store *state.Store, projectKey string, limit int) (*bv.BeadsSummary, error) {
-	if store == nil {
-		return nil, fmt.Errorf("snapshot beads summary store unavailable")
-	}
-	if limit < 0 {
-		limit = 0
-	}
-
-	rows, err := store.ListFreshRuntimeWork("", 0)
-	if err != nil {
-		return nil, fmt.Errorf("snapshot beads summary: %w", err)
-	}
-
+// beadsSummaryFromWork renders the snapshot's beads summary from the same
+// verified work section the snapshot reports, so the two can never disagree
+// and neither is derived from unverified RuntimeWork rows (GH #283).
+func beadsSummaryFromWork(work *adapters.WorkSection, projectKey string, limit int) *bv.BeadsSummary {
 	summary := &bv.BeadsSummary{
-		Available:      true,
 		Project:        strings.TrimSpace(projectKey),
 		ReadyPreview:   []bv.BeadPreview{},
 		InProgressList: []bv.BeadInProgress{},
 	}
-	for _, row := range rows {
-		summary.Total++
-		switch row.Status {
-		case "open":
-			summary.Open++
-			if row.BlockedByCount > 0 {
-				summary.Blocked++
-				continue
-			}
-			summary.Ready++
-			if limit == 0 || len(summary.ReadyPreview) < limit {
-				summary.ReadyPreview = append(summary.ReadyPreview, bv.BeadPreview{
-					ID:       row.BeadID,
-					Title:    row.Title,
-					Priority: fmt.Sprintf("P%d", row.Priority),
-				})
-			}
-		case "in_progress":
-			summary.InProgress++
-			if limit == 0 || len(summary.InProgressList) < limit {
-				item := bv.BeadInProgress{
-					ID:       row.BeadID,
-					Title:    row.Title,
-					Assignee: row.Assignee,
-				}
-				if row.ClaimedAt != nil && !row.ClaimedAt.IsZero() {
-					item.UpdatedAt = *row.ClaimedAt
-				}
-				summary.InProgressList = append(summary.InProgressList, item)
-			}
-		case "closed":
-			summary.Closed++
-		default:
-			if row.BlockedByCount > 0 {
-				summary.Blocked++
-			}
+	if work == nil || !work.Available {
+		summary.Reason = "work source unverified"
+		if work != nil && work.Reason != "" {
+			summary.Reason = work.Reason
 		}
+		return summary
 	}
-
-	return summary, nil
+	summary.Available = true
+	if s := work.Summary; s != nil {
+		summary.Total, summary.Open, summary.InProgress = s.Total, s.Open, s.InProgress
+		summary.Blocked, summary.Ready, summary.Closed = s.Blocked, s.Ready, s.Closed
+	}
+	for _, item := range work.Ready {
+		if limit > 0 && len(summary.ReadyPreview) >= limit {
+			break
+		}
+		summary.ReadyPreview = append(summary.ReadyPreview, bv.BeadPreview{
+			ID:       item.ID,
+			Title:    item.Title,
+			Priority: fmt.Sprintf("P%d", item.Priority),
+			Type:     item.Type,
+		})
+	}
+	for _, item := range work.InProgress {
+		if limit > 0 && len(summary.InProgressList) >= limit {
+			break
+		}
+		entry := bv.BeadInProgress{ID: item.ID, Title: item.Title, Assignee: item.Assignee}
+		if updated, err := time.Parse(time.RFC3339, item.UpdatedAt); err == nil {
+			entry.UpdatedAt = updated
+		}
+		summary.InProgressList = append(summary.InProgressList, entry)
+	}
+	return summary
 }
 
 func buildProjectionAgentMailPaneMap(store *state.Store, tmuxSessions []tmux.Session) (map[string]string, error) {
@@ -8009,6 +7998,17 @@ func RefreshNormalizedProjection(ctx context.Context, store *state.Store, projec
 	}
 
 	publishNormalizedAttentionSignals(GetAttentionFeed(), store, sessionName, signals)
+
+	// The work just collected is source-verified. Publish it as the project's
+	// durable observation so the snapshot and status that follow read it back
+	// (re-verified) instead of collecting again. RuntimeWork rows carry no
+	// source identity and are never served as work (GH #283). Unavailable work
+	// (no tracker here, br failing) is published as a marker and reported by
+	// the readers; it is not a refresh failure.
+	err = adapters.PublishDurableWork(ctx, store, adapters.DefaultWorkCoordinationAdapterConfig(resolvedProjectDir), signals.Work)
+	if err != nil && !errors.Is(err, adapters.ErrWorkSnapshotUnavailable) {
+		return fmt.Errorf("publish durable work: %w", err)
+	}
 	return nil
 }
 
@@ -8727,6 +8727,12 @@ func buildRuntimeWorkRows(section *adapters.WorkSection, collectedAt, staleAfter
 	}
 	for _, item := range section.Blocked {
 		assign(item, normalizedProjectionWorkStatus)
+		// A blocked bead's blocker IDs come from triage, which may not list
+		// it. It is still blocked: stored as an open row with no blockers, it
+		// would read back as ready (GH #283 field case a).
+		if row := rows[strings.TrimSpace(item.ID)]; row != nil && row.Status == normalizedProjectionWorkStatus && row.BlockedByCount == 0 {
+			row.BlockedByCount = 1
+		}
 	}
 	for _, item := range section.InProgress {
 		assign(item, normalizedProjectionInProgStatus)

@@ -27,6 +27,7 @@ import (
 	"github.com/Dicklesworthstone/ntm/internal/robot/adapters"
 	"github.com/Dicklesworthstone/ntm/internal/state"
 	"github.com/Dicklesworthstone/ntm/internal/tmux"
+	"github.com/Dicklesworthstone/ntm/internal/worksource"
 	"github.com/Dicklesworthstone/ntm/tests/testutil"
 )
 
@@ -166,11 +167,27 @@ func hermeticGlobalConfig(t *testing.T) {
 	t.Setenv("NTM_CONFIG", path)
 }
 
+// errNoTestWorkSource is what the snapshot and status work read returns in
+// this package unless a test installs its own: tests run inside a repository
+// whose real tracker they must never read.
+var errNoTestWorkSource = errors.New("test: no work source installed")
+
+// stubRobotWork replaces the verified work read for one test.
+func stubRobotWork(t *testing.T, collect func(ctx context.Context, store *state.Store, cfg adapters.WorkCoordinationAdapterConfig, refresh bool) (*adapters.WorkSection, error)) {
+	t.Helper()
+	previous := collectRobotWork
+	collectRobotWork = collect
+	t.Cleanup(func() { collectRobotWork = previous })
+}
+
 func TestMain(m *testing.M) {
 	cleanupTmux, err := testutil.IsolateTmuxTestProcess()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "isolate robot tmux tests: %v\n", err)
 		os.Exit(1)
+	}
+	collectRobotWork = func(context.Context, *state.Store, adapters.WorkCoordinationAdapterConfig, bool) (*adapters.WorkSection, error) {
+		return nil, errNoTestWorkSource
 	}
 	code := m.Run()
 	if err := cleanupTmux(); err != nil {
@@ -2637,6 +2654,13 @@ func TestGetStatusWithProjectionStoreUsesRuntimeProjection(t *testing.T) {
 		t.Fatalf("UpsertSourceHealth: %v", err)
 	}
 
+	// Sessions, mail and handoff come from the projection; work counts come
+	// only from the verified observation, which here disagrees with the
+	// seeded RuntimeWork rows (1 ready, 1 in progress) on purpose (GH #283).
+	stubRobotWork(t, func(context.Context, *state.Store, adapters.WorkCoordinationAdapterConfig, bool) (*adapters.WorkSection, error) {
+		return &adapters.WorkSection{Available: true, Summary: &adapters.WorkSummary{Ready: 0, InProgress: 2}}, nil
+	})
+
 	result, err := GetStatusWithOptions(PaginationOptions{})
 	if err != nil {
 		t.Fatalf("GetStatusWithOptions: %v", err)
@@ -2648,11 +2672,11 @@ func TestGetStatusWithProjectionStoreUsesRuntimeProjection(t *testing.T) {
 	if result.SchemaID != defaultRobotSchemaID("status") {
 		t.Fatalf("SchemaID = %q, want %q", result.SchemaID, defaultRobotSchemaID("status"))
 	}
-	if result.Summary.ReadyWork != 1 {
-		t.Fatalf("Summary.ReadyWork = %d, want 1", result.Summary.ReadyWork)
+	if result.Summary.ReadyWork != 0 {
+		t.Fatalf("Summary.ReadyWork = %d, want 0 from the verified observation, not the row", result.Summary.ReadyWork)
 	}
-	if result.Summary.InProgress != 1 {
-		t.Fatalf("Summary.InProgress = %d, want 1", result.Summary.InProgress)
+	if result.Summary.InProgress != 2 {
+		t.Fatalf("Summary.InProgress = %d, want 2 from the verified observation", result.Summary.InProgress)
 	}
 	if result.Summary.MailUnread != 3 {
 		t.Fatalf("Summary.MailUnread = %d, want 3", result.Summary.MailUnread)
@@ -3230,70 +3254,21 @@ func TestBuildProjectionAgentMailPaneMapUsesRuntimeProjection(t *testing.T) {
 	}
 }
 
-func TestSnapshotBeadsSummaryFromRuntime(t *testing.T) {
+func TestBeadsSummaryFromWork(t *testing.T) {
 	tmpDir := t.TempDir()
-	store, err := state.Open(filepath.Join(tmpDir, "state.db"))
-	if err != nil {
-		t.Fatalf("Open store: %v", err)
-	}
-	if err := store.Migrate(); err != nil {
-		t.Fatalf("Migrate store: %v", err)
-	}
-	t.Cleanup(func() {
-		_ = store.Close()
-	})
-
-	now := time.Now().UTC()
-	claimedAt := now.Add(-10 * time.Minute)
-	staleAfter := now.Add(time.Hour)
-	for _, item := range []state.RuntimeWork{
-		{
-			BeadID:         "bd-ready",
-			Title:          "Ready bead",
-			Status:         "open",
-			Priority:       1,
-			BlockedByCount: 0,
-			CollectedAt:    now,
-			StaleAfter:     staleAfter,
-		},
-		{
-			BeadID:         "bd-blocked",
-			Title:          "Blocked bead",
-			Status:         "open",
-			Priority:       2,
-			BlockedByCount: 2,
-			CollectedAt:    now,
-			StaleAfter:     staleAfter,
-		},
-		{
-			BeadID:      "bd-active",
-			Title:       "Active bead",
-			Status:      "in_progress",
-			Priority:    1,
-			Assignee:    "BlueLake",
-			ClaimedAt:   &claimedAt,
-			CollectedAt: now,
-			StaleAfter:  staleAfter,
-		},
-		{
-			BeadID:      "bd-closed",
-			Title:       "Closed bead",
-			Status:      "closed",
-			Priority:    3,
-			CollectedAt: now,
-			StaleAfter:  staleAfter,
-		},
-	} {
-		item := item
-		if err := store.UpsertRuntimeWork(&item); err != nil {
-			t.Fatalf("UpsertRuntimeWork(%s): %v", item.BeadID, err)
-		}
+	claimedAt := time.Now().UTC().Add(-10 * time.Minute).Truncate(time.Second)
+	work := &adapters.WorkSection{
+		Available: true,
+		Ready:     []adapters.WorkItem{{ID: "bd-ready", Title: "Ready bead", Priority: 1}},
+		Blocked:   []adapters.WorkItem{{ID: "bd-blocked", Title: "Blocked bead", Priority: 2}},
+		InProgress: []adapters.WorkItem{{
+			ID: "bd-active", Title: "Active bead", Priority: 1, Assignee: "BlueLake",
+			UpdatedAt: claimedAt.Format(time.RFC3339),
+		}},
+		Summary: &adapters.WorkSummary{Total: 4, Open: 2, Ready: 1, Blocked: 1, InProgress: 1, Closed: 1},
 	}
 
-	summary, err := snapshotBeadsSummaryFromRuntime(store, tmpDir, 5)
-	if err != nil {
-		t.Fatalf("snapshotBeadsSummaryFromRuntime: %v", err)
-	}
+	summary := beadsSummaryFromWork(work, tmpDir, 5)
 	if !summary.Available || summary.Project != tmpDir {
 		t.Fatalf("Summary availability/project = %+v", summary)
 	}
@@ -3308,6 +3283,12 @@ func TestSnapshotBeadsSummaryFromRuntime(t *testing.T) {
 	}
 	if !summary.InProgressList[0].UpdatedAt.Equal(claimedAt) {
 		t.Fatalf("InProgressList UpdatedAt = %v, want %v", summary.InProgressList[0].UpdatedAt, claimedAt)
+	}
+
+	// Unverified work is an unavailable summary with its reason, never counts.
+	unverified := beadsSummaryFromWork(&adapters.WorkSection{Available: false, Reason: "STALE_WORK_COORDINATION: tracker changed"}, tmpDir, 5)
+	if unverified.Available || unverified.Ready != 0 || len(unverified.ReadyPreview) != 0 || unverified.Reason != "STALE_WORK_COORDINATION: tracker changed" {
+		t.Fatalf("unverified summary = %+v, want unavailable with the work's reason and no ready beads", unverified)
 	}
 }
 
@@ -3418,63 +3399,193 @@ func TestSnapshotCoordinationFromRuntime(t *testing.T) {
 	}
 }
 
-func TestSnapshotWorkFromRuntime(t *testing.T) {
+// The inspect view still renders one bead from its RuntimeWork row.
+func TestSnapshotWorkItemFromRuntime(t *testing.T) {
 	now := time.Now().UTC()
 	claimed := now.Add(-5 * time.Minute)
-	section := snapshotWorkFromRuntime([]state.RuntimeWork{
-		{
-			BeadID:          "bd-ready",
-			Title:           "Ready bead",
-			TitleDisclosure: `{"disclosure_state":"visible"}`,
-			Status:          "open",
-			Priority:        1,
-			BeadType:        "task",
-			Labels:          `["robot-redesign","snapshot"]`,
-			UnblocksCount:   2,
-			Score:           func() *float64 { value := 7.5; return &value }(),
-			CollectedAt:     now,
-			StaleAfter:      now.Add(time.Hour),
-		},
-		{
-			BeadID:         "bd-blocked",
-			Title:          "Blocked bead",
-			Status:         "open",
-			Priority:       2,
-			BlockedByCount: 1,
-			CollectedAt:    now,
-			StaleAfter:     now.Add(time.Hour),
-		},
-		{
-			BeadID:      "bd-active",
-			Title:       "Active bead",
-			Status:      "in_progress",
-			Assignee:    "BlueLake",
-			ClaimedAt:   &claimed,
-			CollectedAt: now,
-			StaleAfter:  now.Add(time.Hour),
-		},
-	}, 5)
+	item := snapshotWorkItemFromRuntime(state.RuntimeWork{
+		BeadID:          "bd-ready",
+		Title:           "Ready bead",
+		TitleDisclosure: `{"disclosure_state":"visible"}`,
+		Status:          "open",
+		Priority:        1,
+		BeadType:        "task",
+		Labels:          `["robot-redesign","snapshot"]`,
+		UnblocksCount:   2,
+		Assignee:        "BlueLake",
+		ClaimedAt:       &claimed,
+		Score:           func() *float64 { value := 7.5; return &value }(),
+		CollectedAt:     now,
+		StaleAfter:      now.Add(time.Hour),
+	})
 
-	if section == nil || !section.Available || section.Summary == nil {
-		t.Fatalf("Work section = %+v, want available summary", section)
+	if item.ID != "bd-ready" || item.Title != "Ready bead" || item.Priority != 1 || item.Type != "task" || item.Assignee != "BlueLake" {
+		t.Fatalf("item = %+v", item)
 	}
-	if section.Summary.Total != 3 || section.Summary.Ready != 1 || section.Summary.Blocked != 1 || section.Summary.InProgress != 1 {
-		t.Fatalf("Work summary = %+v", section.Summary)
+	if item.TitleDisclosure == nil || item.TitleDisclosure.DisclosureState != "visible" {
+		t.Fatalf("title disclosure = %+v", item.TitleDisclosure)
 	}
-	if len(section.Ready) != 1 || section.Ready[0].ID != "bd-ready" {
-		t.Fatalf("Ready items = %+v", section.Ready)
+	if len(item.Labels) != 2 || item.Unblocks != 2 || item.Score == nil || *item.Score != 7.5 {
+		t.Fatalf("item detail = %+v", item)
 	}
-	if len(section.Blocked) != 1 || section.Blocked[0].ID != "bd-blocked" {
-		t.Fatalf("Blocked items = %+v", section.Blocked)
+	if item.UpdatedAt != claimed.UTC().Format(time.RFC3339) {
+		t.Fatalf("UpdatedAt = %q, want the claim time", item.UpdatedAt)
 	}
-	if len(section.InProgress) != 1 || section.InProgress[0].ID != "bd-active" || section.InProgress[0].Assignee != "BlueLake" {
-		t.Fatalf("InProgress items = %+v", section.InProgress)
+}
+
+// The projection refresh that precedes every robot command publishes the
+// work it verified, so the snapshot's verified read restores that observation
+// instead of running br and bv a second time. Agent Mail is down here: the
+// read must still succeed, with reservation evidence reported unavailable.
+func TestRefreshPublishesVerifiedWorkForTheNextRead(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("tool fixtures require /bin/sh")
 	}
-	if section.Ready[0].TitleDisclosure == nil || section.Ready[0].TitleDisclosure.DisclosureState != "visible" {
-		t.Fatalf("Ready title disclosure = %+v", section.Ready[0].TitleDisclosure)
+	project, bin := t.TempDir(), t.TempDir()
+	if err := os.Mkdir(filepath.Join(project, ".beads"), 0o700); err != nil {
+		t.Fatal(err)
 	}
-	if len(section.Ready[0].Labels) != 2 || section.Ready[0].Unblocks != 2 || section.Ready[0].Score == nil || *section.Ready[0].Score != 7.5 {
-		t.Fatalf("Ready item detail = %+v", section.Ready[0])
+	if err := os.WriteFile(filepath.Join(project, ".beads", "issues.jsonl"), []byte("{\"id\":\"a\",\"status\":\"open\"}\n{\"id\":\"b\",\"status\":\"open\"}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	calls := filepath.Join(bin, "calls")
+	br := `#!/bin/sh
+echo br >> "` + calls + `"
+case "$*" in
+ *stats*) printf '%s\n' '{"summary":{"total_issues":2,"open_issues":2,"in_progress_issues":0,"blocked_issues":0,"ready_issues":2,"closed_issues":0}}' ;;
+ *ready*) printf '%s\n' '[{"id":"a","title":"Task A","priority":2},{"id":"b","title":"Task B","priority":2}]' ;;
+ *) printf '%s\n' '[]' ;;
+esac
+`
+	bvScript := "#!/bin/sh\necho bv >> \"" + calls + "\"\nprintf '%s\\n' '{\"triage\":{\"recommendations\":[]}}'\n"
+	for name, script := range map[string]string{"br": br, "bv": bvScript} {
+		if err := os.WriteFile(filepath.Join(bin, name), []byte(script), 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	t.Setenv("NTM_CONFIG", filepath.Join(t.TempDir(), "config.toml"))
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("AGENT_MAIL_URL", "http://127.0.0.1:1/mcp/")
+	t.Setenv("AGENT_MAIL_TOKEN", "")
+	bv.InvalidateTriageCache()
+	t.Cleanup(bv.InvalidateTriageCache)
+	countCalls := func() int {
+		data, _ := os.ReadFile(calls)
+		return strings.Count(string(data), "\n")
+	}
+
+	store := newProjectionTestStore(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	if err := RefreshNormalizedProjection(ctx, store, project, ""); err != nil {
+		t.Fatalf("RefreshNormalizedProjection: %v", err)
+	}
+	refreshCalls := countCalls()
+	if refreshCalls == 0 {
+		t.Fatal("refresh never ran the tracker tools")
+	}
+
+	work, err := adapters.CollectDurableWork(ctx, store, adapters.DefaultWorkCoordinationAdapterConfig(project), false)
+	if err != nil || work == nil || !work.Available || work.Verification == nil || !work.Verification.FromCache {
+		t.Fatalf("read after refresh = %+v, %v; want the published observation from cache", work, err)
+	}
+	if work.Summary == nil || work.Summary.Ready != 2 {
+		t.Fatalf("summary = %+v, want both open beads ready", work.Summary)
+	}
+	if got := countCalls(); got != refreshCalls {
+		t.Fatalf("tracker tools ran %d more time(s) after the refresh; the read must restore, not recollect", got-refreshCalls)
+	}
+}
+
+// GH #283 field case (b): RuntimeWork rows are fresh by age alone. Rows that
+// still advertise a ready bead must not reach the snapshot, its beads summary
+// or its ready_work count once the verified read cannot vouch for them.
+func TestSnapshotNeverServesUnverifiedRuntimeWorkRows(t *testing.T) {
+	store := newProjectionTestStore(t)
+	now := time.Now().UTC()
+	if err := store.UpsertRuntimeWork(&state.RuntimeWork{
+		BeadID: "bd-gone", Title: "Closed since the row was written", Status: "open",
+		CollectedAt: now, StaleAfter: now.Add(time.Hour),
+	}); err != nil {
+		t.Fatalf("UpsertRuntimeWork: %v", err)
+	}
+	stubRobotWork(t, func(context.Context, *state.Store, adapters.WorkCoordinationAdapterConfig, bool) (*adapters.WorkSection, error) {
+		return nil, &worksource.StaleError{Reason: "tracker changed during source capture"}
+	})
+
+	output, err := buildProjectionBackedSnapshot(store, config.Default(), PaginationOptions{}, newSnapshotOutput(config.Default()), nil, t.TempDir())
+	if err != nil {
+		t.Fatalf("buildProjectionBackedSnapshot: %v", err)
+	}
+	snapshotFinalize(output, PaginationOptions{})
+	if output.Work == nil || output.Work.Available || len(output.Work.Ready) != 0 || output.Work.Reason == "" {
+		t.Fatalf("work = %+v, want unavailable with a reason and no ready rows", output.Work)
+	}
+	if output.BeadsSummary == nil || output.BeadsSummary.Available || len(output.BeadsSummary.ReadyPreview) != 0 {
+		t.Fatalf("beads summary = %+v, want unavailable with no ready preview", output.BeadsSummary)
+	}
+	if output.Summary.ReadyWork != 0 {
+		t.Fatalf("summary.ready_work = %d, want 0: the only ready row is unverified", output.Summary.ReadyWork)
+	}
+}
+
+// A cached observation the tracker has moved past is stale, not unusable: one
+// new verified observation replaces it.
+func TestVerifiedRobotWorkRecollectsOnceWhenTheSourceMovedOn(t *testing.T) {
+	store := newProjectionTestStore(t)
+	var refreshes []bool
+	stubRobotWork(t, func(_ context.Context, _ *state.Store, _ adapters.WorkCoordinationAdapterConfig, refresh bool) (*adapters.WorkSection, error) {
+		refreshes = append(refreshes, refresh)
+		if !refresh {
+			return nil, &worksource.StaleError{Reason: "cached work source no longer matches"}
+		}
+		return &adapters.WorkSection{Available: true, Ready: []adapters.WorkItem{{ID: "bd-1"}}, Summary: &adapters.WorkSummary{Ready: 1}}, nil
+	})
+
+	work := verifiedRobotWork(store, t.TempDir(), 5)
+	if fmt.Sprint(refreshes) != "[false true]" {
+		t.Fatalf("reads = %v, want a cached read then one refresh", refreshes)
+	}
+	if !work.Available || len(work.Ready) != 1 || work.Summary.Ready != 1 {
+		t.Fatalf("work = %+v, want the recollected observation", work)
+	}
+}
+
+// Anything other than a moved-on source is not retried: it is reported.
+func TestVerifiedRobotWorkReportsOtherFailuresWithoutRetrying(t *testing.T) {
+	store := newProjectionTestStore(t)
+	calls := 0
+	stubRobotWork(t, func(context.Context, *state.Store, adapters.WorkCoordinationAdapterConfig, bool) (*adapters.WorkSection, error) {
+		calls++
+		return nil, errors.New("br stats failed: database is locked")
+	})
+
+	work := verifiedRobotWork(store, t.TempDir(), 5)
+	if calls != 1 || work.Available || work.Reason != "br stats failed: database is locked" {
+		t.Fatalf("calls = %d work = %+v, want one read reported unavailable with its reason", calls, work)
+	}
+	if work.Ready == nil || work.Blocked == nil || work.InProgress == nil || work.Summary == nil {
+		t.Fatalf("work = %+v, want every critical array present", work)
+	}
+}
+
+// GH #283 field case (a): a blocked bead triage did not list arrives without
+// blocker IDs. Its row must still read back as blocked, not ready.
+func TestRuntimeWorkRowsKeepBlockedBeadsBlocked(t *testing.T) {
+	now := time.Now().UTC()
+	rows := buildRuntimeWorkRows(&adapters.WorkSection{
+		Ready:   []adapters.WorkItem{{ID: "bd-ready"}},
+		Blocked: []adapters.WorkItem{{ID: "bd-blocked-untriaged"}, {ID: "bd-blocked", BlockedBy: []string{"a", "b"}}},
+	}, now, now.Add(time.Hour))
+
+	if got := rows["bd-ready"].BlockedByCount; got != 0 {
+		t.Errorf("ready row BlockedByCount = %d, want 0", got)
+	}
+	if got := rows["bd-blocked-untriaged"].BlockedByCount; got < 1 {
+		t.Errorf("untriaged blocked row BlockedByCount = %d, want at least 1", got)
+	}
+	if got := rows["bd-blocked"].BlockedByCount; got != 2 {
+		t.Errorf("blocked row BlockedByCount = %d, want its 2 known blockers", got)
 	}
 }
 

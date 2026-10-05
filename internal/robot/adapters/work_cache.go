@@ -62,6 +62,38 @@ func CollectDurableWork(ctx context.Context, store *state.Store, cfg WorkCoordin
 	return collectDurableWork(ctx, store, project, workSnapshotCollector{NewWorkCoordinationAdapter(cfg)}, refresh, time.Now)
 }
 
+// PublishDurableWork stores work that the caller already collected through
+// this adapter's verified Collect as the project's durable observation,
+// exactly as CollectDurableWork would after collecting it itself. A caller
+// that collects work for another purpose (the robot projection refresh) can
+// then serve the next durable read from that observation instead of a second
+// live collection. The read still re-verifies source, HEAD and reservations.
+// A nil or unavailable section is published as an unavailable marker, so a
+// newer failure still replaces an older healthy observation.
+func PublishDurableWork(ctx context.Context, store *state.Store, cfg WorkCoordinationAdapterConfig, work *WorkSection) error {
+	if ctx == nil || store == nil {
+		return errors.New("durable work publication requires a context and state store")
+	}
+	project, err := canonicalWorkSnapshotProject(cfg.ProjectDir)
+	if err != nil {
+		return &worksource.StaleError{Reason: "cannot resolve durable work project", Cause: err}
+	}
+	cfg.ProjectDir = project
+	_, err = collectDurableWork(ctx, store, project, collectedWork{NewWorkCoordinationAdapter(cfg), work}, true, time.Now)
+	return err
+}
+
+// collectedWork presents an already collected section as a collector, so
+// publication runs the one durable path rather than a copy of it.
+type collectedWork struct {
+	*WorkCoordinationAdapter
+	work *WorkSection
+}
+
+func (c collectedWork) Collect(context.Context) (*SignalBatch, error) {
+	return &SignalBatch{Work: c.work}, nil
+}
+
 func collectDurableWork(ctx context.Context, store *state.Store, project string, collector durableWorkCollector, refresh bool, now func() time.Time) (*WorkSection, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
