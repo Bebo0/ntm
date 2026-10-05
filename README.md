@@ -810,7 +810,7 @@ Important surfaces:
 
 - REST API under `/api/v1`
 - server-sent events at `/events`
-- WebSocket subscriptions at `/ws`
+- WebSocket subscriptions at `/api/v1/ws`
 - health check at `/health`
 - generated OpenAPI spec at [`docs/openapi.json`](docs/openapi.json)
 
@@ -856,8 +856,10 @@ Project-local assets live under `.ntm/` and override built-ins and user defaults
 - `.ntm/pipelines/`
 - `.ntm/personas.toml`
 - `.ntm/recipes.toml`
-- `.ntm/checkpoints/`
 - `.ntm/config.toml` for project-scoped settings such as additional assignment approval labels
+
+Checkpoints are per user, not per project: they live under
+`~/.local/share/ntm/checkpoints/<session>/`.
 
 Useful config commands:
 
