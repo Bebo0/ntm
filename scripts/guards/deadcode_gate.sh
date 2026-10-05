@@ -39,6 +39,13 @@
 #   - Test helpers in non-test files are reported dead (no -test): either move
 #     them into _test.go files or add a `# permanent: test-helper` entry
 #     naming the reaching test.
+#   - WS0-G2 claims (config.RegisterReader(key, fn)) take fn as a value, which
+#     keeps a reader nothing else calls reachable. Every claim lives in a
+#     liveness_claims*.go file constrained `//go:build !liveness_audit`, and
+#     the analysis builds with -tags liveness_audit, so a function alive only
+#     through its claim is reported dead (bd-ir0li). The placement check
+#     keeps that exclusion complete: a claim in any other file, or a claim
+#     file without the constraint, fails the gate.
 #   - Generated files: excluded by deadcode's generated-file handling.
 #
 # Mandatory canary (scripts/guards/testdata/deadcode_canary/, standalone
@@ -75,6 +82,32 @@ if [ -n "$shape_bad" ]; then
   exit 1
 fi
 
+# --- claim placement (keeps the liveness_audit exclusion complete) ----------
+# Comment lines and the registry itself (internal/config/liveness.go) are not
+# claims; test files never reach the analysis.
+stray_claims="$(grep -rnE --include='*.go' 'RegisterReader\(' internal cmd \
+  | grep -vE '^[^:]+_test\.go:|/liveness_claims[^/:]*\.go:|^internal/config/liveness\.go:' \
+  | grep -vE '^[^:]+:[0-9]+:[[:space:]]*//' || true)"
+if [ -n "$stray_claims" ]; then
+  echo "deadcode_gate: FAIL — config.RegisterReader claim outside a liveness_claims*.go file (the liveness_audit build would still see it, hiding claim-only readers):" >&2
+  printf '%s\n' "$stray_claims" | sed 's/^/  /' >&2
+  exit 1
+fi
+unconstrained=""
+for f in $(find internal cmd -name 'liveness_claims*.go' ! -name '*_test.go' | sort); do
+  constraint="$(grep -m1 '^//go:build ' "$f" || true)"
+  case "$constraint" in
+    *'||'*|'') unconstrained="$unconstrained $f" ;;
+    *'!liveness_audit'*) ;;
+    *) unconstrained="$unconstrained $f" ;;
+  esac
+done
+if [ -n "$unconstrained" ]; then
+  echo "deadcode_gate: FAIL — claim file(s) not excluded by -tags liveness_audit (want a '//go:build ... && !liveness_audit' line with no '||'):" >&2
+  printf '  %s\n' $unconstrained >&2
+  exit 1
+fi
+
 if ! command -v go >/dev/null 2>&1; then
   echo "deadcode_gate.sh: OK (format-side only: no Go toolchain here; full analysis runs in the reality-guards-go CI job)"
   exit 0
@@ -105,7 +138,7 @@ fi
 
 # --- multi-GOOS analysis, intersected ---------------------------------------
 for goos in $GOOS_LIST; do
-  if ! GOOS="$goos" GOARCH=amd64 "$tmp/deadcode" -filter "^${MODULE}/internal/" ./cmd/ntm > "$tmp/raw.$goos" 2>"$tmp/err.$goos"; then
+  if ! GOOS="$goos" GOARCH=amd64 "$tmp/deadcode" -tags liveness_audit -filter "^${MODULE}/internal/" ./cmd/ntm > "$tmp/raw.$goos" 2>"$tmp/err.$goos"; then
     echo "deadcode_gate: FAIL — deadcode analysis failed for GOOS=$goos:" >&2
     cat "$tmp/err.$goos" >&2
     exit 1
@@ -118,7 +151,7 @@ comm -12 "$tmp/norm.linux" "$tmp/norm.darwin" | comm -12 - "$tmp/norm.windows" >
 
 # --- orphan-package check (deadcode's whole-package blind spot) -------------
 comm -23 <(go list ./internal/... | sort) \
-         <(go list -deps ./cmd/ntm | grep "^${MODULE}/internal" | sort) \
+         <(go list -tags liveness_audit -deps ./cmd/ntm | grep "^${MODULE}/internal" | sort) \
   | sed "s|^${MODULE}/|pkg:|" >> "$tmp/dead.txt"
 
 # --- join violations with the allowlist's bead column, then ratchet ---------
