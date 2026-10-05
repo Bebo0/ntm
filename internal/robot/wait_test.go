@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/Dicklesworthstone/ntm/internal/config"
+	"github.com/Dicklesworthstone/ntm/internal/robot/adapters"
 	"github.com/Dicklesworthstone/ntm/internal/state"
 	"github.com/Dicklesworthstone/ntm/internal/tmux"
 )
@@ -366,15 +367,21 @@ func TestAttentionEventMatchesWaitCondition(t *testing.T) {
 			want: false,
 		},
 		{
-			name:      "context hot uses derived signal",
+			name:      "context hot fires on the context pressure producer",
 			condition: WaitConditionContextHot,
-			event: AttentionEvent{
+			event:     NewContextPressureAttentionEvent("proj", tmux.Pane{ID: "%1", Index: 1}, 95, 75),
+			want:      true,
+		},
+		{
+			name:      "context hot ignores other alerts that mention context usage",
+			condition: WaitConditionContextHot,
+			event: annotateAttentionSignal(AttentionEvent{
 				Type:    EventTypeAlertWarning,
-				Source:  "event_bus.context",
+				Source:  "adapter.work_coordination",
 				Summary: "context usage 95%",
 				Details: map[string]any{"usage_percent": 95.0},
-			},
-			want: true,
+			}),
+			want: false,
 		},
 		{
 			name:      "session changed uses lifecycle event",
@@ -393,31 +400,28 @@ func TestAttentionEventMatchesWaitCondition(t *testing.T) {
 			want: true,
 		},
 		{
-			name:      "reservation conflict uses conflict classifier",
+			name:      "reservation conflict fires on the coordination problem",
 			condition: WaitConditionReservationConflict,
-			event: AttentionEvent{
-				Type:   EventTypeFileConflict,
-				Source: "watcher.file_reservation",
-				Details: map[string]any{
-					"path":            "internal/robot/wait.go",
-					"holders":         []string{"BlueLake"},
-					"requestor_agent": "QuietSeal",
-				},
-			},
-			want: true,
+			event:     coordinationProblemAttentionEvent("reservation_conflict"),
+			want:      true,
 		},
 		{
-			name:      "file conflict uses conflict classifier",
+			name:      "reservation conflict ignores a file conflict",
+			condition: WaitConditionReservationConflict,
+			event:     coordinationProblemAttentionEvent("file_conflict"),
+			want:      false,
+		},
+		{
+			name:      "file conflict fires on the coordination problem",
 			condition: WaitConditionFileConflict,
-			event: AttentionEvent{
-				Type:   EventTypeFileConflict,
-				Source: "tracker.conflicts",
-				Details: map[string]any{
-					"path":   "internal/robot/wait.go",
-					"agents": []string{"BlueLake", "QuietSeal"},
-				},
-			},
-			want: true,
+			event:     coordinationProblemAttentionEvent("file_conflict"),
+			want:      true,
+		},
+		{
+			name:      "file conflict ignores a reservation conflict",
+			condition: WaitConditionFileConflict,
+			event:     coordinationProblemAttentionEvent("reservation_conflict"),
+			want:      false,
 		},
 		{
 			name:      "mail pending uses mail received events",
@@ -446,6 +450,66 @@ func TestAttentionEventMatchesWaitCondition(t *testing.T) {
 				t.Fatalf("attentionEventMatchesWaitCondition(%q, %#v) = %v, want %v", tt.condition, tt.event, got, tt.want)
 			}
 		})
+	}
+}
+
+// coordinationProblemAttentionEvent is what the projection refresh appends for a
+// work-coordination problem of the given kind.
+func coordinationProblemAttentionEvent(kind string) AttentionEvent {
+	event, _ := normalizedCoordinationProblemEvent(time.Now().UTC(), "proj", adapters.CoordinationProblem{
+		Kind:     kind,
+		Severity: "warning",
+		Summary:  kind + " on internal/robot/wait.go",
+		Agents:   []string{"BlueLake", "QuietSeal"},
+		Paths:    []string{"internal/robot/wait.go"},
+	})
+	return event
+}
+
+// --robot-wait wakes on the conflict and context-pressure events the live
+// producers append: the projection refresh and the internal monitor's context
+// check (bd-13qsw). Before, neither condition could match anything ntm wrote.
+func TestCheckAttentionConditions_LiveProducersSatisfyConflictAndContextHot(t *testing.T) {
+	_ = GetAttentionFeed()
+	oldFeed := PeekAttentionFeed()
+	feed := newWaitTestFeed(time.Hour)
+	SetAttentionFeed(feed)
+	defer SetAttentionFeed(oldFeed)
+
+	oldUsage := contextPressureUsage
+	contextPressureUsage = func(string, []tmux.Pane) map[string]float64 {
+		return map[string]float64{"%1": 82}
+	}
+	defer func() { contextPressureUsage = oldUsage }()
+
+	for _, condition := range []string{WaitConditionContextHot, WaitConditionReservationConflict} {
+		if result := checkAttentionConditions([]string{condition}, 0, "proj", ""); result != nil && result.Met {
+			t.Fatalf("%s met on an empty feed: %#v", condition, result)
+		}
+	}
+
+	publishNormalizedAttentionSignals(feed, nil, "proj", &adapters.AggregatedSignals{
+		CollectedAt: time.Now().UTC(),
+		Coordination: &adapters.CoordinationSection{Problems: []adapters.CoordinationProblem{{
+			Kind:     "reservation_conflict",
+			Severity: "warning",
+			Summary:  "internal/robot/*.go <-> internal/robot/wait.go",
+			Agents:   []string{"BlueLake", "QuietSeal"},
+			Paths:    []string{"internal/robot/wait.go"},
+		}}},
+	})
+	reservation := checkAttentionConditions([]string{WaitConditionReservationConflict}, 0, "proj", "")
+	if reservation == nil || !reservation.Met {
+		t.Fatalf("reservation_conflict not met by the projection's conflict event: %#v", reservation)
+	}
+
+	panes := []tmux.Pane{{ID: "%1", Index: 1, Title: "proj__cc_1"}, {ID: "%2", Index: 2, Title: "proj__cc_2"}}
+	if published := feed.PublishContextPressure("proj", panes, 75); len(published) != 1 {
+		t.Fatalf("PublishContextPressure published %d events, want 1 for the one pane over 75%%", len(published))
+	}
+	hot := checkAttentionConditions([]string{WaitConditionContextHot}, 0, "proj", "")
+	if hot == nil || !hot.Met || hot.TriggerEvent == nil || hot.TriggerEvent.Pane != 1 {
+		t.Fatalf("context_hot not met by pane 1's context pressure event: %#v", hot)
 	}
 }
 

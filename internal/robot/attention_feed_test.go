@@ -13,6 +13,7 @@ import (
 	"github.com/Dicklesworthstone/ntm/internal/integrations/pt"
 	"github.com/Dicklesworthstone/ntm/internal/robot/adapters"
 	"github.com/Dicklesworthstone/ntm/internal/state"
+	"github.com/Dicklesworthstone/ntm/internal/tmux"
 	"github.com/Dicklesworthstone/ntm/internal/tracker"
 )
 
@@ -34,16 +35,6 @@ func mustLoggedAttentionEvent(t *testing.T, event ntmevents.Event) AttentionEven
 	normalized, ok := NewLoggedAttentionEvent(event)
 	if !ok {
 		t.Fatalf("expected logged event %q to normalize", event.Type)
-	}
-	return normalized
-}
-
-func mustBusAttentionEvent(t *testing.T, event ntmevents.BusEvent) AttentionEvent {
-	t.Helper()
-
-	normalized, ok := NewBusAttentionEvent(event)
-	if !ok {
-		t.Fatalf("expected bus event %T to normalize", event)
 	}
 	return normalized
 }
@@ -2856,14 +2847,7 @@ func TestAttentionSignal_ContextHotThresholdBoundary(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			event := annotateAttentionSignal(AttentionEvent{
-				Session:       "proj",
-				Category:      EventCategoryAlert,
-				Type:          EventTypeAlertWarning,
-				Actionability: ActionabilityBackground,
-				Summary:       fmt.Sprintf("context usage %.1f%% for cc-1", tt.usagePercent),
-				Details:       map[string]any{"usage_percent": tt.usagePercent},
-			})
+			event := NewContextPressureAttentionEvent("proj", tmux.Pane{ID: "%1", Index: 1, Title: "proj__cc_1"}, tt.usagePercent, 75)
 			t.Logf("usage=%.1f signal=%v reason=%v actionability=%q next_actions=%v", tt.usagePercent, event.Details["signal"], event.Details["signal_reason"], event.Actionability, event.NextActions)
 
 			if event.Details["signal"] != attentionSignalContextHot {

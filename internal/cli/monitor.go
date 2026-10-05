@@ -22,6 +22,7 @@ import (
 	"github.com/Dicklesworthstone/ntm/internal/ensemble"
 	"github.com/Dicklesworthstone/ntm/internal/events"
 	"github.com/Dicklesworthstone/ntm/internal/resilience"
+	"github.com/Dicklesworthstone/ntm/internal/robot"
 	"github.com/Dicklesworthstone/ntm/internal/state"
 	statuspkg "github.com/Dicklesworthstone/ntm/internal/status"
 	"github.com/Dicklesworthstone/ntm/internal/summary"
@@ -126,9 +127,11 @@ func runMonitorContext(parent context.Context, session string) (runErr error) {
 
 	// Agent crashed/restarted/rate-limited and session-ended events from this
 	// process reach the durable attention feed, not only webhooks (bd-viwo4).
+	durableAttention := false
 	if closeAttention, err := openDurableAttentionFeed(); err != nil {
 		slog.Default().Debug("durable attention feed unavailable", "session", session, "error", err)
 	} else {
+		durableAttention = true
 		defer closeAttention()
 	}
 
@@ -169,6 +172,21 @@ func runMonitorContext(parent context.Context, session string) (runErr error) {
 			stopRecording()
 			<-recorded
 			_ = state.EndSessionTimeline(session)
+		}()
+	}
+
+	// Context pressure: the producer behind --robot-wait
+	// --condition=context_hot (bd-13qsw). It stops before the feed closes.
+	if durableAttention && cfg != nil && cfg.Alerts.ContextWarningThreshold > 0 {
+		watchCtx, stopWatching := context.WithCancel(ctx)
+		watched := make(chan struct{})
+		go func() {
+			defer close(watched)
+			publishContextPressure(watchCtx, session, contextPressureInterval, cfg.Alerts.ContextWarningThreshold, tmux.GetPanesContext)
+		}()
+		defer func() {
+			stopWatching()
+			<-watched
 		}()
 	}
 
@@ -569,6 +587,30 @@ func generateEndSessionSummary(ctx context.Context, session string, lastOutputs 
 // states for the session timeline: the default resilience health-check
 // cadence, so the timeline adds one pane observation per agent per check.
 const timelineObservationInterval = 10 * time.Second
+
+// contextPressureInterval is how often the internal monitor measures each agent
+// pane's context usage. Usage moves a turn at a time, so a minute keeps the
+// transcript reads cheap and still catches a crossing within one turn or two.
+const contextPressureInterval = time.Minute
+
+// publishContextPressure appends context_hot attention events for the session's
+// agent panes at or above threshold percent until ctx ends.
+func publishContextPressure(ctx context.Context, session string, every time.Duration, threshold float64, listPanes func(context.Context, string) ([]tmux.Pane, error)) {
+	ticker := time.NewTicker(every)
+	defer ticker.Stop()
+	for {
+		if feed := robot.GetAttentionFeed(); feed != nil {
+			if panes, err := listPanes(ctx, session); err == nil {
+				feed.PublishContextPressure(session, panes, threshold)
+			}
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+		}
+	}
+}
 
 // recordSessionTimeline records each agent's observed state transitions into
 // this process's timeline tracker until ctx ends.

@@ -16,6 +16,7 @@ import (
 
 	ntmevents "github.com/Dicklesworthstone/ntm/internal/events"
 	"github.com/Dicklesworthstone/ntm/internal/integrations/pt"
+	"github.com/Dicklesworthstone/ntm/internal/robot/adapters"
 	"github.com/Dicklesworthstone/ntm/internal/state"
 	"github.com/Dicklesworthstone/ntm/internal/tmux"
 	"github.com/Dicklesworthstone/ntm/internal/tracker"
@@ -1863,6 +1864,64 @@ func (f *AttentionFeed) PublishPTAlert(alert pt.Alert) (AttentionEvent, bool) {
 	return f.AppendDeduplicated(event, ptAlertDedupWindow(alert.Type))
 }
 
+const (
+	contextPressureAttentionSource = "context.monitor"
+	// contextPressureDedupWindow keeps one context_hot event per pane per
+	// window while its usage stays at or above the warning threshold.
+	contextPressureDedupWindow = 10 * time.Minute
+)
+
+// contextPressureUsage is PublishContextPressure's usage source, swapped in tests.
+var contextPressureUsage = paneContextUsagePercents
+
+// PublishContextPressure appends a context_hot attention event for each agent
+// pane whose transcript-attributed context usage is at or above threshold
+// percent. It is the producer behind --robot-wait --condition=context_hot:
+// the bus event that signal was derived from had no publisher (bd-13qsw).
+func (f *AttentionFeed) PublishContextPressure(session string, panes []tmux.Pane, threshold float64) []AttentionEvent {
+	if threshold <= 0 {
+		return nil
+	}
+	usage := contextPressureUsage(session, panes)
+	var published []AttentionEvent
+	for _, pane := range panes {
+		pct, ok := usage[pane.ID]
+		if !ok || pct < threshold {
+			continue
+		}
+		event, appended := f.AppendDeduplicated(NewContextPressureAttentionEvent(session, pane, pct, threshold), contextPressureDedupWindow)
+		if appended {
+			published = append(published, event)
+		}
+	}
+	return published
+}
+
+// NewContextPressureAttentionEvent describes one agent pane at or above the
+// context warning threshold. Usage at or above
+// attentionContextHotActionThreshold makes it action_required.
+func NewContextPressureAttentionEvent(session string, pane tmux.Pane, usagePercent, threshold float64) AttentionEvent {
+	paneRef := strconv.Itoa(pane.Index)
+	return annotateAttentionSignal(AttentionEvent{
+		Ts:            time.Now().UTC().Format(time.RFC3339Nano),
+		Session:       session,
+		Pane:          pane.Index,
+		Category:      EventCategoryAlert,
+		Type:          EventTypeAlertWarning,
+		Source:        contextPressureAttentionSource,
+		Actionability: ActionabilityInteresting,
+		Severity:      SeverityWarning,
+		Summary:       attentionSummary(session, paneRef, fmt.Sprintf("context usage %.1f%% (warning threshold %.0f%%)", usagePercent, threshold)),
+		Details: map[string]any{
+			"usage_percent":     usagePercent,
+			"threshold_percent": threshold,
+			"pane_id":           pane.ID,
+			"agent_type":        paneAgentType(pane),
+		},
+		DedupKey: "context_hot:" + session + ":" + pane.ID,
+	})
+}
+
 // NewPTStateChangeAttentionEvent converts a PT classification transition into a
 // normalized attention event. Benign steady-state classifications are suppressed.
 func NewPTStateChangeAttentionEvent(change pt.ClassificationStateChange) (AttentionEvent, bool) {
@@ -3123,8 +3182,7 @@ func deriveConflictSignal(event AttentionEvent) (string, string, map[string]any)
 }
 
 func isContextHotAttentionEvent(event AttentionEvent) bool {
-	return attentionFloatDetail(event.Details, "usage_percent") > 0 &&
-		strings.Contains(strings.ToLower(event.Summary), "context usage")
+	return event.Source == contextPressureAttentionSource
 }
 
 func isRateLimitedAttentionEvent(event AttentionEvent) bool {
@@ -3155,30 +3213,18 @@ func isRateLimitedAttentionEvent(event AttentionEvent) bool {
 	return false
 }
 
+// Conflicts reach the feed as work-coordination problems from the projection
+// refresh (normalizedCoordinationProblemEvent); its reason code is the
+// classifier. The source and detail shapes these predicates used to look for
+// (watcher.file_reservation, tracker.conflicts, requestor_agent) had no
+// producer, so a live reservation conflict never satisfied --robot-wait
+// --condition=reservation_conflict (bd-13qsw).
 func isReservationConflictAttentionEvent(event AttentionEvent) bool {
-	path := attentionConflictPath(event)
-	holders := attentionStringSliceDetail(event.Details, "holders")
-	if path == "" || len(holders) == 0 {
-		return false
-	}
-	if event.Source == "watcher.file_reservation" {
-		return true
-	}
-	return attentionStringDetail(event.Details, "requestor_agent") != "" ||
-		len(attentionStringSliceDetail(event.Details, "holder_reservation_ids")) > 0
+	return event.ReasonCode == string(adapters.ReasonCoordinationReservationConflict)
 }
 
 func isFileConflictAttentionEvent(event AttentionEvent) bool {
-	path := attentionConflictPath(event)
-	agents := attentionStringSliceDetail(event.Details, "agents")
-	if path == "" || len(agents) < 2 {
-		return false
-	}
-	if event.Source == "tracker.conflicts" || event.Source == "conflict_detector" {
-		return true
-	}
-	return attentionStringDetail(event.Details, "tracker_severity") != "" ||
-		attentionFloatDetail(event.Details, "change_count") >= 2
+	return event.ReasonCode == string(adapters.ReasonCoordinationFileConflict)
 }
 
 func attentionStringDetail(details map[string]any, key string) string {
