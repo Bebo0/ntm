@@ -75,6 +75,36 @@ func TestEventEmitter_DropsWhenBufferFull(t *testing.T) {
 }
 
 // closeEmitter stops a test emitter's publisher goroutine.
+// Flush reports false while the worker is stuck behind a handler and true once
+// every accepted event has been published, so a short-lived process that
+// flushes before exit finds all its events in the bus history.
+func TestEventEmitter_FlushWaitsForQueuedEvents(t *testing.T) {
+	bus := NewEventBus(300)
+	emitter := NewEventEmitter(bus, 256)
+	defer closeEmitter(emitter)
+
+	// Every handler slot blocks, so the worker runs the next handler inline
+	// and stalls with events still queued.
+	release := make(chan struct{})
+	unsub := bus.SubscribeAll(func(BusEvent) { <-release })
+	defer unsub()
+
+	const total = 200
+	for i := 0; i < total; i++ {
+		emitter.Emit(NewWebhookEvent("flush_test", "sess", "1", "cc", "queued", nil))
+	}
+	if emitter.Flush(50 * time.Millisecond) {
+		t.Fatal("Flush reported a drained queue while the worker was blocked")
+	}
+	close(release)
+	if !emitter.Flush(5 * time.Second) {
+		t.Fatal("Flush timed out after the worker was released")
+	}
+	if got := len(bus.History(total)); got != total {
+		t.Fatalf("bus history holds %d events after Flush, want %d", got, total)
+	}
+}
+
 func closeEmitter(e *EventEmitter) {
 	e.closeOnce.Do(func() {
 		e.mu.Lock()

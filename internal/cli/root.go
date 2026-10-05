@@ -17,6 +17,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -3293,6 +3294,7 @@ func RootCommand() *cobra.Command {
 
 func Execute() error {
 	defer closeRobotPersistence()
+	defer persistEmittedBusEvents(events.DefaultEmitter(), events.DefaultBus)
 	robotProcessExit = nil
 	robotInvocation, robotCommand := robotInvocationFromArgs(os.Args[1:])
 	machineInvocation := robotInvocation || jsonInvocationFromArgs(os.Args[1:])
@@ -3537,22 +3539,84 @@ func collectStateGarbageOccasionally(store *state.Store, stamp string, interval 
 // only, never --robot-attention or --robot-snapshot --since. The returned
 // func unsubscribes, stops the feed and closes the store.
 func openDurableAttentionFeed() (func(), error) {
+	feed, closeFeed, err := openStoreAttentionFeed()
+	if err != nil {
+		return nil, err
+	}
+	unsubscribe := feed.SubscribeEventBus(events.DefaultBus)
+	busEventsPersistedLive.Store(true)
+	return func() {
+		unsubscribe()
+		closeFeed()
+	}, nil
+}
+
+// openStoreAttentionFeed installs a store-backed attention feed as the global
+// feed. The returned func stops it and closes the store.
+func openStoreAttentionFeed() (*robot.AttentionFeed, func(), error) {
 	store, err := state.Open("")
 	if err != nil {
-		return nil, fmt.Errorf("open state store for the attention feed: %w", err)
+		return nil, nil, fmt.Errorf("open state store for the attention feed: %w", err)
 	}
 	if err := store.Migrate(); err != nil {
 		store.Close()
-		return nil, fmt.Errorf("migrate state store for the attention feed: %w", err)
+		return nil, nil, fmt.Errorf("migrate state store for the attention feed: %w", err)
 	}
 	feed := robot.NewAttentionFeed(robot.DefaultAttentionFeedConfig(), robot.WithAttentionStore(store))
 	robot.SetAttentionFeed(feed)
-	unsubscribe := feed.SubscribeEventBus(events.DefaultBus)
-	return func() {
-		unsubscribe()
+	return feed, func() {
 		robot.SetAttentionFeed(nil)
 		store.Close()
 	}, nil
+}
+
+// busEventsPersistedLive marks a process whose durable feed is subscribed to
+// the event bus (internal monitor, coordinator run, serve): its events are
+// already stored, so persistEmittedBusEvents must not replay them.
+var busEventsPersistedLive atomic.Bool
+
+// emittedEventsFlushTimeout bounds how long a command waits at exit for its
+// queued events to reach the bus.
+const emittedEventsFlushTimeout = 2 * time.Second
+
+// persistEmittedBusEvents stores the webhook events a short-lived command
+// emitted (spawn, add, kill, assignment status) in the durable attention feed
+// before the process exits. The emitter publishes asynchronously, so without
+// this they died with the process and never reached --robot-events or
+// --robot-wait (bd-viwo4). Events come from the bus's in-process history,
+// oldest first, after the emitter's queue drains.
+func persistEmittedBusEvents(emitter *events.EventEmitter, bus *events.EventBus) {
+	if busEventsPersistedLive.Load() {
+		return
+	}
+	if !emitter.Flush(emittedEventsFlushTimeout) {
+		slog.Default().Debug("event emitter did not drain before exit; persisting what reached the bus")
+	}
+	history := bus.History(0)
+	var emitted []events.WebhookEvent
+	for i := len(history) - 1; i >= 0; i-- {
+		if event, ok := history[i].(events.WebhookEvent); ok {
+			emitted = append(emitted, event)
+		}
+	}
+	if len(emitted) == 0 {
+		return
+	}
+	// A robot command's global feed is already store-backed
+	// (initializeRobotPersistence); any other command opens one for this.
+	feed := robot.PeekAttentionFeed()
+	if robotStateStore == nil || feed == nil {
+		storeFeed, closeFeed, err := openStoreAttentionFeed()
+		if err != nil {
+			slog.Default().Debug("emitted events not persisted", "events", len(emitted), "error", err)
+			return
+		}
+		defer closeFeed()
+		feed = storeFeed
+	}
+	for _, event := range emitted {
+		feed.PublishBusEvent(event)
+	}
 }
 
 func closeRobotPersistence() {

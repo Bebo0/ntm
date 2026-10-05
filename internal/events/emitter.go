@@ -4,6 +4,7 @@ import (
 	"log/slog"
 	"sync"
 	"sync/atomic"
+	"time"
 )
 
 // EventEmitter provides non-blocking emission of BusEvents to an EventBus.
@@ -17,6 +18,8 @@ type EventEmitter struct {
 	ch  chan BusEvent
 
 	dropped atomic.Int64
+	// pending counts accepted events not yet handed to the bus (Flush).
+	pending atomic.Int64
 
 	startOnce sync.Once
 	closeOnce sync.Once
@@ -55,6 +58,7 @@ func (e *EventEmitter) Start() {
 			defer e.wg.Done()
 			for ev := range e.ch {
 				e.bus.Publish(ev)
+				e.pending.Add(-1)
 			}
 		}()
 	})
@@ -74,15 +78,32 @@ func (e *EventEmitter) Emit(ev BusEvent) {
 	}
 	defer e.mu.RUnlock()
 
+	e.pending.Add(1)
 	select {
 	case e.ch <- ev:
 	default:
+		e.pending.Add(-1)
 		n := e.dropped.Add(1)
 		// Avoid log spam: emit only for the first drop and then every 1000 drops.
 		if n == 1 || n%1000 == 0 {
 			slog.Default().Debug("event emitter dropped events (buffer full)", "dropped", n, "event_type", ev.EventType())
 		}
 	}
+}
+
+// Flush waits until every event Emit accepted before the call has been
+// published to the bus (and so is in its history), or timeout passes. It
+// reports whether the queue drained. A short-lived process calls it before
+// exiting so the events it emitted are not lost with the worker goroutine.
+func (e *EventEmitter) Flush(timeout time.Duration) bool {
+	deadline := time.Now().Add(timeout)
+	for e.pending.Load() > 0 {
+		if time.Now().After(deadline) {
+			return false
+		}
+		time.Sleep(time.Millisecond)
+	}
+	return true
 }
 
 var (

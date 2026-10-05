@@ -324,6 +324,8 @@ func TestOpenDurableAttentionFeedPersistsBusAndActuationEvents(t *testing.T) {
 	t.Setenv("NTM_CONFIG", filepath.Join(dir, "config.toml"))
 	previous := robot.GetAttentionFeed()
 	t.Cleanup(func() { robot.SetAttentionFeed(previous) })
+	wasLive := busEventsPersistedLive.Load()
+	t.Cleanup(func() { busEventsPersistedLive.Store(wasLive) })
 
 	closeAttention, err := openDurableAttentionFeed()
 	if err != nil {
@@ -361,5 +363,75 @@ func TestOpenDurableAttentionFeedPersistsBusAndActuationEvents(t *testing.T) {
 	}
 	if !crash || !actuation {
 		t.Fatalf("durable store events (crash=%v actuation=%v): %+v", crash, actuation, stored)
+	}
+	if !busEventsPersistedLive.Load() {
+		t.Fatal("a live bus subscription must mark the process so its exit does not replay events")
+	}
+}
+
+// A short-lived command's webhook events reach the durable feed at exit: the
+// emitter publishes asynchronously, and the process used to exit with them
+// (bd-viwo4). A process whose feed subscribed live skips the replay, so nothing
+// is stored twice.
+func TestPersistEmittedBusEventsStoresShortLivedCommandEvents(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("NTM_CONFIG", filepath.Join(dir, "config.toml"))
+	previous := robot.GetAttentionFeed()
+	t.Cleanup(func() { robot.SetAttentionFeed(previous) })
+	wasLive := busEventsPersistedLive.Load()
+	t.Cleanup(func() { busEventsPersistedLive.Store(wasLive) })
+	if robotStateStore != nil {
+		t.Fatal("robot persistence is unexpectedly open")
+	}
+	stored := func(session string) []state.StoredAttentionEvent {
+		t.Helper()
+		store, err := state.Open(filepath.Join(dir, "state.db"))
+		if err != nil {
+			t.Fatalf("open state store: %v", err)
+		}
+		defer store.Close()
+		if err := store.Migrate(); err != nil {
+			t.Fatalf("migrate state store: %v", err)
+		}
+		all, err := store.GetAttentionEventsSince(0, 100)
+		if err != nil {
+			t.Fatalf("read attention events: %v", err)
+		}
+		var rows []state.StoredAttentionEvent
+		for _, event := range all {
+			if event.SessionName == session {
+				rows = append(rows, event)
+			}
+		}
+		return rows
+	}
+	emitAndPersist := func(session string, live bool) {
+		t.Helper()
+		bus := events.NewEventBus(100)
+		emitter := events.NewEventEmitter(bus, 16)
+		busEventsPersistedLive.Store(live)
+		emitter.Emit(events.NewWebhookEvent(events.WebhookBeadFailed, session, "", "", "bead failed", map[string]string{"bead_id": "bd-1"}))
+		emitter.Emit(events.NewWebhookEvent(events.WebhookSessionCreated, session, "", "", "session created", nil))
+		persistEmittedBusEvents(emitter, bus)
+	}
+
+	emitAndPersist("live-subscriber", true)
+	if rows := stored("live-subscriber"); len(rows) != 0 {
+		t.Fatalf("replayed events a live subscription already stored: %+v", rows)
+	}
+
+	emitAndPersist("plain-command", false)
+	rows := stored("plain-command")
+	if len(rows) != 2 || rows[0].Actionability != "action_required" || !strings.Contains(rows[0].Summary, "bead failed") || !strings.Contains(rows[1].Summary, "session created") || rows[0].Cursor >= rows[1].Cursor {
+		t.Fatalf("plain command rows = %+v, want bead failed (action_required) then session created", rows)
+	}
+
+	if err := initializeRobotPersistence(context.Background(), false); err != nil {
+		t.Fatalf("initializeRobotPersistence: %v", err)
+	}
+	emitAndPersist("robot-command", false)
+	closeRobotPersistence()
+	if rows := stored("robot-command"); len(rows) != 2 {
+		t.Fatalf("robot command rows = %+v, want both emitted events through its persistence feed", rows)
 	}
 }
