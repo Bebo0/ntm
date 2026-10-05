@@ -1,7 +1,9 @@
 # syntax=docker/dockerfile:1.24.0@sha256:87999aa3d42bdc6bea60565083ee17e86d1f3339802f543c0d03998580f9cb89
 
 # Build stage
-FROM golang:1.26.5-alpine3.24@sha256:0178a641fbb4858c5f1b48e34bdaabe0350a330a1b1149aabd498d0699ff5fb2 AS builder
+# Must satisfy go.mod's `go` line: the official image sets GOTOOLCHAIN=local,
+# so an older Go refuses `go mod download` outright.
+FROM golang:1.26.8-alpine3.24@sha256:8ac98ca534ac3f51e1f420a1dd2c15e74c75cfa0f23f3ad27eb5d7236c349a0c AS builder
 
 WORKDIR /app
 
@@ -26,8 +28,11 @@ ARG VERSION=dev
 ARG COMMIT=unknown
 ARG DATE=unknown
 
+# Same tags as the release binaries (.goreleaser.yaml): the image is a release
+# artifact, so it ships the real `ensemble spawn`, not the untagged stub.
 RUN CGO_ENABLED=0 GOOS=linux go build \
     -trimpath \
+    -tags=ensemble_experimental \
     -ldflags="-s -w \
         -X github.com/Dicklesworthstone/ntm/internal/cli.Version=${VERSION} \
         -X github.com/Dicklesworthstone/ntm/internal/cli.Commit=${COMMIT} \
