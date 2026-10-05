@@ -9,19 +9,20 @@ import (
 	"github.com/Dicklesworthstone/ntm/internal/agent"
 )
 
-// CompactionPattern defines patterns for detecting compaction events
+// CompactionPattern defines provider-specific completion banners. Context-limit
+// warnings and prose about compaction are not evidence that compaction finished.
 type CompactionPattern struct {
-	Agent    string           // "claude", "codex", "gemini", "*"
-	Patterns []*regexp.Regexp // Compiled patterns
+	Agent    string
+	Patterns []*regexp.Regexp
 }
 
-// CompactionEvent represents a detected compaction
+// CompactionEvent represents an observed compaction completion banner.
 type CompactionEvent struct {
 	PaneID      string    `json:"pane_id"`
 	AgentType   string    `json:"agent_type"`
 	DetectedAt  time.Time `json:"detected_at"`
 	MatchedText string    `json:"matched_text"`
-	Pattern     string    `json:"pattern"` // Which pattern matched
+	Pattern     string    `json:"pattern"`
 }
 
 var (
@@ -29,61 +30,31 @@ var (
 	patternsOnce       sync.Once
 )
 
-// Claude Code compaction patterns - these are the CRITICAL ones
-// "Conversation compacted" is the EXACT text Claude Code shows
+// Match complete banner lines, not arbitrary sentences containing these words.
+// The optional glyphs are terminal message markers, not Markdown list markers.
+// Keep capture group 1 free of presentation glyphs for stable evidence.
 var claudePatterns = []string{
-	`Conversation compacted`,                                       // EXACT - primary signal
-	`(?i)conversation.*summarized`,                                 // Alternate phrasing
-	`(?i)context.*compacted`,                                       // Context management
-	`(?i)continued from.*previous.*conversation`,                   // Recovery indication
-	`(?i)ran out of context`,                                       // Explicit context limit
-	`(?i)session is being continued`,                               // Session continuation
-	`(?i)conversation.*truncated`,                                  // Truncation signal
-	`(?i)previous.*context.*lost`,                                  // Context loss
-	`This session is being continued from a previous conversation`, // Full phrase
+	`(?i)^[ \t]*(?:[⏺●•⎿][ \t]*)?(Conversation compacted)(?:[ \t]+\(ctrl\+o to expand\))?[.!]?[ \t]*$`,
+	`(?i)^[ \t]*(This session is being continued from a previous conversation that ran out of context)[.]?[ \t]*$`,
 }
 
-// Codex compaction patterns
+// Codex renders "Context compacted" as a completed history cell. A limit or
+// reset error alone must not trigger an unsolicited recovery prompt.
 var codexPatterns = []string{
-	`(?i)context limit reached`,
-	`(?i)conversation truncated`,
-	`(?i)history.*cleared`,
-	`(?i)context.*reset`,
+	`(?i)^[ \t]*(?:[•●][ \t]*)?(Context compacted)[.!]?[ \t]*$`,
 }
 
-// Gemini compaction patterns
+// Gemini's CompressionMessage renders this only for CompressionStatus.COMPRESSED.
 var geminiPatterns = []string{
-	`(?i)context window exceeded`,
-	`(?i)conversation reset`,
-	`(?i)context.*limit`,
-	`(?i)history.*truncated`,
-}
-
-// Generic patterns that apply to any agent
-var genericPatterns = []string{
-	`(?i)continuing.*from.*summary`,
-	`(?i)previous.*session.*summarized`,
+	`(?i)^[ \t]*(?:✦[ \t]*)?(Chat history compressed from [0-9,]+ to [0-9,]+ tokens)[.]?[ \t]*$`,
 }
 
 func initPatterns() {
 	patternsOnce.Do(func() {
 		compactionPatterns = []CompactionPattern{
-			{
-				Agent:    "cc",
-				Patterns: compilePatterns(claudePatterns),
-			},
-			{
-				Agent:    "cod",
-				Patterns: compilePatterns(codexPatterns),
-			},
-			{
-				Agent:    "gmi",
-				Patterns: compilePatterns(geminiPatterns),
-			},
-			{
-				Agent:    "*", // Generic patterns for all agents
-				Patterns: compilePatterns(genericPatterns),
-			},
+			{Agent: "cc", Patterns: compilePatterns(claudePatterns)},
+			{Agent: "cod", Patterns: compilePatterns(codexPatterns)},
+			{Agent: "gmi", Patterns: compilePatterns(geminiPatterns)},
 		}
 	})
 }
@@ -91,9 +62,7 @@ func initPatterns() {
 func compilePatterns(patterns []string) []*regexp.Regexp {
 	result := make([]*regexp.Regexp, 0, len(patterns))
 	for _, p := range patterns {
-		if re, err := regexp.Compile(p); err == nil {
-			result = append(result, re)
-		}
+		result = append(result, regexp.MustCompile(p))
 	}
 	return result
 }
@@ -113,57 +82,87 @@ func normalizedCompactionAgentType(agentType string) string {
 	}
 }
 
-// DetectCompaction checks output for compaction patterns.
-// Returns nil if no compaction is detected.
-// The agentType parameter may be any supported alias; matching is normalized
-// through the shared agent type resolver before dispatch.
-func DetectCompaction(output string, agentType string) *CompactionEvent {
-	initPatterns()
-	normalizedAgentType := normalizedCompactionAgentType(agentType)
+// compactionLines bounds retained terminal evidence without cutting into a line
+// (which could turn the tail of ordinary prose into a synthetic banner).
+func compactionLines(output string) []string {
+	const maxBytes, maxLines = 64 * 1024, 256
+	output = StripANSI(output)
+	output = strings.ReplaceAll(output, "\r\n", "\n")
+	if len(output) > maxBytes {
+		output = output[len(output)-maxBytes:]
+		if end := strings.IndexByte(output, '\n'); end >= 0 {
+			output = output[end+1:]
+		} else {
+			return nil
+		}
+	}
+	lines := strings.Split(output, "\n")
+	if len(lines) > maxLines {
+		lines = lines[len(lines)-maxLines:]
+	}
+	// Clone: a short retained slice must not retain an arbitrarily large raw
+	// capture through substring backing storage.
+	for i := range lines {
+		lines[i] = strings.Clone(strings.TrimRight(lines[i], " \t\r"))
+	}
+	return lines
+}
 
-	// Check agent-specific patterns and generic patterns (cp.Agent == "*")
-	// The condition includes patterns where cp.Agent matches agentType OR is "*"
-	for _, cp := range compactionPatterns {
-		if cp.Agent != "*" && normalizedCompactionAgentType(cp.Agent) != normalizedAgentType {
+type compactionLineEvent struct {
+	line  int
+	event CompactionEvent
+}
+
+func compactionLineEvents(lines []string, agentType string) []compactionLineEvent {
+	initPatterns()
+	kind := normalizedCompactionAgentType(agentType)
+	var matches []compactionLineEvent
+	fence := ""
+	for line, text := range lines {
+		trimmed := strings.TrimSpace(text)
+		if strings.HasPrefix(trimmed, "```") || strings.HasPrefix(trimmed, "~~~") {
+			marker := trimmed[:3]
+			if fence == "" {
+				fence = marker
+			} else if fence == marker {
+				fence = ""
+			}
 			continue
 		}
-		for i, pattern := range cp.Patterns {
-			if match := pattern.FindString(output); match != "" {
-				// Get the pattern string for debugging
-				var patternStr string
-				switch normalizedCompactionAgentType(cp.Agent) {
-				case "cc":
-					if i < len(claudePatterns) {
-						patternStr = claudePatterns[i]
-					}
-				case "cod":
-					if i < len(codexPatterns) {
-						patternStr = codexPatterns[i]
-					}
-				case "gmi":
-					if i < len(geminiPatterns) {
-						patternStr = geminiPatterns[i]
-					}
-				case "*":
-					if i < len(genericPatterns) {
-						patternStr = genericPatterns[i]
-					}
-				}
-
-				return &CompactionEvent{
-					AgentType:   agentType,
-					DetectedAt:  time.Now(),
-					MatchedText: match,
-					Pattern:     patternStr,
+		if fence != "" {
+			continue
+		}
+		for _, cp := range compactionPatterns {
+			if cp.Agent != kind {
+				continue
+			}
+			for _, pattern := range cp.Patterns {
+				match := pattern.FindStringSubmatch(text)
+				if len(match) > 1 {
+					matches = append(matches, compactionLineEvent{line: line, event: CompactionEvent{
+						AgentType: agentType, MatchedText: match[1], Pattern: pattern.String(),
+					}})
+					break
 				}
 			}
 		}
 	}
-
-	return nil
+	return matches
 }
 
-// DetectCompactionWithPaneID is a convenience wrapper that sets the pane ID
+// DetectCompaction is a stateless banner classifier. It cannot establish that a
+// banner is new; automatic recovery must use CompactionDetector.Check instead.
+func DetectCompaction(output string, agentType string) *CompactionEvent {
+	matches := compactionLineEvents(compactionLines(output), agentType)
+	if len(matches) == 0 {
+		return nil
+	}
+	event := matches[len(matches)-1].event
+	event.DetectedAt = time.Now()
+	return &event
+}
+
+// DetectCompactionWithPaneID classifies a capture and includes its pane identity.
 func DetectCompactionWithPaneID(output, agentType, paneID string) *CompactionEvent {
 	event := DetectCompaction(output, agentType)
 	if event != nil {
@@ -172,37 +171,136 @@ func DetectCompactionWithPaneID(output, agentType, paneID string) *CompactionEve
 	return event
 }
 
-// CompactionDetector provides a stateful detector that tracks compaction events
-type CompactionDetector struct {
-	mu     sync.Mutex
-	events []CompactionEvent
-	maxAge time.Duration
+type compactionObservation struct {
+	agentType string
+	lines     []string
 }
 
-// NewCompactionDetector creates a new compaction detector
+// CompactionDetector tracks new completion banners, not repeated sightings of
+// old scrollback. The first capture (and any unalignable redraw) is a baseline.
+// Evidence is process-local; restarting a monitor never replays old banners.
+type CompactionDetector struct {
+	mu           sync.Mutex
+	events       []CompactionEvent
+	maxAge       time.Duration
+	observations map[string]compactionObservation
+}
+
 func NewCompactionDetector(maxAge time.Duration) *CompactionDetector {
 	if maxAge == 0 {
-		maxAge = 5 * time.Minute // Default: track events for 5 minutes
+		maxAge = 5 * time.Minute
 	}
 	return &CompactionDetector{
-		events: make([]CompactionEvent, 0),
-		maxAge: maxAge,
+		events: make([]CompactionEvent, 0), maxAge: maxAge,
+		observations: make(map[string]compactionObservation),
 	}
 }
 
-// Check checks for compaction and records any events
+// Check records only banners in an aligned new tail. Changing a footer, ANSI
+// styling, or unrelated text around a visible banner does not make it new.
+// A capture without shared nonblank context is rebased, not replayed. Multiple
+// new banners in one capture produce one recovery opportunity, for the latest.
 func (d *CompactionDetector) Check(output, agentType, paneID string) *CompactionEvent {
-	event := DetectCompactionWithPaneID(output, agentType, paneID)
+	if paneID == "" || output == "" {
+		return nil // Missing evidence must not erase a previous baseline.
+	}
+	lines := compactionLines(output)
+	kind := normalizedCompactionAgentType(agentType)
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if d.observations == nil {
+		d.observations = make(map[string]compactionObservation)
+	}
+	previous, known := d.observations[paneID]
+	d.observations[paneID] = compactionObservation{agentType: kind, lines: lines}
+	if !known || previous.agentType != kind {
+		return nil
+	}
+	start, oldStart := compactionNewTail(previous.lines, lines)
+	if start == len(lines) {
+		return nil
+	}
+	// A rewritten tail may still contain an old banner. Match occurrences,
+	// not entire snapshots, so changing a spinner before it cannot resend it.
+	old := make(map[string]int)
+	for _, match := range compactionLineEvents(previous.lines, agentType) {
+		if match.line >= oldStart {
+			old[strings.ToLower(match.event.MatchedText)]++
+		}
+	}
+	var event *CompactionEvent
+	for _, match := range compactionLineEvents(lines, agentType) {
+		if match.line < start {
+			continue
+		}
+		key := strings.ToLower(match.event.MatchedText)
+		if old[key] > 0 {
+			old[key]--
+			continue
+		}
+		copy := match.event
+		event = &copy
+	}
 	if event != nil {
-		d.mu.Lock()
+		event.PaneID, event.DetectedAt = paneID, time.Now()
 		d.events = append(d.events, *event)
 		d.prune()
-		d.mu.Unlock()
 	}
 	return event
 }
 
-// Events returns all recent compaction events
+// compactionNewTail returns the new suffix and the old rewritten suffix to
+// compare it against. A suffix/prefix overlap handles scroll-off; a common
+// prefix handles the final composer line being replaced as output arrives.
+func compactionNewTail(old, current []string) (start, oldStart int) {
+	prefix := 0
+	for prefix < len(old) && prefix < len(current) && old[prefix] == current[prefix] {
+		prefix++
+	}
+	meaningful := func(lines []string) bool {
+		for _, line := range lines {
+			if len(strings.TrimSpace(line)) >= 8 {
+				return true
+			}
+		}
+		return false
+	}
+	for overlap := min(len(old), len(current)); overlap > prefix; overlap-- {
+		if !meaningful(current[:overlap]) {
+			continue
+		}
+		same := true
+		for i := 0; i < overlap; i++ {
+			if old[len(old)-overlap+i] != current[i] {
+				same = false
+				break
+			}
+		}
+		if same {
+			return overlap, len(old) // All old matching occurrences precede the new tail.
+		}
+	}
+	if prefix > 0 && meaningful(current[:prefix]) {
+		return prefix, prefix
+	}
+	return len(current), len(old)
+}
+
+// ForgetPane discards a vanished or replaced pane's baseline and event history.
+// Only a complete topology observation should authorize forgetting absent panes.
+func (d *CompactionDetector) ForgetPane(paneID string) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	delete(d.observations, paneID)
+	kept := d.events[:0]
+	for _, event := range d.events {
+		if event.PaneID != paneID {
+			kept = append(kept, event)
+		}
+	}
+	d.events = kept
+}
+
 func (d *CompactionDetector) Events() []CompactionEvent {
 	d.mu.Lock()
 	defer d.mu.Unlock()
@@ -212,7 +310,6 @@ func (d *CompactionDetector) Events() []CompactionEvent {
 	return result
 }
 
-// EventsForPane returns events for a specific pane
 func (d *CompactionDetector) EventsForPane(paneID string) []CompactionEvent {
 	d.mu.Lock()
 	defer d.mu.Unlock()
@@ -226,7 +323,6 @@ func (d *CompactionDetector) EventsForPane(paneID string) []CompactionEvent {
 	return result
 }
 
-// HasRecentCompaction checks if a pane had compaction within the given duration
 func (d *CompactionDetector) HasRecentCompaction(paneID string, within time.Duration) bool {
 	d.mu.Lock()
 	defer d.mu.Unlock()
@@ -239,17 +335,16 @@ func (d *CompactionDetector) HasRecentCompaction(paneID string, within time.Dura
 	return false
 }
 
-// Clear removes all events
 func (d *CompactionDetector) Clear() {
 	d.mu.Lock()
+	defer d.mu.Unlock()
 	d.events = make([]CompactionEvent, 0)
-	d.mu.Unlock()
+	d.observations = make(map[string]compactionObservation)
 }
 
-// prune removes old events (must be called with lock held)
 func (d *CompactionDetector) prune() {
 	cutoff := time.Now().Add(-d.maxAge)
-	kept := make([]CompactionEvent, 0, len(d.events))
+	kept := d.events[:0]
 	for _, e := range d.events {
 		if e.DetectedAt.After(cutoff) {
 			kept = append(kept, e)

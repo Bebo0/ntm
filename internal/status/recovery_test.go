@@ -1,6 +1,7 @@
 package status
 
 import (
+	"context"
 	"fmt"
 	"strings"
 	"testing"
@@ -11,19 +12,13 @@ import (
 
 func TestRecoveryManager_CanSendRecovery(t *testing.T) {
 	rm := NewRecoveryManager(DefaultRecoveryConfig())
-
-	// First recovery should be allowed
 	can, reason := rm.CanSendRecovery("test:0")
 	if !can {
 		t.Errorf("first recovery should be allowed, got: %s", reason)
 	}
-
-	// Simulate a recovery
 	rm.mu.Lock()
 	rm.lastRecovery["test:0"] = time.Now()
 	rm.mu.Unlock()
-
-	// Second immediate recovery should be blocked by cooldown
 	can, reason = rm.CanSendRecovery("test:0")
 	if can {
 		t.Error("recovery should be blocked by cooldown")
@@ -34,18 +29,10 @@ func TestRecoveryManager_CanSendRecovery(t *testing.T) {
 }
 
 func TestRecoveryManager_MaxRecoveries(t *testing.T) {
-	config := RecoveryConfig{
-		Cooldown:      1 * time.Millisecond, // Fast cooldown for testing
-		Prompt:        "test prompt",
-		MaxRecoveries: 3,
-	}
-	rm := NewRecoveryManager(config)
-
-	// Simulate max recoveries
+	rm := NewRecoveryManager(RecoveryConfig{Cooldown: time.Millisecond, Prompt: "test prompt", MaxRecoveries: 3})
 	rm.mu.Lock()
 	rm.recoveryCount["test:0"] = 3
 	rm.mu.Unlock()
-
 	can, reason := rm.CanSendRecovery("test:0")
 	if can {
 		t.Error("recovery should be blocked by max recoveries")
@@ -57,84 +44,59 @@ func TestRecoveryManager_MaxRecoveries(t *testing.T) {
 
 func TestRecoveryManager_ResetPane(t *testing.T) {
 	rm := NewRecoveryManager(DefaultRecoveryConfig())
-
-	// Set some state
 	rm.mu.Lock()
 	rm.lastRecovery["test:0"] = time.Now()
 	rm.recoveryCount["test:0"] = 5
 	rm.mu.Unlock()
-
-	// Reset
 	rm.ResetPane("test:0")
-
-	// Should be allowed again
-	can, _ := rm.CanSendRecovery("test:0")
-	if !can {
+	if can, _ := rm.CanSendRecovery("test:0"); !can {
 		t.Error("recovery should be allowed after reset")
 	}
-
-	count := rm.GetRecoveryCount("test:0")
-	if count != 0 {
+	if count := rm.GetRecoveryCount("test:0"); count != 0 {
 		t.Errorf("count should be 0 after reset, got %d", count)
 	}
 }
 
 func TestRecoveryManager_GetRecoveryCount(t *testing.T) {
 	rm := NewRecoveryManager(DefaultRecoveryConfig())
-
-	// Initial count should be 0
-	count := rm.GetRecoveryCount("test:0")
-	if count != 0 {
+	if count := rm.GetRecoveryCount("test:0"); count != 0 {
 		t.Errorf("initial count should be 0, got %d", count)
 	}
-
-	// Simulate recoveries
 	rm.mu.Lock()
 	rm.recoveryCount["test:0"] = 3
 	rm.mu.Unlock()
-
-	count = rm.GetRecoveryCount("test:0")
-	if count != 3 {
+	if count := rm.GetRecoveryCount("test:0"); count != 3 {
 		t.Errorf("count should be 3, got %d", count)
 	}
 }
 
 func TestRecoveryManager_GetLastRecoveryTime(t *testing.T) {
 	rm := NewRecoveryManager(DefaultRecoveryConfig())
-
-	// No recovery yet
-	_, ok := rm.GetLastRecoveryTime("test:0")
-	if ok {
+	if _, ok := rm.GetLastRecoveryTime("test:0"); ok {
 		t.Error("should not have last recovery time yet")
 	}
-
-	// Set recovery time
 	now := time.Now()
 	rm.mu.Lock()
 	rm.lastRecovery["test:0"] = now
 	rm.mu.Unlock()
-
-	lastTime, ok := rm.GetLastRecoveryTime("test:0")
+	last, ok := rm.GetLastRecoveryTime("test:0")
 	if !ok {
 		t.Error("should have last recovery time")
 	}
-	if !lastTime.Equal(now) {
-		t.Errorf("last time should match, got %v want %v", lastTime, now)
+	if !last.Equal(now) {
+		t.Errorf("last time should match, got %v want %v", last, now)
 	}
 }
 
 func TestRecoveryManager_SetPrompt(t *testing.T) {
 	rm := NewRecoveryManager(DefaultRecoveryConfig())
-
 	rm.SetPrompt("custom prompt")
 	if rm.prompt != "custom prompt" {
 		t.Errorf("prompt should be 'custom prompt', got %q", rm.prompt)
 	}
 }
-
 func TestRecoveryManager_SetCooldown(t *testing.T) {
 	rm := NewRecoveryManager(DefaultRecoveryConfig())
-
 	rm.SetCooldown(5 * time.Minute)
 	if rm.cooldown != 5*time.Minute {
 		t.Errorf("cooldown should be 5m, got %v", rm.cooldown)
@@ -142,31 +104,14 @@ func TestRecoveryManager_SetCooldown(t *testing.T) {
 }
 
 func TestRecoveryManager_HandleCompactionEvent(t *testing.T) {
-	config := RecoveryConfig{
-		Cooldown:      1 * time.Second,
-		MaxRecoveries: 5,
-	}
-	rm := NewRecoveryManager(config)
-
-	event := &CompactionEvent{
-		AgentType:   "claude",
-		MatchedText: "Conversation compacted",
-		DetectedAt:  time.Now(),
-	}
-
-	// Note: This won't actually send keys since tmux isn't running in tests
-	// It will fail with "failed to send recovery prompt"
-	// but the logic should work
+	rm := NewRecoveryManager(RecoveryConfig{Cooldown: time.Second, MaxRecoveries: 5})
+	event := &CompactionEvent{AgentType: "claude", MatchedText: "Conversation compacted", DetectedAt: time.Now()}
 	_, err := rm.HandleCompactionEvent(event, "testsession", 0)
-
-	// We expect an error because tmux isn't available in tests
 	if err == nil {
 		t.Log("HandleCompactionEvent succeeded (tmux available)")
 	} else {
 		t.Logf("HandleCompactionEvent failed as expected without tmux: %v", err)
 	}
-
-	// Test with nil event
 	sent, err := rm.HandleCompactionEvent(nil, "testsession", 0)
 	if sent {
 		t.Error("should not send for nil event")
@@ -176,44 +121,31 @@ func TestRecoveryManager_HandleCompactionEvent(t *testing.T) {
 	}
 }
 
-// GH#251 phase 2: grok prompt delivery is first-class — a grok compaction
-// event is now recovered exactly like a claude one: state is recorded and the
-// recovery prompt reaches the (fake) sender.
+// Explicit operator recovery remains available for Grok. It does not make an
+// unverified generic prose pattern safe for automatic recovery detection.
 func TestRecoveryManagerRecoversGrokCompaction(t *testing.T) {
 	rm := NewRecoveryManager(DefaultRecoveryConfig())
-	rm.includeBeadContext = false // keep prompt construction hermetic (no bv exec)
+	rm.includeBeadContext = false
 	sendCh := make(chan string, 1)
-	rm.sendPrompt = func(target, _ string, _ bool) error {
-		sendCh <- target
-		return nil
-	}
-	event := &CompactionEvent{
-		PaneID:      "unchanged",
-		AgentType:   " XAI_GROK_BUILD ",
-		MatchedText: "continuing from summary",
-		DetectedAt:  time.Now(),
-	}
-
+	rm.sendPrompt = func(target, _ string, _ bool) error { sendCh <- target; return nil }
+	event := &CompactionEvent{PaneID: "%17", AgentType: " XAI_GROK_BUILD ", MatchedText: "continuing from summary", DetectedAt: time.Now()}
 	sent, err := rm.HandleCompactionEvent(event, "grok-session", 4)
-	if err != nil {
-		t.Fatalf("error = %v, want grok recovery accepted", err)
+	if err != nil || !sent {
+		t.Fatalf("explicit Grok recovery = %t, %v", sent, err)
 	}
-	if !sent {
-		t.Fatal("recovery sent = false, want true")
+	if event.PaneID != "%17" {
+		t.Fatal("recovery mutated the caller's durable pane identity")
 	}
-	if event.PaneID != makePaneID("grok-session", 4) {
-		t.Fatalf("event pane ID = %q, want %q", event.PaneID, makePaneID("grok-session", 4))
-	}
-	if count := rm.GetRecoveryCount(makePaneID("grok-session", 4)); count != 1 {
+	if count := rm.GetRecoveryCount("%17"); count != 1 {
 		t.Fatalf("recovery count = %d, want 1", count)
 	}
-	if _, ok := rm.GetLastRecoveryTime(makePaneID("grok-session", 4)); !ok {
+	if _, ok := rm.GetLastRecoveryTime("%17"); !ok {
 		t.Fatal("last recovery time was not recorded")
 	}
 	select {
 	case target := <-sendCh:
-		if target != "grok-session:.4" {
-			t.Fatalf("recovery prompt target = %q, want grok-session:.4", target)
+		if target != "%17" {
+			t.Fatalf("target = %q, want stable %%17 rather than an active-window index", target)
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("recovery prompt never reached the sender")
@@ -221,40 +153,28 @@ func TestRecoveryManagerRecoversGrokCompaction(t *testing.T) {
 }
 
 func TestRecoveryEvent(t *testing.T) {
-	event := RecoveryEvent{
-		PaneID:      "test:0",
-		Session:     "test",
-		PaneIndex:   0,
-		SentAt:      time.Now(),
-		Prompt:      "test prompt",
-		TriggerText: "Conversation compacted",
-	}
-
+	event := RecoveryEvent{PaneID: "test:0", Session: "test", PaneIndex: 0, SentAt: time.Now(), Prompt: "test prompt", TriggerText: "Conversation compacted"}
 	if event.PaneID != "test:0" {
 		t.Errorf("PaneID should be test:0, got %s", event.PaneID)
 	}
 	if event.TriggerText != "Conversation compacted" {
-		t.Errorf("TriggerText should be set")
+		t.Error("TriggerText should be set")
 	}
 }
-
 func TestDefaultRecoveryConfig(t *testing.T) {
 	config := DefaultRecoveryConfig()
-
 	if config.Cooldown != DefaultCooldown {
 		t.Errorf("Cooldown should be %v, got %v", DefaultCooldown, config.Cooldown)
 	}
 	if config.Prompt != DefaultRecoveryPrompt {
-		t.Errorf("Prompt should be default")
+		t.Error("Prompt should be default")
 	}
 	if config.MaxRecoveries != DefaultMaxRecoveriesPerPane {
 		t.Errorf("MaxRecoveries should be %d, got %d", DefaultMaxRecoveriesPerPane, config.MaxRecoveries)
 	}
 }
-
 func TestCompactionRecoveryIntegration(t *testing.T) {
 	cri := NewCompactionRecoveryIntegrationDefault()
-
 	if cri.Detector() == nil {
 		t.Error("detector should not be nil")
 	}
@@ -262,10 +182,8 @@ func TestCompactionRecoveryIntegration(t *testing.T) {
 		t.Error("recovery should not be nil")
 	}
 }
-
 func TestCompactionRecoveryIntegration_CheckAndRecover_NoCompaction(t *testing.T) {
 	cri := NewCompactionRecoveryIntegrationDefault()
-
 	event, sent, err := cri.CheckAndRecover("normal output", "claude", "test", 0)
 	if event != nil {
 		t.Error("should not detect compaction in normal output")
@@ -277,68 +195,39 @@ func TestCompactionRecoveryIntegration_CheckAndRecover_NoCompaction(t *testing.T
 		t.Errorf("should not error: %v", err)
 	}
 }
-
 func TestMakePaneID(t *testing.T) {
-	tests := []struct {
+	for _, tc := range []struct {
 		session string
 		index   int
 		want    string
-	}{
-		{"mysession", 5, "mysession:.5"},
-		{"test", 0, "test:.0"},
-	}
-
-	for _, tt := range tests {
-		t.Run(fmt.Sprintf("%s_%d", tt.session, tt.index), func(t *testing.T) {
-			got := makePaneID(tt.session, tt.index)
-			if got != tt.want {
-				t.Errorf("makePaneID = %q, want %q", got, tt.want)
+	}{{"mysession", 5, "mysession:.5"}, {"test", 0, "test:.0"}} {
+		t.Run(fmt.Sprintf("%s_%d", tc.session, tc.index), func(t *testing.T) {
+			if got := makePaneID(tc.session, tc.index); got != tc.want {
+				t.Errorf("makePaneID = %q, want %q", got, tc.want)
 			}
 		})
 	}
 }
-
 func TestRecoveryManager_GetRecoveryEvents(t *testing.T) {
 	rm := NewRecoveryManager(DefaultRecoveryConfig())
-
-	// Initially should be empty
-	events := rm.GetRecoveryEvents()
-	if len(events) != 0 {
+	if events := rm.GetRecoveryEvents(); len(events) != 0 {
 		t.Errorf("initial events should be empty, got %d", len(events))
 	}
-
-	// Add some events
 	rm.mu.Lock()
-	rm.recoveryEvents = []RecoveryEvent{
-		{PaneID: "test:0", SentAt: time.Now()},
-		{PaneID: "test:1", SentAt: time.Now()},
-	}
+	rm.recoveryEvents = []RecoveryEvent{{PaneID: "test:0", SentAt: time.Now()}, {PaneID: "test:1", SentAt: time.Now()}}
 	rm.mu.Unlock()
-
-	events = rm.GetRecoveryEvents()
-	if len(events) != 2 {
+	if events := rm.GetRecoveryEvents(); len(events) != 2 {
 		t.Errorf("should have 2 events, got %d", len(events))
 	}
 }
-
 func TestRecoveryManager_ResetAll(t *testing.T) {
 	rm := NewRecoveryManager(DefaultRecoveryConfig())
-
-	// Set some state
 	rm.mu.Lock()
-	rm.lastRecovery["test:0"] = time.Now()
-	rm.lastRecovery["test:1"] = time.Now()
-	rm.recoveryCount["test:0"] = 5
-	rm.recoveryCount["test:1"] = 3
-	rm.recoveryEvents = []RecoveryEvent{
-		{PaneID: "test:0", SentAt: time.Now()},
-	}
+	rm.lastRecovery["test:0"], rm.lastRecovery["test:1"] = time.Now(), time.Now()
+	rm.recoveryCount["test:0"], rm.recoveryCount["test:1"] = 5, 3
+	rm.recoveryEvents = []RecoveryEvent{{PaneID: "test:0", SentAt: time.Now()}}
 	rm.mu.Unlock()
-
-	// Reset all
 	rm.ResetAll()
-
-	// Verify all cleared
 	rm.mu.RLock()
 	if len(rm.lastRecovery) != 0 {
 		t.Errorf("lastRecovery should be empty, got %d entries", len(rm.lastRecovery))
@@ -350,37 +239,16 @@ func TestRecoveryManager_ResetAll(t *testing.T) {
 		t.Errorf("recoveryEvents should be empty, got %d entries", len(rm.recoveryEvents))
 	}
 	rm.mu.RUnlock()
-
-	// Recovery should be allowed for all panes now
-	can, _ := rm.CanSendRecovery("test:0")
-	if !can {
+	if can, _ := rm.CanSendRecovery("test:0"); !can {
 		t.Error("recovery should be allowed after ResetAll")
 	}
 }
-
 func TestRecoveryManager_pruneEvents(t *testing.T) {
-	config := RecoveryConfig{
-		Cooldown:      30 * time.Second,
-		MaxRecoveries: 10,
-		MaxEventAge:   1 * time.Minute,
-	}
-	rm := NewRecoveryManager(config)
-
-	// Add old and new events
-	oldTime := time.Now().Add(-2 * time.Minute) // Older than maxEventAge
-	newTime := time.Now()
-
+	rm := NewRecoveryManager(RecoveryConfig{Cooldown: 30 * time.Second, MaxRecoveries: 10, MaxEventAge: time.Minute})
 	rm.mu.Lock()
-	rm.recoveryEvents = []RecoveryEvent{
-		{PaneID: "test:0", SentAt: oldTime}, // Should be pruned
-		{PaneID: "test:1", SentAt: newTime}, // Should be kept
-	}
+	rm.recoveryEvents = []RecoveryEvent{{PaneID: "test:0", SentAt: time.Now().Add(-2 * time.Minute)}, {PaneID: "test:1", SentAt: time.Now()}}
 	rm.mu.Unlock()
-
-	// GetRecoveryEvents calls pruneEvents internally
 	events := rm.GetRecoveryEvents()
-
-	// Only the new event should remain
 	if len(events) != 1 {
 		t.Errorf("should have 1 event after pruning, got %d", len(events))
 	}
@@ -388,15 +256,9 @@ func TestRecoveryManager_pruneEvents(t *testing.T) {
 		t.Errorf("remaining event should be test:1, got %s", events[0].PaneID)
 	}
 }
-
 func TestRecoveryManager_SendRecoveryPrompt_NoTmux(t *testing.T) {
 	rm := NewRecoveryManager(DefaultRecoveryConfig())
-
-	// This will fail since we're not in a real tmux session
-	// but we're testing the code path
 	sent, err := rm.SendRecoveryPrompt("fake_session", 999)
-
-	// Should fail - either tmux not available or session doesn't exist
 	if err == nil && sent {
 		t.Log("SendRecoveryPrompt succeeded (tmux available)")
 	} else if err != nil {
@@ -405,101 +267,55 @@ func TestRecoveryManager_SendRecoveryPrompt_NoTmux(t *testing.T) {
 		t.Log("SendRecoveryPrompt returned false (skipped)")
 	}
 }
-
 func TestBuildContextAwarePrompt_NoContext(t *testing.T) {
-	basePrompt := "Reread AGENTS.md"
-
-	// Without bead context
-	result := BuildContextAwarePrompt(basePrompt, false)
-	if result != basePrompt {
-		t.Errorf("without bead context, should return base prompt unchanged")
+	base := "Reread AGENTS.md"
+	if BuildContextAwarePrompt(base, false) != base {
+		t.Error("without bead context, should return base prompt unchanged")
 	}
 }
-
 func TestBuildContextAwarePrompt_WithContext(t *testing.T) {
 	if testing.Short() {
 		t.Skip("Skipping slow integration test in short mode")
 	}
-	basePrompt := "Reread AGENTS.md"
-
-	// With bead context - this tests the real bv integration
-	result := BuildContextAwarePrompt(basePrompt, true)
-
-	// Should at least contain the base prompt
-	if len(result) < len(basePrompt) {
-		t.Errorf("result should contain at least the base prompt")
+	base := "Reread AGENTS.md"
+	result := BuildContextAwarePrompt(base, true)
+	if len(result) < len(base) {
+		t.Error("result should contain at least the base prompt")
 	}
-
-	// If bv is available and we're in a beads project, it should be longer
-	t.Logf("Context-aware prompt length: %d (base: %d)", len(result), len(basePrompt))
+	t.Logf("Context-aware prompt length: %d (base: %d)", len(result), len(base))
 }
-
 func TestGetBeadContext(t *testing.T) {
 	if testing.Short() {
 		t.Skip("Skipping slow integration test in short mode")
 	}
 	ctx := GetBeadContext()
-
-	// If bv is not installed, ctx should be nil
-	// If bv is installed but not in a beads project, we'll get partial data
-	// If in a beads project, we'll get full data
-
 	if ctx == nil {
 		t.Log("GetBeadContext returned nil (bv not available)")
 	} else {
-		t.Logf("GetBeadContext: bottlenecks=%d, actions=%d, health=%s, drift=%v",
-			len(ctx.TopBottlenecks), len(ctx.NextActions), ctx.HealthStatus, ctx.HasDrift)
+		t.Logf("GetBeadContext: bottlenecks=%d, actions=%d, health=%s, drift=%v", len(ctx.TopBottlenecks), len(ctx.NextActions), ctx.HealthStatus, ctx.HasDrift)
 	}
 }
-
 func TestDefaultRecoveryConfig_IncludesBeadContext(t *testing.T) {
-	config := DefaultRecoveryConfig()
-
-	if !config.IncludeBeadContext {
+	if !DefaultRecoveryConfig().IncludeBeadContext {
 		t.Error("default config should include bead context")
 	}
 }
-
 func TestRecoveryManager_IncludeBeadContext(t *testing.T) {
-	// With bead context enabled
-	configWithContext := RecoveryConfig{
-		Cooldown:           30 * time.Second,
-		Prompt:             "test prompt",
-		IncludeBeadContext: true,
-	}
-	rm1 := NewRecoveryManager(configWithContext)
+	rm1 := NewRecoveryManager(RecoveryConfig{Cooldown: 30 * time.Second, Prompt: "test prompt", IncludeBeadContext: true})
 	if !rm1.includeBeadContext {
 		t.Error("should have includeBeadContext true")
 	}
-
-	// Without bead context
-	configNoContext := RecoveryConfig{
-		Cooldown:           30 * time.Second,
-		Prompt:             "test prompt",
-		IncludeBeadContext: false,
-	}
-	rm2 := NewRecoveryManager(configNoContext)
+	rm2 := NewRecoveryManager(RecoveryConfig{Cooldown: 30 * time.Second, Prompt: "test prompt", IncludeBeadContext: false})
 	if rm2.includeBeadContext {
 		t.Error("should have includeBeadContext false")
 	}
 }
-
 func TestRecoveryManager_SendRecoveryPromptByID_Cooldown(t *testing.T) {
-	config := RecoveryConfig{
-		Cooldown:      1 * time.Hour, // Long cooldown
-		Prompt:        "test",
-		MaxRecoveries: 5,
-	}
-	rm := NewRecoveryManager(config)
-
-	// Simulate a recent recovery
-	paneID := "test:0"
+	rm := NewRecoveryManager(RecoveryConfig{Cooldown: time.Hour, Prompt: "test", MaxRecoveries: 5})
 	rm.mu.Lock()
-	rm.lastRecovery[paneID] = time.Now()
+	rm.lastRecovery["test:0"] = time.Now()
 	rm.mu.Unlock()
-
-	// Try to send again - should be blocked by cooldown
-	sent, err := rm.sendRecoveryPromptByIDForAgent("test", 0, paneID, "trigger", agent.AgentTypeClaudeCode)
+	sent, err := rm.sendRecoveryPromptByIDForAgent("test", 0, "test:0", "trigger", agent.AgentTypeClaudeCode)
 	if sent {
 		t.Error("should not send when in cooldown")
 	}
@@ -507,26 +323,13 @@ func TestRecoveryManager_SendRecoveryPromptByID_Cooldown(t *testing.T) {
 		t.Errorf("should not error when blocked by cooldown: %v", err)
 	}
 }
-
 func TestRecoveryManager_SendRecoveryPromptByID_MaxRecoveries(t *testing.T) {
-	config := RecoveryConfig{
-		Cooldown:      1 * time.Millisecond, // Short cooldown
-		Prompt:        "test",
-		MaxRecoveries: 3,
-	}
-	rm := NewRecoveryManager(config)
-
-	// Simulate max recoveries reached
-	paneID := "test:0"
+	rm := NewRecoveryManager(RecoveryConfig{Cooldown: time.Millisecond, Prompt: "test", MaxRecoveries: 3})
 	rm.mu.Lock()
-	rm.recoveryCount[paneID] = 3
+	rm.recoveryCount["test:0"] = 3
 	rm.mu.Unlock()
-
-	// Wait for cooldown to pass
 	time.Sleep(5 * time.Millisecond)
-
-	// Try to send - should be blocked by max recoveries
-	sent, err := rm.sendRecoveryPromptByIDForAgent("test", 0, paneID, "trigger", agent.AgentTypeClaudeCode)
+	sent, err := rm.sendRecoveryPromptByIDForAgent("test", 0, "test:0", "trigger", agent.AgentTypeClaudeCode)
 	if sent {
 		t.Error("should not send when max recoveries reached")
 	}
@@ -534,28 +337,16 @@ func TestRecoveryManager_SendRecoveryPromptByID_MaxRecoveries(t *testing.T) {
 		t.Errorf("should not error when blocked by max recoveries: %v", err)
 	}
 }
-
-// GH#251 phase 2: the exported recovery entry point now delivers to grok panes
-// like claude ones — state is recorded and the prompt reaches the sender.
 func TestRecoveryManagerExportedPromptDeliversToGrok(t *testing.T) {
 	rm := NewRecoveryManager(DefaultRecoveryConfig())
-	rm.includeBeadContext = false // keep prompt construction hermetic (no bv exec)
-	rm.resolvePaneType = func(string, int, string) (agent.AgentType, error) {
-		return agent.AgentType("xai-grok-build"), nil
-	}
+	rm.includeBeadContext = false
+	rm.resolvePaneType = func(string, int, string) (agent.AgentType, error) { return agent.AgentType("xai-grok-build"), nil }
 	sendCh := make(chan struct{}, 1)
-	rm.sendPrompt = func(string, string, bool) error {
-		sendCh <- struct{}{}
-		return nil
-	}
-
+	rm.sendPrompt = func(string, string, bool) error { sendCh <- struct{}{}; return nil }
 	paneID := "%grok"
 	sent, err := rm.SendRecoveryPromptByID("grok-session", 4, paneID, "compacted")
-	if err != nil {
-		t.Fatalf("Grok recovery error = %v, want delivery accepted", err)
-	}
-	if !sent {
-		t.Fatal("Grok recovery sent = false, want true")
+	if err != nil || !sent {
+		t.Fatalf("Grok recovery = %t, %v", sent, err)
 	}
 	if count := rm.GetRecoveryCount(paneID); count != 1 {
 		t.Fatalf("Grok recovery count = %d, want 1", count)
@@ -572,92 +363,50 @@ func TestRecoveryManagerExportedPromptDeliversToGrok(t *testing.T) {
 
 func TestCompactionRecoveryIntegration_CheckAndRecover_WithCompaction(t *testing.T) {
 	cri := NewCompactionRecoveryIntegrationDefault()
-
-	// Test with output containing compaction text
-	output := "Conversation compacted due to context limits"
-
-	event, sent, err := cri.CheckAndRecover(output, "cc", "testsession", 0)
-
-	// Should detect compaction
-	if event == nil {
-		t.Error("should detect compaction in output")
+	calls := 0
+	cri.Recovery().sendPrompt = func(string, string, bool) error { calls++; return nil }
+	cri.CheckAndRecover("progress anchor", "cc", "testsession", 0)
+	event, sent, err := cri.CheckAndRecover("progress anchor\nConversation compacted", "cc", "testsession", 0)
+	if event == nil || sent || err != nil || calls != 0 {
+		t.Fatalf("dashboard must observe without sending: %+v, %t, %v, calls=%d", event, sent, err, calls)
 	}
-
-	// Sent should be false since tmux isn't running
-	// or true if it happens to be available
-	t.Logf("Sent=%v, Error=%v", sent, err)
 }
 
-// GH#251 phase 2: the integration now both detects AND recovers grok
-// compactions, the same as claude/codex.
+// Generic summary prose never authorizes automatic Grok recovery. Explicit
+// Grok delivery is still covered by both recovery-manager tests above.
 func TestCompactionRecoveryIntegrationDetectsAndRecoversGrok(t *testing.T) {
 	cri := NewCompactionRecoveryIntegrationDefault()
-	rm := cri.Recovery()
-	rm.includeBeadContext = false // keep prompt construction hermetic (no bv exec)
-	sendCh := make(chan struct{}, 1)
-	rm.sendPrompt = func(string, string, bool) error {
-		sendCh <- struct{}{}
-		return nil
+	cri.Recovery().includeBeadContext = false
+	calls := 0
+	cri.Recovery().sendPrompt = func(string, string, bool) error { calls++; return nil }
+	cri.CheckAndRecover("progress anchor", "Grok-Build", "grok-session", 3)
+	event, sent, err := cri.CheckAndRecover("progress anchor\nContinuing from summary", "Grok-Build", "grok-session", 3)
+	if event != nil || sent || err != nil || calls != 0 {
+		t.Fatalf("generic prose caused recovery: %+v, %t, %v", event, sent, err)
 	}
-
-	event, sent, err := cri.CheckAndRecover("Continuing from summary", "Grok-Build", "grok-session", 3)
-	if event == nil {
-		t.Fatal("compaction event = nil, want detected event")
+	if len(cri.Detector().EventsForPane(makePaneID("grok-session", 3))) != 0 || cri.Recovery().GetRecoveryCount(makePaneID("grok-session", 3)) != 0 {
+		t.Fatal("unverified prose consumed recovery state")
 	}
-	if err != nil {
-		t.Fatalf("error = %v, want grok recovery accepted", err)
-	}
-	if !sent {
-		t.Fatal("recovery sent = false, want true")
-	}
-	if detectorEvents := cri.Detector().EventsForPane(makePaneID("grok-session", 3)); len(detectorEvents) != 1 {
-		t.Fatalf("detector events = %+v, want one detected event", detectorEvents)
-	}
-	if count := rm.GetRecoveryCount(makePaneID("grok-session", 3)); count != 1 {
-		t.Fatalf("recovery count = %d, want 1", count)
-	}
-	if _, ok := rm.GetLastRecoveryTime(makePaneID("grok-session", 3)); !ok {
-		t.Fatal("last recovery time was not recorded")
-	}
-	select {
-	case <-sendCh:
-	case <-time.After(5 * time.Second):
-		t.Fatal("grok recovery prompt never reached the sender")
+	if _, ok := cri.Recovery().GetLastRecoveryTime(makePaneID("grok-session", 3)); ok {
+		t.Fatal("unverified prose recorded a recovery time")
 	}
 }
 
-// Recovery prompts are routinely multi-line: BuildContextAwarePrompt appends a
-// bead-context block whenever bv is installed. Raw send-keys -l delivers each
-// newline to the pane as a real Enter, so the agent received a dozen partial
-// prompts instead of one. The resolved agent type must therefore reach the send
-// so newline-containing payloads route through paste-buffer.
 func TestSendRecoveryPromptForwardsAgentTypeForBufferRouting(t *testing.T) {
 	multiline := "Continue where you left off.\n\n# Project Context from Beads\n- bd-1\n- bd-2\n"
-
-	// The injected hook keeps the test hermetic; the contract under test is that
-	// sendRecoveryPrompt accepts and forwards the agent type rather than
-	// discarding it.
 	var gotTarget, gotPrompt string
 	var gotEnter bool
-	rm := &RecoveryManager{
-		sendPrompt: func(target, prompt string, enter bool) error {
-			gotTarget, gotPrompt, gotEnter = target, prompt, enter
-			return nil
-		},
-	}
-
-	if err := rm.sendRecoveryPrompt("proj:.2", multiline, true, agent.AgentTypeClaudeCode); err != nil {
+	rm := &RecoveryManager{sendPrompt: func(target, prompt string, enter bool) error {
+		gotTarget, gotPrompt, gotEnter = target, prompt, enter
+		return nil
+	}}
+	if err := rm.sendRecoveryPrompt(context.Background(), "proj:.2", multiline, true, agent.AgentTypeClaudeCode); err != nil {
 		t.Fatalf("sendRecoveryPrompt: %v", err)
 	}
 	if gotTarget != "proj:.2" || gotPrompt != multiline || !gotEnter {
 		t.Fatalf("hook received target=%q enter=%t prompt=%q", gotTarget, gotEnter, gotPrompt)
 	}
-
-	// The fixture really is multi-line, which is the condition that made raw
-	// send-keys fragment the prompt. tmux.needsBufferSend is unexported, so the
-	// routing itself is covered in the tmux package; what matters here is that
-	// the agent type reaches the send instead of being discarded.
 	if !strings.Contains(multiline, "\n") {
-		t.Fatal("fixture is not multi-line; the regression it guards cannot occur")
+		t.Fatal("fixture is not multi-line")
 	}
 }

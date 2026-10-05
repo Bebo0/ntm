@@ -158,20 +158,30 @@ func runMonitorContext(parent context.Context, session string) (runErr error) {
 	// and persists them (checkpoints while running, a final merge on exit).
 	// The commands that used to own it (spawn, kill) exit long before a
 	// checkpoint fires, so `ntm timeline` never had anything to show.
+	compaction := monitorCompactionRecovery(cfg)
+	timelineStarted := false
 	if err := state.StartSessionTimeline(session); err != nil {
 		slog.Default().Debug("timeline persistence unavailable", "session", session, "error", err)
 	} else {
+		timelineStarted = true
+	}
+	// Recovery belongs to the resident lease owner, not to an open dashboard.
+	// Keep observing for recovery even when optional timeline persistence fails.
+	if timelineStarted || compaction != nil {
 		recordCtx, stopRecording := context.WithCancel(ctx)
 		recorded := make(chan struct{})
 		observer := statuspkg.NewSessionObserver(statuspkg.NewDetector())
+		observe := monitorRecoveryObserver(compaction, manifest.ProjectDir, observer.Observe)
 		go func() {
 			defer close(recorded)
-			recordSessionTimeline(recordCtx, session, timelineObservationInterval, observer.Observe)
+			recordSessionTimeline(recordCtx, session, timelineObservationInterval, observe)
 		}()
 		defer func() {
 			stopRecording()
 			<-recorded
-			_ = state.EndSessionTimeline(session)
+			if timelineStarted {
+				_ = state.EndSessionTimeline(session)
+			}
 		}()
 	}
 
@@ -619,6 +629,9 @@ func recordSessionTimeline(ctx context.Context, session string, every time.Durat
 	ticker := time.NewTicker(every)
 	defer ticker.Stop()
 	for {
+		if ctx.Err() != nil {
+			return
+		}
 		if observation, err := observe(ctx, session); err == nil {
 			for _, pane := range observation.Panes {
 				tracker.RecordAgentStatus(session, pane.Metadata, pane.Current.Status)
@@ -629,5 +642,83 @@ func recordSessionTimeline(ctx context.Context, session string, every time.Durat
 			return
 		case <-ticker.C:
 		}
+	}
+}
+
+// monitorCompactionRecovery binds the same recovery configuration used by the
+// dashboard to the actual resident owner. A disabled or absent policy is inert.
+func monitorCompactionRecovery(cfg *config.Config) *statuspkg.CompactionRecoveryIntegration {
+	if cfg == nil || !cfg.ContextRotation.Recovery.Enabled {
+		return nil
+	}
+	configured := cfg.ContextRotation.Recovery
+	recovery := statuspkg.DefaultRecoveryConfig()
+	if configured.CooldownSeconds > 0 {
+		seconds := int64(configured.CooldownSeconds)
+		if seconds > int64((1<<63-1)/time.Second) {
+			recovery.Cooldown = time.Duration(1<<63 - 1)
+		} else {
+			recovery.Cooldown = time.Duration(seconds) * time.Second
+		}
+	}
+	if configured.MaxRecoveriesPerPane > 0 {
+		recovery.MaxRecoveries = configured.MaxRecoveriesPerPane
+	}
+	if configured.Prompt != "" {
+		recovery.Prompt = configured.Prompt
+	}
+	recovery.IncludeBeadContext = configured.IncludeBeadContext
+	return statuspkg.NewCompactionRecoveryIntegration(recovery)
+}
+
+type monitorCompactionRecoverer interface {
+	RecoverObserved(context.Context, statuspkg.SessionObservation, string,
+		func(context.Context, string) (statuspkg.SessionObservation, error)) []statuspkg.RecoveryAttempt
+}
+
+// monitorRecoveryObserver shares the timeline capture; only a pending recovery
+// needs an extra fresh observation immediately before delivery. The original
+// reader is supplied for that check, not this wrapper (which would recurse).
+func monitorRecoveryObserver(recovery *statuspkg.CompactionRecoveryIntegration, project string,
+	observe func(context.Context, string) (statuspkg.SessionObservation, error),
+) func(context.Context, string) (statuspkg.SessionObservation, error) {
+	if recovery == nil {
+		return observe
+	}
+	return observeMonitorRecovery(recovery, project, observe)
+}
+
+func observeMonitorRecovery(recovery monitorCompactionRecoverer, project string,
+	observe func(context.Context, string) (statuspkg.SessionObservation, error),
+) func(context.Context, string) (statuspkg.SessionObservation, error) {
+	return func(ctx context.Context, session string) (statuspkg.SessionObservation, error) {
+		if err := ctx.Err(); err != nil {
+			return statuspkg.SessionObservation{}, err
+		}
+		readCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+		observation, err := observe(readCtx, session)
+		if err == nil && readCtx.Err() != nil {
+			err = readCtx.Err()
+		}
+		cancel()
+		if ctx.Err() != nil {
+			return observation, ctx.Err()
+		}
+		candidate := observation
+		if err != nil || observation.Session != session {
+			// A failed capture is not new empty output; invalidate alignment so
+			// the next successful capture cannot replay an old visible banner.
+			candidate = statuspkg.SessionObservation{Session: session}
+		}
+		for _, attempt := range recovery.RecoverObserved(ctx, candidate, project, observe) {
+			if attempt.Error != "" {
+				// Never log a raw delivery error: external errors may echo the
+				// prompt or captured output. No automatic replay after uncertainty.
+				slog.Warn("compaction recovery did not complete; inspect pane before retrying", "session", session, "pane", attempt.PaneID)
+			} else if attempt.Sent {
+				slog.Info("compaction recovery prompt delivered", "session", session, "pane", attempt.PaneID)
+			}
+		}
+		return observation, err
 	}
 }
