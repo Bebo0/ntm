@@ -668,10 +668,16 @@ func GetSpawn(ctx context.Context, opts SpawnOptions, cfg *config.Config) (*Spaw
 			return output, nil
 		}
 		operatorGatedLabels := []string(nil)
+		var workSourcePolicy worksource.ProjectPolicy
 		if effectiveConfig != nil {
 			operatorGatedLabels = effectiveConfig.Assign.OperatorGatedLabels
+			workSourcePolicy = effectiveConfig.Assign.WorkSource.Policy()
 		}
-		if policyErr := bv.ConfigureProjectOperatorGatedLabels(dir, operatorGatedLabels); policyErr != nil {
+		policyErr = bv.ConfigureProjectOperatorGatedLabels(dir, operatorGatedLabels)
+		if policyErr == nil {
+			policyErr = bv.ConfigureProjectWorkSourcePolicy(dir, workSourcePolicy)
+		}
+		if policyErr != nil {
 			output.Error = fmt.Sprintf("register spawn assignment safety policy: %v", policyErr)
 			output.RobotResponse = NewErrorResponse(
 				fmt.Errorf("%s", output.Error),

@@ -3363,9 +3363,10 @@ func newThreeWayWorkProject(t *testing.T, rows []string, drift bool) (string, st
 
 // threeWayBulkAssign runs --robot-bulk-assign's production work readers over
 // the fixture project; only panes, claims, reservations and prompt delivery
-// are recorded instead of performed. It returns the output and the bead IDs
-// each side effect touched.
-func threeWayBulkAssign(t *testing.T, project string) (*BulkAssignOutput, []string, []string, int) {
+// are recorded instead of performed. projectPolicy, when set, is written as
+// the project's .ntm/config.toml and loaded by the production policy loader.
+// It returns the output and the bead IDs each side effect touched.
+func threeWayBulkAssign(t *testing.T, project, projectPolicy string) (*BulkAssignOutput, []string, []string, int) {
 	t.Helper()
 	panes := []tmux.Pane{
 		{ID: "%1", Index: 1, Title: "threeway__cc_1", Type: tmux.AgentClaude},
@@ -3392,6 +3393,16 @@ func threeWayBulkAssign(t *testing.T, project string) (*BulkAssignOutput, []stri
 			sent = append(sent, delivery.Target.Ref.ID)
 			return nil
 		}),
+	}
+	if projectPolicy != "" {
+		hermeticGlobalConfig(t)
+		if err := os.MkdirAll(filepath.Join(project, ".ntm"), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(project, ".ntm", "config.toml"), []byte(projectPolicy), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		deps.LoadAssignmentPolicy = nil
 	}
 	deps = bulkAtomicTestDeps(t, "threeway", bulkAssignPlan{}, deps)
 	claim := deps.ClaimBead
@@ -3425,7 +3436,7 @@ func TestBulkAssignThreeWayWorkSource(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		output, claimed, sent, _ := threeWayBulkAssign(t, project)
+		output, claimed, sent, _ := threeWayBulkAssign(t, project, "")
 		if !output.Success || output.WorkSourceMismatch != nil {
 			t.Fatalf("matching source output = %+v", output)
 		}
@@ -3450,7 +3461,7 @@ func TestBulkAssignThreeWayWorkSource(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		output, claimed, sent, reservations := threeWayBulkAssign(t, project)
+		output, claimed, sent, reservations := threeWayBulkAssign(t, project, "")
 		if output.Success || output.ErrorCode != ErrCodeStaleWorkCoordination {
 			t.Fatalf("drifted source output = %+v, want %s", output.RobotResponse, ErrCodeStaleWorkCoordination)
 		}
@@ -3476,12 +3487,36 @@ func TestBulkAssignThreeWayWorkSource(t *testing.T) {
 
 	t.Run("all-excluded tracker is a drained queue with no side effects", func(t *testing.T) {
 		project, _, _ := newThreeWayWorkProject(t, threeWayCanonicalRows[1:], false)
-		output, claimed, sent, reservations := threeWayBulkAssign(t, project)
+		output, claimed, sent, reservations := threeWayBulkAssign(t, project, "")
 		if !output.Success || len(output.Assignments) != 0 || len(output.UnassignedBeads) != 0 {
 			t.Fatalf("all-excluded output = %+v, want an empty successful plan", output)
 		}
 		if len(claimed) != 0 || len(sent) != 0 || reservations != 0 {
 			t.Fatalf("all-excluded source reached dispatch: claimed %v, sent %v, reservations %d", claimed, sent, reservations)
+		}
+	})
+
+	// [assign.work_source] in the project's .ntm/config.toml, through the
+	// production policy loader (bd-3vgvw).
+	t.Run("project program scope excludes the otherwise eligible bead", func(t *testing.T) {
+		project, _, _ := newThreeWayWorkProject(t, threeWayCanonicalRows, false)
+		output, claimed, sent, reservations := threeWayBulkAssign(t, project, "[assign.work_source]\nprogram_labels = [\"program:lms\"]\n")
+		if !output.Success || len(output.Assignments) != 0 || len(claimed) != 0 || len(sent) != 0 || reservations != 0 {
+			t.Fatalf("program-scoped output = %+v, claimed %v, sent %v; want a drained queue", output, claimed, sent)
+		}
+	})
+
+	t.Run("project require_clean refuses a dirty checkout", func(t *testing.T) {
+		project, _, _ := newThreeWayWorkProject(t, threeWayCanonicalRows, false)
+		if err := os.WriteFile(filepath.Join(project, "wip.txt"), []byte("uncommitted\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		output, claimed, sent, reservations := threeWayBulkAssign(t, project, "[assign.work_source]\nrequire_clean = true\n")
+		if output.Success || output.ErrorCode != ErrCodeStaleWorkCoordination || len(claimed) != 0 || len(sent) != 0 || reservations != 0 {
+			t.Fatalf("dirty checkout under require_clean = %+v, claimed %v, sent %v; want %s", output.RobotResponse, claimed, sent, ErrCodeStaleWorkCoordination)
+		}
+		if output.WorkSourceMismatch == nil || !strings.Contains(output.WorkSourceMismatch.Reason, "clean committed checkout") {
+			t.Fatalf("receipt = %+v, want the clean-checkout policy named", output.WorkSourceMismatch)
 		}
 	})
 }

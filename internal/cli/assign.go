@@ -480,6 +480,9 @@ func configureAuthoritativeAssignmentPolicy(projectDir string) error {
 	if err := bv.ConfigureProjectOperatorGatedLabels(projectDir, effective.Assign.OperatorGatedLabels); err != nil {
 		return markCLIInvalidInput(fmt.Errorf("register assignment safety policy for %s: %w", projectDir, err))
 	}
+	if err := bv.ConfigureProjectWorkSourcePolicy(projectDir, effective.Assign.WorkSource.Policy()); err != nil {
+		return markCLIInvalidInput(fmt.Errorf("register work-source policy for %s: %w", projectDir, err))
+	}
 	return nil
 }
 

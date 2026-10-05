@@ -665,6 +665,9 @@ func loadAuthoritativeAssignmentPolicy(projectDir, globalPath string, requireGlo
 	if err := bv.ConfigureProjectOperatorGatedLabels(projectDir, effective.Assign.OperatorGatedLabels); err != nil {
 		return nil, fmt.Errorf("register assignment safety policy for %s: %w", strings.TrimSpace(projectDir), err)
 	}
+	if err := bv.ConfigureProjectWorkSourcePolicy(projectDir, effective.Assign.WorkSource.Policy()); err != nil {
+		return nil, fmt.Errorf("register work-source policy for %s: %w", strings.TrimSpace(projectDir), err)
+	}
 	// Keep the legacy process policy current for non-project-aware callers.
 	bv.ConfigureOperatorGatedLabels(effective.Assign.OperatorGatedLabels)
 	return effective, nil

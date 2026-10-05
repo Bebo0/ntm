@@ -12,6 +12,8 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/Dicklesworthstone/ntm/internal/bv"
+	"github.com/Dicklesworthstone/ntm/internal/config"
 	"github.com/Dicklesworthstone/ntm/internal/robot"
 	"github.com/Dicklesworthstone/ntm/internal/robot/adapters"
 	"github.com/Dicklesworthstone/ntm/internal/state"
@@ -114,6 +116,17 @@ Examples:
 	return cmd
 }
 
+// registerWorkSourcePolicy installs project's [assign.work_source] policy, so
+// the snapshot verifies work exactly as dispatch to that project would rather
+// than under the policy of whatever directory ntm was started in.
+func registerWorkSourcePolicy(project string) error {
+	loaded, err := config.LoadMergedStrict(project, selectedConfigPath())
+	if err != nil {
+		return fmt.Errorf("load [assign.work_source] policy for %s: %w", project, err)
+	}
+	return bv.ConfigureProjectWorkSourcePolicy(project, loaded.Assign.WorkSource.Policy())
+}
+
 func runWorkSnapshot(cmd *cobra.Command, project string, limit int, refresh bool, timeout time.Duration) error {
 	ctx, cancel := context.WithTimeout(cmd.Context(), timeout)
 	defer cancel()
@@ -125,6 +138,9 @@ func runWorkSnapshot(cmd *cobra.Command, project string, limit int, refresh bool
 		if err == nil {
 			defer store.Close()
 			err = store.Migrate()
+			if err == nil {
+				err = registerWorkSourcePolicy(project)
+			}
 			if err == nil {
 				cfg := adapters.DefaultWorkCoordinationAdapterConfig(project)
 				cfg.WorkItemLimit = limit
@@ -221,6 +237,9 @@ func runWorkSnapshotObservation(cmd *cobra.Command, project string, limit int, r
 	}
 	defer store.Close()
 	if err := store.Migrate(); err != nil {
+		return fail(err)
+	}
+	if err := registerWorkSourcePolicy(project); err != nil {
 		return fail(err)
 	}
 	cfg := adapters.DefaultWorkCoordinationAdapterConfig(project)

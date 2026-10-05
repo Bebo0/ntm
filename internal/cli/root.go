@@ -759,6 +759,9 @@ Shell Integration:
 				// automated assignment surface honors project-specific gating
 				// labels (#223).
 				bv.ConfigureOperatorGatedLabels(cfg.Assign.OperatorGatedLabels)
+				// ...and the [assign.work_source] policy dispatch and work
+				// snapshots apply (GH #283).
+				bv.ConfigureWorkSourcePolicy(cfg.Assign.WorkSource.Policy())
 
 				// Bound every bv subprocess with the configured timeout
 				// ([integrations.bv] timeout_seconds; NTM_BV_TIMEOUT wins, GH#253).
@@ -5817,12 +5820,14 @@ func loadSelectedConfigOrDefault() *config.Config {
 	if err != nil {
 		loaded = config.Default()
 		bv.ConfigureOperatorGatedLabels(loaded.Assign.OperatorGatedLabels)
+		bv.ConfigureWorkSourcePolicy(loaded.Assign.WorkSource.Policy())
 		bv.ConfigureCommandTimeout(loaded.Integrations.BV.TimeoutSeconds)
 		return loaded
 	}
 	// Callers on this path bypassed the PersistentPreRun config application,
 	// so install config-driven package state here as well (#223).
 	bv.ConfigureOperatorGatedLabels(loaded.Assign.OperatorGatedLabels)
+	bv.ConfigureWorkSourcePolicy(loaded.Assign.WorkSource.Policy())
 	bv.ConfigureCommandTimeout(loaded.Integrations.BV.TimeoutSeconds)
 	return loaded
 }

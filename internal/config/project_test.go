@@ -409,6 +409,73 @@ strategy = "speed"
 	}
 }
 
+// A repository's [assign.work_source] can tighten the user's policy but never
+// loosen it (GH #283): require_clean only turns on, and the user's required
+// ref and program allow-list win where set.
+func TestProjectWorkSourcePolicyOnlyTightens(t *testing.T) {
+	t.Parallel()
+
+	configPath := filepath.Join(t.TempDir(), "config.toml")
+	content := []byte(`[assign.work_source]
+required_ref = "refs/remotes/origin/main"
+require_clean = true
+program_labels = ["program:lms"]
+`)
+	if err := os.WriteFile(configPath, content, 0644); err != nil {
+		t.Fatalf("write project config: %v", err)
+	}
+	project, err := LoadProjectConfig(configPath)
+	if err != nil {
+		t.Fatalf("LoadProjectConfig() error = %v", err)
+	}
+
+	// Permissive user: the project's policy applies in full.
+	merged := MergeConfig(Default(), project, filepath.Dir(configPath)).Assign.WorkSource.Policy()
+	if merged.RequiredRef != "refs/remotes/origin/main" || !merged.RequireClean || strings.Join(merged.ProgramLabels, ",") != "program:lms" || !merged.Strict() {
+		t.Fatalf("project policy over permissive user = %+v", merged)
+	}
+
+	// Strict user: a permissive project changes nothing.
+	user := Default()
+	user.Assign.WorkSource = WorkSourceConfig{RequiredRef: "refs/heads/release", RequireClean: true, ProgramLabels: []string{"program:core"}}
+	merged = MergeConfig(user, &ProjectConfig{}, filepath.Dir(configPath)).Assign.WorkSource.Policy()
+	if merged.RequiredRef != "refs/heads/release" || !merged.RequireClean || strings.Join(merged.ProgramLabels, ",") != "program:core" {
+		t.Fatalf("permissive project loosened the user's policy: %+v", merged)
+	}
+
+	// Strict user, different project policy: the user's ref and programs win.
+	user = Default()
+	user.Assign.WorkSource = WorkSourceConfig{RequiredRef: "refs/heads/release", ProgramLabels: []string{"program:core"}}
+	merged = MergeConfig(user, project, filepath.Dir(configPath)).Assign.WorkSource.Policy()
+	if merged.RequiredRef != "refs/heads/release" || !merged.RequireClean || strings.Join(merged.ProgramLabels, ",") != "program:core" {
+		t.Fatalf("project replaced the user's policy instead of tightening it: %+v", merged)
+	}
+}
+
+func TestValidateWorkSourceConfigRejectsUnmatchableRefs(t *testing.T) {
+	t.Parallel()
+
+	for _, ref := range []string{"", "refs/remotes/origin/main", "refs/heads/main"} {
+		if err := ValidateWorkSourceConfig(&WorkSourceConfig{RequiredRef: ref}); err != nil {
+			t.Errorf("ValidateWorkSourceConfig(%q) = %v, want nil", ref, err)
+		}
+	}
+	for _, ref := range []string{"main", "origin/main", "refs/heads/main~1", "refs/heads/*", "refs/heads/a..b", "refs/heads/main@{1}"} {
+		if err := ValidateWorkSourceConfig(&WorkSourceConfig{RequiredRef: ref}); err == nil {
+			t.Errorf("ValidateWorkSourceConfig(%q) accepted a ref that can never match", ref)
+		}
+	}
+	cfg := Default()
+	cfg.Assign.WorkSource.RequiredRef = "main"
+	found := false
+	for _, err := range Validate(cfg) {
+		found = found || strings.Contains(err.Error(), "assign.work_source")
+	}
+	if !found {
+		t.Fatal("Validate did not report the invalid assign.work_source.required_ref")
+	}
+}
+
 func TestFindProjectConfigRejectsInvalidExistingEntries(t *testing.T) {
 	t.Run("config path is a directory", func(t *testing.T) {
 		projectDir := t.TempDir()

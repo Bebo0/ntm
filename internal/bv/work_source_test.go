@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -237,5 +238,89 @@ func TestActionableSourceGatedRowsDoNotConsumeLimit(t *testing.T) {
 	}
 	if strings.Join(ids, ",") != "gated-a,gated-b,ready" {
 		t.Fatalf("capped plan = %v, want gated rows reported plus one claimable row", ids)
+	}
+}
+
+// A project's [assign.work_source] policy reaches the dispatch reader that
+// every assignment path shares (GH #283, bd-3vgvw).
+func TestActionableSourceAppliesProjectWorkSourcePolicy(t *testing.T) {
+	project := t.TempDir()
+	git := func(args ...string) string {
+		t.Helper()
+		cmd := exec.Command("git", append([]string{"-C", project}, args...)...)
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			t.Skipf("git %v: %v\n%s", args, err, out)
+		}
+		return strings.TrimSpace(string(out))
+	}
+	git("init", "-q", "-b", "main")
+	git("config", "user.email", "test@test.com")
+	git("config", "user.name", "Test")
+	if err := os.Mkdir(filepath.Join(project, ".beads"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	data := `{"id":"core","status":"open","issue_type":"task"}` + "\n" +
+		`{"id":"lms","status":"open","issue_type":"task","labels":["program:lms"]}` + "\n"
+	if err := os.WriteFile(filepath.Join(project, ".beads", "issues.jsonl"), []byte(data), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	git("add", ".beads/issues.jsonl")
+	git("commit", "-q", "-m", "tracker")
+	git("update-ref", "refs/remotes/origin/main", "HEAD")
+	t.Cleanup(func() { _ = ConfigureProjectWorkSourcePolicy(project, worksource.ProjectPolicy{}) })
+	collect := func(context.Context, string, int) ([]TriageRecommendation, error) {
+		return []TriageRecommendation{{ID: "core"}, {ID: "lms"}}, nil
+	}
+	read := func(policy worksource.ProjectPolicy) ([]string, error) {
+		t.Helper()
+		if err := ConfigureProjectWorkSourcePolicy(project, policy); err != nil {
+			t.Fatal(err)
+		}
+		got, err := actionableWithWorkSource(context.Background(), project, 0, collect)
+		ids := make([]string, 0, len(got))
+		for _, recommendation := range got {
+			ids = append(ids, recommendation.ID)
+		}
+		return ids, err
+	}
+
+	if ids, err := read(worksource.ProjectPolicy{}); err != nil || strings.Join(ids, ",") != "core,lms" {
+		t.Fatalf("default policy = %v, %v; want both beads", ids, err)
+	}
+	if ids, err := read(worksource.ProjectPolicy{ProgramLabels: []string{"program:lms"}}); err != nil || strings.Join(ids, ",") != "lms" {
+		t.Fatalf("program scope = %v, %v; want only the program:lms bead", ids, err)
+	}
+	strict := worksource.ProjectPolicy{RequiredRef: "refs/remotes/origin/main", RequireClean: true}
+	if ids, err := read(strict); err != nil || len(ids) != 2 {
+		t.Fatalf("clean checkout at the required ref = %v, %v; want both beads", ids, err)
+	}
+
+	// A local commit the required ref does not have yet.
+	git("commit", "-q", "--allow-empty", "-m", "unpushed")
+	if ids, err := read(worksource.ProjectPolicy{RequiredRef: "refs/remotes/origin/main"}); !errors.Is(err, worksource.ErrStale) || len(ids) != 0 {
+		t.Fatalf("HEAD ahead of the required ref = %v, %v; want STALE_WORK_COORDINATION", ids, err)
+	}
+	// An uncommitted change.
+	if err := os.WriteFile(filepath.Join(project, "scratch.txt"), []byte("wip\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if ids, err := read(worksource.ProjectPolicy{RequireClean: true}); !errors.Is(err, worksource.ErrStale) || len(ids) != 0 {
+		t.Fatalf("dirty checkout = %v, %v; want STALE_WORK_COORDINATION", ids, err)
+	}
+
+	// A strict policy cannot be met by a workspace with no JSONL export.
+	dbOnly := t.TempDir()
+	t.Cleanup(func() { _ = ConfigureProjectWorkSourcePolicy(dbOnly, worksource.ProjectPolicy{}) })
+	if err := ConfigureProjectWorkSourcePolicy(dbOnly, worksource.ProjectPolicy{RequireClean: true}); err != nil {
+		t.Fatal(err)
+	}
+	calls := 0
+	_, err := actionableWithWorkSource(context.Background(), dbOnly, 0, func(context.Context, string, int) ([]TriageRecommendation, error) {
+		calls++
+		return []TriageRecommendation{{ID: "database-only"}}, nil
+	})
+	if !errors.Is(err, worksource.ErrStale) || calls != 0 {
+		t.Fatalf("strict policy over a DB-only workspace = %v after %d tool reads; want STALE before any read", err, calls)
 	}
 }

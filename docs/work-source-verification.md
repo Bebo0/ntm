@@ -9,14 +9,39 @@ When `.beads/issues.jsonl` exists, collection records its canonical path,
 SHA-256 digest, project directory, and local checkout HEAD. It checks the source
 before reading tool results and again before publishing them. Dirty local edits
 remain valid by default; verification does not fetch, check out, import, repair,
-or require `origin/main`.
+or require `origin/main` unless the project opts in (below).
 
 Candidates are filtered against canonical lifecycle, ownership fields,
 blocking dependencies, container/non-dispatchable types, deferrals, project
-operator gates, private labels, and held mutex labels. A configured program
-allow-list is applied when explicitly supplied through the adapter's Go config.
-The shared filter selects a mutex-compatible batch in tracker order. Final
-atomic assignment and live reservation checks remain mandatory.
+operator gates, private labels, held mutex labels, and the configured program
+allow-list. The shared filter selects a mutex-compatible batch in tracker
+order. Final atomic assignment and live reservation checks remain mandatory.
+
+## Opt-in policy: `[assign.work_source]`
+
+```toml
+[assign.work_source]
+required_ref = "refs/remotes/origin/main"  # HEAD must equal this local ref
+require_clean = true                       # no uncommitted changes
+program_labels = ["program:lms"]           # only beads carrying one of these
+```
+
+Every automated dispatch path (`ntm assign`, `--robot-assign`,
+`--robot-bulk-assign`, `--robot-spawn` with assignment, the coordinator) and
+every work snapshot (`ntm work-snapshot`, `--robot-snapshot`, `--robot-status`)
+applies the same policy. A checkout that does not match the ref, or is dirty
+under `require_clean`, yields `STALE_WORK_COORDINATION` with its remediation
+receipt and dispatches nothing; ntm never fetches the ref or cleans the
+checkout. Beads outside the program allow-list are excluded as `program_scope`.
+A strict policy cannot be met by a workspace without a canonical JSONL export.
+
+`ntm work-snapshot --project DIR` and the assignment paths load DIR's own
+policy. The robot snapshot and status views use the policy of the project ntm
+was started in. A project's `.ntm/config.toml` can tighten the user's policy
+but never loosen it: `require_clean` only turns on, and a project
+`required_ref` or `program_labels` applies only where the global config sets
+none. `ntm config validate` rejects a `required_ref` that is not a full literal
+`refs/` name.
 
 ## Candidate collection precedes display limits
 

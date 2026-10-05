@@ -53,6 +53,32 @@ type Policy struct {
 	RequireClean bool
 }
 
+// ProjectPolicy is a project's opt-in dispatch policy ([assign.work_source]):
+// the local ref the checkout must match, a clean committed checkout, and an
+// allow-list of program labels. The zero value permits ordinary local
+// development.
+type ProjectPolicy struct {
+	RequiredRef   string
+	RequireClean  bool
+	ProgramLabels []string
+}
+
+// Strict reports whether the policy asks for more than the default, in which
+// case a workspace without a canonical JSONL export cannot satisfy it.
+func (p ProjectPolicy) Strict() bool {
+	return strings.TrimSpace(p.RequiredRef) != "" || p.RequireClean || len(p.ProgramLabels) > 0
+}
+
+// ValidateRequiredRef accepts only a full, literal refs/ name: no revision
+// expressions, ranges, globs, or reflog selectors.
+func ValidateRequiredRef(ref string) error {
+	ref = strings.TrimSpace(ref)
+	if !strings.HasPrefix(ref, "refs/") || strings.ContainsAny(ref, " ~^:?*[\\\x00\r\n") || strings.Contains(ref, "..") || strings.Contains(ref, "@{") {
+		return fmt.Errorf("required ref %q must be a full literal refs/ name", ref)
+	}
+	return nil
+}
+
 // Snapshot keeps authorization data private. Dirty is advisory metadata, not
 // part of Identity equality; ordinary edits must not invalidate work receipts.
 type Snapshot struct {
@@ -122,7 +148,7 @@ func Read(ctx context.Context, project string, policy Policy) (*Snapshot, error)
 	}
 	if policy.RequiredRef != "" {
 		ref := strings.TrimSpace(policy.RequiredRef)
-		if !strings.HasPrefix(ref, "refs/") || strings.ContainsAny(ref, " ~^:?*[\\\x00\r\n") || strings.Contains(ref, "..") || strings.Contains(ref, "@{") {
+		if ValidateRequiredRef(ref) != nil {
 			return nil, stale(policy.Expected, &identity, "required ref must be a full literal refs/ name", nil)
 		}
 		out, refErr := gitOutput(ctx, identity.ProjectDir, "rev-parse", "--verify", ref+"^{commit}")

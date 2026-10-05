@@ -51,9 +51,11 @@ type ProjectDefaults struct {
 
 // ProjectAssign holds the assignment settings that repositories may safely
 // add to the global configuration. Project labels can add operator gates but
-// cannot remove the user's global gates.
+// cannot remove the user's global gates, and a project's work-source policy
+// can tighten the user's but never loosen it.
 type ProjectAssign struct {
-	OperatorGatedLabels []string `toml:"operator_gated_labels"`
+	OperatorGatedLabels []string         `toml:"operator_gated_labels"`
+	WorkSource          WorkSourceConfig `toml:"work_source"`
 }
 
 // ProjectAlerts holds project-scoped alert overrides. Pointer fields preserve

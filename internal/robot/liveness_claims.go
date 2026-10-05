@@ -60,6 +60,17 @@ func init() {
 	config.RegisterReader("assign.prompt_template_file", GetBulkAssign)
 	config.RegisterReader("assign.operator_gated_labels", GetBulkAssign)
 
+	// [assign.work_source] dispatch policy, registered by every assignment
+	// path's policy loader and applied by the shared actionable reader
+	// (assign.go loadAuthoritativeAssignmentPolicy; bulk_assign.go; spawn.go).
+	for _, key := range []string{
+		"assign.work_source.required_ref",
+		"assign.work_source.require_clean",
+		"assign.work_source.program_labels",
+	} {
+		config.RegisterReader(key, loadAuthoritativeAssignmentPolicy)
+	}
+
 	// Command palette entries + persisted state (tui_parity.go).
 	for _, key := range []string{
 		"palette.key",

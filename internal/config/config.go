@@ -23,6 +23,7 @@ import (
 	"github.com/Dicklesworthstone/ntm/internal/persona"
 	"github.com/Dicklesworthstone/ntm/internal/redaction"
 	"github.com/Dicklesworthstone/ntm/internal/util"
+	"github.com/Dicklesworthstone/ntm/internal/worksource"
 )
 
 const (
@@ -1323,6 +1324,41 @@ type AssignConfig struct {
 	// too-small value falsely fails in-progress work and then injects the
 	// NEXT bead's prompt into the still-working agent mid-task.
 	IdleThreshold string `toml:"idle_threshold"`
+	// WorkSource is the opt-in policy every automated dispatch path and work
+	// snapshot applies to the project's canonical Beads JSONL (GH #283).
+	WorkSource WorkSourceConfig `toml:"work_source"`
+}
+
+// WorkSourceConfig is [assign.work_source]. The zero value permits ordinary
+// local development: dirty, unpushed, any program.
+type WorkSourceConfig struct {
+	// RequiredRef is a full local ref name (e.g. "refs/remotes/origin/main")
+	// that HEAD must equal before work is dispatched or advertised. ntm never
+	// fetches or checks it out; refresh it yourself.
+	RequiredRef string `toml:"required_ref"`
+	// RequireClean refuses work from a checkout with uncommitted changes.
+	RequireClean bool `toml:"require_clean"`
+	// ProgramLabels limits work to beads carrying one of these labels (e.g.
+	// "program:lms"); other beads are excluded as program_scope.
+	ProgramLabels []string `toml:"program_labels"`
+}
+
+// Policy converts the configuration to the work-source policy it enables.
+func (c WorkSourceConfig) Policy() worksource.ProjectPolicy {
+	return worksource.ProjectPolicy{
+		RequiredRef:   strings.TrimSpace(c.RequiredRef),
+		RequireClean:  c.RequireClean,
+		ProgramLabels: append([]string(nil), c.ProgramLabels...),
+	}
+}
+
+// ValidateWorkSourceConfig rejects a required ref that could never match, so
+// a typo fails at configuration time instead of refusing every dispatch.
+func ValidateWorkSourceConfig(cfg *WorkSourceConfig) error {
+	if cfg == nil || strings.TrimSpace(cfg.RequiredRef) == "" {
+		return nil
+	}
+	return worksource.ValidateRequiredRef(cfg.RequiredRef)
 }
 
 // DefaultAssignIdleThreshold is the default watch-loop inactivity window
@@ -4306,6 +4342,16 @@ func Print(cfg *Config, w io.Writer) error {
 	fmt.Fprintf(w, "operator_gated_labels = %s\n", renderTOMLStringArray(cfg.Assign.OperatorGatedLabels))
 	fmt.Fprintln(w)
 
+	fmt.Fprintln(w, "[assign.work_source]")
+	fmt.Fprintln(w, "# Opt-in policy for dispatching and advertising Beads work. Empty = any local checkout.")
+	fmt.Fprintln(w, "# Full local ref HEAD must equal (e.g. \"refs/remotes/origin/main\"); never fetched.")
+	fmt.Fprintf(w, "required_ref = %q\n", cfg.Assign.WorkSource.RequiredRef)
+	fmt.Fprintln(w, "# Refuse work from a checkout with uncommitted changes.")
+	fmt.Fprintf(w, "require_clean = %t\n", cfg.Assign.WorkSource.RequireClean)
+	fmt.Fprintln(w, "# Only beads carrying one of these labels (e.g. \"program:lms\"). Empty = all.")
+	fmt.Fprintf(w, "program_labels = %s\n", renderTOMLStringArray(cfg.Assign.WorkSource.ProgramLabels))
+	fmt.Fprintln(w)
+
 	fmt.Fprintln(w, "[spawn_pacing]")
 	fmt.Fprintln(w, "# Spawn admission control (concurrency caps)")
 	fmt.Fprintf(w, "enabled = %t\n", cfg.SpawnPacing.Enabled)
@@ -5109,6 +5155,18 @@ func GetValue(cfg *Config, path string) (interface{}, error) {
 			return cfg.Assign.PromptTemplateFile, nil
 		case "operator_gated_labels":
 			return append([]string(nil), cfg.Assign.OperatorGatedLabels...), nil
+		case "work_source":
+			if len(parts) < 3 {
+				return cfg.Assign.WorkSource, nil
+			}
+			switch parts[2] {
+			case "required_ref":
+				return cfg.Assign.WorkSource.RequiredRef, nil
+			case "require_clean":
+				return cfg.Assign.WorkSource.RequireClean, nil
+			case "program_labels":
+				return append([]string(nil), cfg.Assign.WorkSource.ProgramLabels...), nil
+			}
 		}
 	case "file_reservation":
 		if len(parts) < 2 {
@@ -5825,6 +5883,9 @@ func Diff(cfg *Config) []ConfigDiff {
 	addDiff("assign.prompt_template", defaults.Assign.PromptTemplate, cfg.Assign.PromptTemplate)
 	addDiff("assign.prompt_template_file", defaults.Assign.PromptTemplateFile, cfg.Assign.PromptTemplateFile)
 	addDiff("assign.operator_gated_labels", defaults.Assign.OperatorGatedLabels, cfg.Assign.OperatorGatedLabels)
+	addDiff("assign.work_source.required_ref", defaults.Assign.WorkSource.RequiredRef, cfg.Assign.WorkSource.RequiredRef)
+	addDiff("assign.work_source.require_clean", defaults.Assign.WorkSource.RequireClean, cfg.Assign.WorkSource.RequireClean)
+	addDiff("assign.work_source.program_labels", defaults.Assign.WorkSource.ProgramLabels, cfg.Assign.WorkSource.ProgramLabels)
 
 	// File reservation
 	addDiff("file_reservation.enabled", defaults.FileReservation.Enabled, cfg.FileReservation.Enabled)
@@ -6046,6 +6107,10 @@ func Validate(cfg *Config) []error {
 	// Validate BV integration config
 	if err := ValidateBVConfig(&cfg.Integrations.BV); err != nil {
 		errs = append(errs, fmt.Errorf("integrations.bv: %w", err))
+	}
+
+	if err := ValidateWorkSourceConfig(&cfg.Assign.WorkSource); err != nil {
+		errs = append(errs, fmt.Errorf("assign.work_source: %w", err))
 	}
 
 	// Validate rano integration config

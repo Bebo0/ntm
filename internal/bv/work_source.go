@@ -5,11 +5,60 @@ import (
 	"errors"
 	"log/slog"
 	"strings"
+	"sync"
 
 	"github.com/Dicklesworthstone/ntm/internal/worksource"
 )
 
 var ErrNoClaimableWork = errors.New(worksource.NoClaimableCode)
+
+var (
+	workSourcePolicyMu sync.RWMutex
+	workSourcePolicy   worksource.ProjectPolicy
+	// projectWorkSourcePolicies holds each authoritative project's strictly
+	// loaded [assign.work_source] policy, registered beside its operator
+	// gates, so projects sharing a process cannot overwrite one another's.
+	projectWorkSourcePolicies sync.Map // map[string]worksource.ProjectPolicy
+)
+
+// ConfigureWorkSourcePolicy installs the process-wide [assign.work_source]
+// policy, used for any project that has not registered its own.
+func ConfigureWorkSourcePolicy(policy worksource.ProjectPolicy) {
+	policy.ProgramLabels = append([]string(nil), policy.ProgramLabels...)
+	workSourcePolicyMu.Lock()
+	workSourcePolicy = policy
+	workSourcePolicyMu.Unlock()
+}
+
+// ConfigureProjectWorkSourcePolicy installs one authoritative project's
+// [assign.work_source] policy.
+func ConfigureProjectWorkSourcePolicy(projectDir string, policy worksource.ProjectPolicy) error {
+	key, err := operatorGateProjectKey(projectDir)
+	if err != nil {
+		return err
+	}
+	policy.ProgramLabels = append([]string(nil), policy.ProgramLabels...)
+	projectWorkSourcePolicies.Store(key, policy)
+	return nil
+}
+
+// WorkSourcePolicyForProject returns the [assign.work_source] policy that
+// dispatch and work snapshots apply to projectDir.
+func WorkSourcePolicyForProject(projectDir string) worksource.ProjectPolicy {
+	if key, err := operatorGateProjectKey(projectDir); err == nil {
+		if stored, ok := projectWorkSourcePolicies.Load(key); ok {
+			if policy, valid := stored.(worksource.ProjectPolicy); valid {
+				policy.ProgramLabels = append([]string(nil), policy.ProgramLabels...)
+				return policy
+			}
+		}
+	}
+	workSourcePolicyMu.RLock()
+	defer workSourcePolicyMu.RUnlock()
+	policy := workSourcePolicy
+	policy.ProgramLabels = append([]string(nil), policy.ProgramLabels...)
+	return policy
+}
 
 // WorkEligibilityError retains canonical exclusion reasons instead of reporting
 // a healthy, empty queue when a tool supplied only ineligible candidates.
@@ -54,6 +103,10 @@ func actionableWithWorkSource(ctx context.Context, dir string, n int, collect fu
 	if err != nil {
 		return nil, err
 	}
+	policy := WorkSourcePolicyForProject(dir)
+	if !identity.Bound() && policy.Strict() {
+		return nil, &worksource.StaleError{Observed: &identity, Reason: "[assign.work_source] policy requires a canonical Beads JSONL export"}
+	}
 	if !identity.Bound() {
 		candidates, err := collect(ctx, dir, n)
 		if err != nil {
@@ -68,7 +121,7 @@ func actionableWithWorkSource(ctx context.Context, dir string, n int, collect fu
 		}
 		return candidates, nil
 	}
-	source, err := worksource.Read(ctx, dir, worksource.Policy{Expected: &identity})
+	source, err := worksource.Read(ctx, dir, worksource.Policy{Expected: &identity, RequiredRef: policy.RequiredRef, RequireClean: policy.RequireClean})
 	if err != nil {
 		return nil, err
 	}
@@ -86,8 +139,9 @@ func actionableWithWorkSource(ctx context.Context, dir string, n int, collect fu
 	// gated candidates itself and reports them (skipped "operator-gated label",
 	// gated queues treated as drained), and claims re-check the gate atomically.
 	// Dropping them here would hide that evidence and turn a gated-only queue
-	// into a no-claimable failure.
-	eligibility := source.Filter(ids, worksource.EligibilityPolicy{})
+	// into a no-claimable failure. Program scope is the project's policy, not
+	// an operator decision, so it does exclude here.
+	eligibility := source.Filter(ids, worksource.EligibilityPolicy{ProgramLabels: policy.ProgramLabels})
 	if err := worksource.Validate(ctx, source.Identity); err != nil {
 		return nil, err
 	}

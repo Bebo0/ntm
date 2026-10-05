@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 	"time"
 
@@ -120,6 +121,58 @@ func TestWorkReadyCommandUsesCompleteMutexFilteredCount(t *testing.T) {
 	unchanged, err := os.ReadFile(source)
 	if err != nil || !bytes.Equal(initial, unchanged) {
 		t.Fatal("wait changed tracker ownership or source")
+	}
+}
+
+// The target project's [assign.work_source] policy governs `ntm work-snapshot
+// --project`, so a snapshot never advertises work that dispatch to that
+// project would refuse (GH #283, bd-3vgvw).
+func TestWorkSnapshotCommandAppliesProjectWorkSourcePolicy(t *testing.T) {
+	project, source, _, _ := workObservationCommandFixture(t)
+	rows := "{\"id\":\"a\",\"status\":\"open\",\"labels\":[\"program:lms\"]}\n" +
+		"{\"id\":\"b\",\"status\":\"open\",\"labels\":[\"program:web\"]}\n" +
+		"{\"id\":\"c\",\"status\":\"open\",\"labels\":[\"program:lms\"]}\n"
+	if err := os.WriteFile(source, []byte(rows), 0600); err != nil {
+		t.Fatal(err)
+	}
+	writePolicy := func(policy string) {
+		t.Helper()
+		if err := os.MkdirAll(filepath.Join(project, ".ntm"), 0700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(project, ".ntm", "config.toml"), []byte("[assign.work_source]\n"+policy+"\n"), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	snapshot := func() (workSnapshotReply, error) {
+		t.Helper()
+		var output bytes.Buffer
+		err := executeWorkObservationCommand(t, context.Background(), &output, "--project", project, "--limit=5", "--refresh")
+		replies := decodeWorkObservationReplies(t, output.Bytes())
+		if len(replies) != 1 {
+			t.Fatalf("snapshot output = %s, err = %v", output.String(), err)
+		}
+		return replies[0], err
+	}
+
+	writePolicy(`program_labels = ["program:lms"]`)
+	r, err := snapshot()
+	if err != nil || !r.Success || r.Work == nil || r.Work.Summary.Ready != 2 || r.Work.Verification == nil {
+		t.Fatalf("program-scoped snapshot = %+v, err = %v; want 2 verified ready", r, err)
+	}
+	excluded := false
+	for _, exclusion := range r.Work.Verification.Excluded {
+		excluded = excluded || (exclusion.ID == "b" && strings.Join(exclusion.Reasons, ",") == "program_scope")
+	}
+	if !excluded {
+		t.Fatalf("program:web bead not excluded as program_scope: %+v", r.Work.Verification.Excluded)
+	}
+
+	// The fixture is not a git checkout, so it cannot be a clean committed one.
+	writePolicy(`require_clean = true`)
+	r, err = snapshot()
+	if err == nil || r.Success || r.ErrorCode != worksource.StaleCode {
+		t.Fatalf("require_clean over an uncommitted tracker = %+v, err = %v; want %s", r.RobotResponse, err, worksource.StaleCode)
 	}
 }
 

@@ -262,12 +262,18 @@ func GetBulkAssign(ctx context.Context, opts BulkAssignOptions) (*BulkAssignOutp
 		)
 		return output, nil
 	}
+	var workSourcePolicy worksource.ProjectPolicy
 	if effectiveConfig != nil {
 		opts.DefaultTemplate = effectiveConfig.Assign.PromptTemplate
 		opts.DefaultTemplatePath = effectiveConfig.Assign.PromptTemplateFile
 		opts.operatorGatedLabels = append([]string(nil), effectiveConfig.Assign.OperatorGatedLabels...)
+		workSourcePolicy = effectiveConfig.Assign.WorkSource.Policy()
 	}
-	if err := bv.ConfigureProjectOperatorGatedLabels(opts.projectDir, opts.operatorGatedLabels); err != nil {
+	err = bv.ConfigureProjectOperatorGatedLabels(opts.projectDir, opts.operatorGatedLabels)
+	if err == nil {
+		err = bv.ConfigureProjectWorkSourcePolicy(opts.projectDir, workSourcePolicy)
+	}
+	if err != nil {
 		output.RobotResponse = NewErrorResponse(
 			fmt.Errorf("register bulk assignment safety policy: %w", err),
 			ErrCodeInvalidFlag,

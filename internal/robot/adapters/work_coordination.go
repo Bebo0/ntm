@@ -18,6 +18,7 @@ import (
 	"github.com/Dicklesworthstone/ntm/internal/redaction"
 	"github.com/Dicklesworthstone/ntm/internal/reservationpath"
 	"github.com/Dicklesworthstone/ntm/internal/tracker"
+	"github.com/Dicklesworthstone/ntm/internal/worksource"
 )
 
 const (
@@ -235,6 +236,9 @@ type WorkCoordinationAdapterConfig struct {
 
 // DefaultWorkCoordinationAdapterConfig returns conservative defaults.
 func DefaultWorkCoordinationAdapterConfig(projectDir string) WorkCoordinationAdapterConfig {
+	// Snapshots verify work under the same [assign.work_source] policy that
+	// dispatch applies, so they never advertise work dispatch would refuse.
+	policy := bv.WorkSourcePolicyForProject(projectDir)
 	return WorkCoordinationAdapterConfig{
 		ProjectDir:                projectDir,
 		WorkItemLimit:             defaultWorkItemLimit,
@@ -242,6 +246,10 @@ func DefaultWorkCoordinationAdapterConfig(projectDir string) WorkCoordinationAda
 		ReservationExpiringWithin: defaultReservationExpiringWithin,
 		ConflictWindow:            defaultConflictWindow,
 		MailBacklogThreshold:      defaultMailBacklogThreshold,
+		VerificationPolicy: WorkVerificationPolicy{
+			Source:        worksource.Policy{RequiredRef: policy.RequiredRef, RequireClean: policy.RequireClean},
+			ProgramLabels: policy.ProgramLabels,
+		},
 	}
 }
 

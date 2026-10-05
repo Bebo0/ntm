@@ -125,6 +125,19 @@ func MergeConfig(global *Config, project *ProjectConfig, projectDir string) *Con
 		)
 	}
 
+	// Likewise a repository may tighten its work-source policy but never
+	// loosen the user's: require_clean only turns on, and a project's
+	// required_ref or program_labels apply only where the user set none.
+	if project.Assign.WorkSource.RequireClean {
+		global.Assign.WorkSource.RequireClean = true
+	}
+	if strings.TrimSpace(global.Assign.WorkSource.RequiredRef) == "" {
+		global.Assign.WorkSource.RequiredRef = strings.TrimSpace(project.Assign.WorkSource.RequiredRef)
+	}
+	if len(global.Assign.WorkSource.ProgramLabels) == 0 {
+		global.Assign.WorkSource.ProgramLabels = append([]string(nil), project.Assign.WorkSource.ProgramLabels...)
+	}
+
 	// Project-scoped integration toggles are a one-way ratchet: a repository
 	// overlay may DISABLE an integration for its own project, but it can never
 	// ENABLE one the user turned off globally. Letting the overlay flip a
