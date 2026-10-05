@@ -165,6 +165,13 @@ func (m *Matcher) assignBalanced(beads []Bead, agents []Agent) []Assignment {
 		for i := range agents {
 			agent := &agents[i]
 			score := m.scoreAgentForBead(agent, &bead)
+			// Balance only among eligible agents. Selecting the least-loaded
+			// agent first and rejecting it afterward can strand every bead
+			// even while a qualified agent is idle. The positive comparison
+			// also rejects NaN scores rather than letting them win by load.
+			if !(score >= m.config.MinConfidence) {
+				continue
+			}
 
 			// Prefer agents with fewer assignments, then by score
 			assignCount := agentAssignCounts[agent.ID]
