@@ -16,7 +16,7 @@ const (
 	StrategyBalanced Strategy = "balanced"
 	// StrategySpeed assigns to any available agent quickly.
 	StrategySpeed Strategy = "speed"
-	// StrategyQuality assigns to the highest-scoring agent for the task.
+	// StrategyQuality optimizes capability scores across the priority-ordered batch.
 	StrategyQuality Strategy = "quality"
 	// StrategyDependency prioritizes blockers and dependency chains.
 	StrategyDependency Strategy = "dependency"
@@ -101,7 +101,7 @@ func NewMatcher() *Matcher {
 }
 
 // AssignTasks matches beads to agents based on the specified strategy.
-// Returns assignments sorted by score (highest first).
+// Returns assignments in priority order (dependency ties prefer more unblocks).
 func (m *Matcher) AssignTasks(beads []Bead, agents []Agent, strategy Strategy) []Assignment {
 	if len(beads) == 0 || len(agents) == 0 {
 		return nil
@@ -116,7 +116,7 @@ func (m *Matcher) AssignTasks(beads []Bead, agents []Agent, strategy Strategy) [
 	// Sort beads by priority (P0 first) for consistent processing
 	sortedBeads := make([]Bead, len(beads))
 	copy(sortedBeads, beads)
-	sort.Slice(sortedBeads, func(i, j int) bool {
+	sort.SliceStable(sortedBeads, func(i, j int) bool {
 		return sortedBeads[i].Priority < sortedBeads[j].Priority
 	})
 
@@ -234,108 +234,71 @@ func (m *Matcher) assignSpeed(beads []Bead, agents []Agent) []Assignment {
 	return assignments
 }
 
-// assignQuality assigns to the highest-scoring agent for each task.
+// assignQuality optimizes the whole batch without sacrificing bead priority.
 func (m *Matcher) assignQuality(beads []Bead, agents []Agent) []Assignment {
-	var assignments []Assignment
-	usedAgents := make(map[string]bool)
-
-	for _, bead := range beads {
-		// Find best scoring agent
-		var bestAgent *Agent
-		bestScore := 0.0
-
-		for i := range agents {
-			agent := &agents[i]
-			if usedAgents[agent.ID] {
-				continue
-			}
-
-			score := m.scoreAgentForBead(agent, &bead)
-			if score > bestScore {
-				bestScore = score
-				bestAgent = agent
-			}
-		}
-
-		if bestAgent != nil && bestScore >= m.config.MinConfidence {
-			assignments = append(assignments, Assignment{
-				Bead:       bead,
-				Agent:      *bestAgent,
-				Score:      bestScore,
-				Confidence: bestScore,
-				Reason:     m.buildReason(bestAgent, &bead, "optimizing for quality"),
-			})
-			usedAgents[bestAgent.ID] = true
-		}
-	}
-
-	return assignments
+	return m.assignPriorityBatch(beads, agents, false)
 }
 
 // assignDependency prioritizes blockers and dependency chains.
 func (m *Matcher) assignDependency(beads []Bead, agents []Agent) []Assignment {
-	var assignments []Assignment
-	usedAgents := make(map[string]bool)
-
-	// Re-sort beads by: priority first, then number of things they unblock
-	sortedBeads := make([]Bead, len(beads))
-	copy(sortedBeads, beads)
-	sort.Slice(sortedBeads, func(i, j int) bool {
-		// Primary: priority (P0 first)
+	sortedBeads := append([]Bead(nil), beads...)
+	sort.SliceStable(sortedBeads, func(i, j int) bool {
 		if sortedBeads[i].Priority != sortedBeads[j].Priority {
 			return sortedBeads[i].Priority < sortedBeads[j].Priority
 		}
-		// Secondary: unblocks count (more first)
 		return len(sortedBeads[i].UnblocksIDs) > len(sortedBeads[j].UnblocksIDs)
 	})
+	return m.assignPriorityBatch(sortedBeads, agents, true)
+}
 
-	for _, bead := range sortedBeads {
-		// Find best scoring agent
-		var bestAgent *Agent
-		bestScore := 0.0
-
-		for i := range agents {
-			agent := &agents[i]
-			if usedAgents[agent.ID] {
+// assignPriorityBatch builds only eligible edges; optimization never relaxes
+// the confidence gate or assigns two tasks to the same physical worker.
+func (m *Matcher) assignPriorityBatch(beads []Bead, agents []Agent, dependency bool) []Assignment {
+	type pair struct{ bead, agent int }
+	var pairs []pair
+	var edges []priorityBatchEdge
+	seenBeads := make(map[string]bool)
+	for beadIndex, bead := range beads {
+		if seenBeads[bead.ID] {
+			continue
+		}
+		seenBeads[bead.ID] = true
+		for agentIndex, agent := range agents {
+			score := m.scoreAgentForBead(&agent, &bead)
+			if !(score >= 0 && score <= 1) {
 				continue
 			}
-
-			score := m.scoreAgentForBead(agent, &bead)
-
-			// Boost score for high-priority items
-			if bead.Priority <= 1 {
-				score = min(score+0.1, 1.0)
+			if dependency {
+				if bead.Priority <= 1 {
+					score = min(score+0.1, 1.0)
+				}
+				if len(bead.UnblocksIDs) > 0 {
+					score = min(score+min(float64(len(bead.UnblocksIDs))*0.05, 0.15), 1.0)
+				}
 			}
-
-			// Boost score for blockers
-			if len(bead.UnblocksIDs) > 0 {
-				blockerBoost := min(float64(len(bead.UnblocksIDs))*0.05, 0.15)
-				score = min(score+blockerBoost, 1.0)
+			if !(score > 0 && score >= m.config.MinConfidence) {
+				continue
 			}
-
-			if score > bestScore {
-				bestScore = score
-				bestAgent = agent
-			}
+			pairs = append(pairs, pair{bead: beadIndex, agent: agentIndex})
+			edges = append(edges, priorityBatchEdge{bead: bead.ID, worker: agent.ID, score: score})
 		}
-
-		if bestAgent != nil && bestScore >= m.config.MinConfidence {
-			reason := "prioritizing dependency unblocking"
+	}
+	var assignments []Assignment
+	for _, index := range selectPriorityBatch(edges) {
+		bead, agent := beads[pairs[index].bead], agents[pairs[index].agent]
+		reason := "optimizing for quality across the batch"
+		if dependency {
+			reason = "prioritizing dependency unblocking"
 			if len(bead.UnblocksIDs) > 0 {
 				reason = fmt.Sprintf("unblocks %d items; %s", len(bead.UnblocksIDs), reason)
 			}
-
-			assignments = append(assignments, Assignment{
-				Bead:       bead,
-				Agent:      *bestAgent,
-				Score:      bestScore,
-				Confidence: bestScore,
-				Reason:     m.buildReason(bestAgent, &bead, reason),
-			})
-			usedAgents[bestAgent.ID] = true
 		}
+		score := edges[index].score
+		assignments = append(assignments, Assignment{
+			Bead: bead, Agent: agent, Score: score, Confidence: score,
+			Reason: m.buildReason(&agent, &bead, reason),
+		})
 	}
-
 	return assignments
 }
 
