@@ -906,6 +906,12 @@ func (sc *StateClassifier) classifyInternal(sample *VelocitySample) (*AgentActiv
 	effectiveMatches := filterThinkingToLive(matches, liveMatches)
 	effectiveMatches = filterErrorToLiveWithCurrentSignal(effectiveMatches, liveMatches)
 	effectiveMatches = filterClaudeToolOutputErrors(effectiveMatches, visibleContent, sc.agentType, sc.paneWidth)
+	effectiveMatches = reconcileClaudeLiveness(effectiveMatches, visibleContent, sc.agentType, sc.paneWidth)
+	for _, m := range effectiveMatches {
+		if m.Pattern == claudeFinishedTurnPattern {
+			detectedPatterns = append(detectedPatterns, m.Pattern)
+		}
+	}
 
 	// Calculate proposed state and confidence
 	proposedState, confidence, trigger := sc.classifyState(velocity, effectiveMatches)
@@ -979,6 +985,43 @@ func filterClaudeToolOutputErrors(matches []PatternMatch, content, agentType str
 			continue
 		}
 		out = append(out, m)
+	}
+	return out
+}
+
+// claudeFinishedTurnPattern names the idle evidence reconcileClaudeLiveness
+// contributes for a Claude pane at its input box after a finished turn.
+const claudeFinishedTurnPattern = "claude_finished_turn"
+
+// reconcileClaudeLiveness makes a Claude pane's activity agree with the
+// ordering-aware liveness rule dispatch already trusts (IsLiveBusy defers to
+// agent.ClaudeActivelyWorking). Without it, idle Claude panes classified
+// UNKNOWN, or THINKING on a stale spinner frame, while --robot-is-working
+// called them idle.
+//
+// Thinking matches are dropped only on positive evidence that the turn is
+// over: a completion line is Claude's newest marker, which Claude prints only
+// after the turn ends. Absent that, generic thinking evidence stays, so an
+// unrecognized spinner variant still fails closed as busy. The finished-turn
+// layouts the generic prompt pattern misses (the input box holding queued
+// text, the "⏵⏵" footer) count as idle evidence whenever no live spinner is
+// Claude's newest marker, the gating ClaudeIdlePromptShowing requires.
+func reconcileClaudeLiveness(matches []PatternMatch, content, agentType string, paneWidth int) []PatternMatch {
+	if normalizeAgentType(agentType) != "claude" || agent.ClaudeActivelyWorking(content, paneWidth) {
+		return matches
+	}
+	turnEnded := agent.DetectClaudeTurnState(content, paneWidth) == agent.ClaudeTurnEnded
+	out := make([]PatternMatch, 0, len(matches)+1)
+	hasIdle := false
+	for _, m := range matches {
+		if m.Category == CategoryThinking && turnEnded {
+			continue
+		}
+		hasIdle = hasIdle || m.Category == CategoryIdle
+		out = append(out, m)
+	}
+	if !hasIdle && agent.ClaudeIdlePromptShowing(content) {
+		out = append(out, PatternMatch{Pattern: claudeFinishedTurnPattern, Category: CategoryIdle, State: StateWaiting})
 	}
 	return out
 }

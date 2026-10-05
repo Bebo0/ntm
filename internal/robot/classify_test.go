@@ -244,6 +244,37 @@ func TestClassifyWithOutput_ClaudeToolOutputIsNotAnAgentError(t *testing.T) {
 	}
 }
 
+// Idle Claude panes at their input box after a finished turn classified
+// UNKNOWN (live swarm, 5 of 6 idle panes), or THINKING on a stale spinner
+// frame, while --robot-is-working called them idle. Activity now follows the
+// same ordering-aware liveness rule dispatch uses.
+func TestClassifyWithOutput_ClaudeFinishedTurnIsWaiting(t *testing.T) {
+	box := "────────────────────────────────────────\n❯ check the test results\n────────────────────────────────────────\n" +
+		"  ⏵⏵ bypass permissions on · 1 shell · ↓ to manage\n"
+	tests := []struct {
+		name    string
+		content string
+		want    AgentState
+	}{
+		{"queued text in the box after a finished turn", "● Done; the fix is pushed.\n\n✻ Crunched for 10s · done 11:09 PM · 1 shell still running\n\n" + box, StateWaiting},
+		{"stale spinner frame above the completion line", "· Thundering… (4s)\n● Done.\n\n✻ Worked for 42s · done 9:03 AM\n\n" + box, StateWaiting},
+		{"live spinner is still THINKING", "● Running the suite.\n\n✻ Brewing… (ctrl+c to interrupt · 41s · ↓ 1.2k tokens)\n\n" + box, StateThinking},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			sc := NewStateClassifier("pane", &ClassifierConfig{AgentType: "claude", HysteresisDuration: 0})
+			_, _ = sc.ClassifyWithOutput(tt.content)
+			activity, err := sc.ClassifyWithOutput(tt.content)
+			if err != nil {
+				t.Fatalf("ClassifyWithOutput: %v", err)
+			}
+			if activity.State != tt.want {
+				t.Fatalf("State = %q (patterns %v), want %q", activity.State, activity.DetectedPatterns, tt.want)
+			}
+		})
+	}
+}
+
 // TestClassifyWithOutput_CodexIdlePrompt verifies codex-specific idle detection.
 func TestClassifyWithOutput_CodexIdlePrompt(t *testing.T) {
 
