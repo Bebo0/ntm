@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/Dicklesworthstone/ntm/internal/checkpoint"
+	"github.com/Dicklesworthstone/ntm/internal/robot"
 )
 
 var (
@@ -70,6 +71,25 @@ func (s *Server) prepareJobRequest(req CreateJobRequest) (CreateJobRequest, erro
 		if err != nil {
 			return req, fmt.Errorf("%w: resolve job project: %v", errInvalidJobRequest, err)
 		}
+	case JobTypeSwarmSpawn:
+		// The HTTP server's selected project is the default for accepted
+		// swarms, not the process CWD. Resolve relative overrides against that
+		// selection now, before queuing; never rewrite the public params.
+		workingDir := ""
+		if value, supplied := frozen.Params["working_dir"]; supplied {
+			var ok bool
+			workingDir, ok = value.(string)
+			if !ok {
+				return req, fmt.Errorf("%w: working_dir must be a string", errInvalidJobRequest)
+			}
+		}
+		if !filepath.IsAbs(workingDir) {
+			workingDir = filepath.Join(s.projectDirSnapshot(), workingDir)
+		}
+		frozen.executionProjectDir, err = filepath.Abs(workingDir)
+		if err != nil {
+			return req, fmt.Errorf("%w: resolve swarm project: %v", errInvalidJobRequest, err)
+		}
 	}
 	return frozen, nil
 }
@@ -82,7 +102,19 @@ func (s *Server) jobExecutionServer(req CreateJobRequest) *Server {
 	if req.executionProjectDir == "" {
 		return s
 	}
-	return &Server{projectDir: req.executionProjectDir, wsHub: s.wsHub}
+	view := &Server{projectDir: req.executionProjectDir, wsHub: s.wsHub}
+	if req.Type == JobTypeSwarmSpawn && s.spawnAgents != nil {
+		// Keep the same spawn service and execution context (including
+		// cancellation, progress and operation ownership). Only its admitted
+		// directory is authoritative; neither config changes nor a caller's
+		// relative path may redirect the queued launch at dispatch time.
+		launch, project := s.spawnAgents, req.executionProjectDir
+		view.spawnAgents = func(ctx context.Context, opts robot.SpawnOptions) (*robot.SpawnOutput, error) {
+			opts.WorkingDir = project
+			return launch(ctx, opts)
+		}
+	}
+	return view
 }
 
 // submitJob is the shared admission path for managed async jobs. Capacity is

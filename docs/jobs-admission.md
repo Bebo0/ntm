@@ -139,12 +139,52 @@ isolation boundary, a provider-configuration snapshot, or an execution permissio
 grant. Resumes additionally canonicalize their project selection and reject
 detected state-directory redirection at dispatch. Workflow validation, path
 confinement, run locks, and current policy checks still run normally. Direct
-synchronous routes retain their existing behavior. Swarm default-directory
-resolution and checkpoint source/destination execution are not changed.
+synchronous routes and checkpoint source/destination execution retain their
+existing behavior. Queued swarm directory selection is described below.
 
 The private execution binding is not included in the public request fingerprint:
 retrying an existing `operation_id` still asks for its original recorded outcome,
 not a rerun in whatever project is currently selected on the server.
+
+## Queued swarm project identity
+
+`swarm_spawn` jobs now bind a working directory before admission completes.
+Omitting `params.working_dir`, or supplying an empty string, selects the server's
+current project, not an unrelated process working directory. A relative override
+is resolved against that selected project; an absolute override selects that
+directory directly. The resulting absolute path appears as `job.project_dir` in
+the pending response and is persisted with the admission receipt. A null or
+non-string override fails admission with HTTP 400 and creates no job.
+
+For a server selecting `/work/project-a`, this request launches in
+`/work/project-a/component`, even if `/api/v1/config` switches the server to
+`/work/project-b` while the job is queued:
+
+```json
+{
+  "type": "swarm_spawn",
+  "params": {
+    "session": "component-workers",
+    "working_dir": "component",
+    "cc_count": 2,
+    "launch_ready_timeout": "45s"
+  }
+}
+```
+
+Dispatch passes the binding to the same spawn service, preserving launch pacing,
+readiness, cancellation, progress recording, reservation policy, and partial
+failure output. Dry runs use the same binding. Queued cancellation keeps the
+recorded directory without starting an agent. Direct CLI and synchronous REST
+spawning retain their existing directory semantics.
+
+The original parameters and operation-ID fingerprint are unchanged. An
+operation-ID retry asks for the original recorded result, not another execution
+in the newly selected project. `job.project_dir` describes this admission;
+on replay the recorded result describes the earlier operation's actual effects.
+This freezes a path selection, not file contents, symlink targets, provider
+configuration, filesystem permissions, or authorization. Existing spawn checks
+still run at execution; admission does not create the selected directory.
 
 ## Readiness-gated fleet startup
 

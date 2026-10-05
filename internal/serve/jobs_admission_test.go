@@ -323,7 +323,7 @@ func TestJobAdmissionConfigLimitsAreValidated(t *testing.T) {
 	}
 	for _, limit := range []int{-1, maxJobQueueCapacity + 1} {
 		if err := ValidateConfig(Config{JobQueueCapacity: limit}); err == nil {
-			t.Fatalf("invalid queue capacity %d accepted", limit)
+			t.Errorf("invalid queue capacity %d accepted", limit)
 		}
 		srv := New(Config{JobQueueCapacity: limit})
 		if err := srv.validate(); err == nil {
@@ -434,10 +434,10 @@ func TestJobAdmissionHTTPPendingReceiptKeepsSelectedProject(t *testing.T) {
 	}
 }
 
-func TestJobAdmissionNonPipelineKeepsExistingProjectResolution(t *testing.T) {
+func TestJobAdmissionCheckpointKeepsExistingProjectResolution(t *testing.T) {
 	srv := NewHermeticServer("pin-test")
 	defer srv.Stop()
-	for _, kind := range []string{JobTypeSwarmSpawn, JobTypeCheckpointRestore} {
+	for _, kind := range []string{JobTypeCheckpointRestore} {
 		req := CreateJobRequest{Type: kind, Params: map[string]interface{}{"working_dir": "custom-project"}}
 		frozen, err := srv.prepareJobRequest(req)
 		if err != nil {
@@ -446,5 +446,231 @@ func TestJobAdmissionNonPipelineKeepsExistingProjectResolution(t *testing.T) {
 		if frozen.executionProjectDir != "" || srv.jobExecutionServer(frozen) != srv || frozen.Params["working_dir"] != "custom-project" {
 			t.Fatalf("pipeline pin changed %s resolution", kind)
 		}
+	}
+}
+
+func TestJobAdmissionSwarmProjectPinnedWithoutChangingRequest(t *testing.T) {
+	projectA, projectB, override := t.TempDir(), t.TempDir(), t.TempDir()
+	for _, tc := range []struct {
+		name, workingDir, want string
+		supplied               bool
+	}{
+		{name: "omitted", want: projectA},
+		{name: "empty", supplied: true, want: projectA},
+		{name: "relative", supplied: true, workingDir: "sub/project", want: filepath.Join(projectA, "sub/project")},
+		{name: "parent", supplied: true, workingDir: "../other", want: filepath.Join(projectA, "../other")},
+		{name: "absolute", supplied: true, workingDir: override, want: override},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := &Server{projectDir: projectA}
+			req := CreateJobRequest{Type: JobTypeSwarmSpawn, Session: "fleet", Params: map[string]interface{}{
+				"operation_id": "same-request", "cc_count": 2, "label": "lane", "dry_run": true,
+			}}
+			if tc.supplied {
+				req.Params["working_dir"] = tc.workingDir
+			}
+			before, err := jobOperationFingerprint(req)
+			if err != nil {
+				t.Fatal(err)
+			}
+			original, err := json.Marshal(req)
+			if err != nil {
+				t.Fatal(err)
+			}
+			frozen, err := srv.prepareJobRequest(req)
+			if err != nil || frozen.executionProjectDir != tc.want {
+				t.Fatalf("admitted project = %q, want %q: %v", frozen.executionProjectDir, tc.want, err)
+			}
+			after, err := jobOperationFingerprint(frozen)
+			if err != nil || after != before {
+				t.Fatal("private binding changed operation-ID fingerprint")
+			}
+			encoded, err := json.Marshal(frozen)
+			if err != nil || string(encoded) != string(original) {
+				t.Fatalf("admission rewrote the public request: %s, want %s: %v", encoded, original, err)
+			}
+			// Change both the server selection and the caller-owned request.
+			srv.mu.Lock()
+			srv.projectDir = projectB
+			srv.mu.Unlock()
+			req.Params["working_dir"] = projectB
+			cause := errors.New("partially launched")
+			partial := &robot.SpawnOutput{Session: "fleet--lane", WorkingDir: tc.want}
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			cancel()
+			var received robot.SpawnOptions
+			calls := 0
+			srv.spawnAgents = func(got context.Context, opts robot.SpawnOptions) (*robot.SpawnOutput, error) {
+				calls++
+				if got != ctx || !errors.Is(got.Err(), context.Canceled) {
+					t.Fatal("execution view detached cancellation or reporter context")
+				}
+				received = opts
+				return partial, cause
+			}
+			view := srv.jobExecutionServer(frozen)
+			if view == srv || view.projectDir != tc.want || view.stateStore != nil || view.jobStore != nil || view.spawnAgents == nil {
+				t.Fatal("execution view lost its namespace/service or copied ownership")
+			}
+			opts := robot.SpawnOptions{Session: "fleet", Label: "lane", WorkingDir: tc.workingDir,
+				CCCount: 2, DryRun: true, Safety: true, AssignWork: true, RequireReservation: true,
+				LifecycleDeps: &robot.SpawnLifecycleDependencies{},
+			}
+			result, err := view.spawnAgents(ctx, opts)
+			want := opts
+			want.WorkingDir = tc.want
+			if calls != 1 || result != partial || err != cause || !reflect.DeepEqual(received, want) || opts.WorkingDir != tc.workingDir {
+				t.Fatalf("binding changed controls, receipt or error: %+v, %v", received, err)
+			}
+		})
+	}
+}
+
+func TestJobAdmissionSwarmMissingServiceRemainsUnavailable(t *testing.T) {
+	srv := &Server{projectDir: t.TempDir()}
+	frozen, err := srv.prepareJobRequest(CreateJobRequest{Type: JobTypeSwarmSpawn})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if srv.jobExecutionServer(frozen).spawnAgents != nil {
+		t.Fatal("execution view manufactured a launcher when the service is unavailable")
+	}
+}
+
+func TestJobAdmissionSwarmRejectsMalformedDirectory(t *testing.T) {
+	srv := &Server{projectDir: t.TempDir()}
+	for _, value := range []interface{}{nil, 42, true, []string{}, map[string]interface{}{}} {
+		_, err := srv.prepareJobRequest(CreateJobRequest{Type: JobTypeSwarmSpawn, Params: map[string]interface{}{"working_dir": value}})
+		if !errors.Is(err, errInvalidJobRequest) || !strings.Contains(err.Error(), "working_dir") {
+			t.Fatalf("invalid directory %#v was accepted: %v", value, err)
+		}
+	}
+}
+
+func TestJobAdmissionSwarmProjectHTTPQueuedExecutionAndRecovery(t *testing.T) {
+	for _, scenario := range []string{"default", "relative partial failure", "absolute preview", "queued cancellation"} {
+		t.Run(scenario, func(t *testing.T) {
+			srv, _ := newJournalHTTPServer(t, filepath.Join(t.TempDir(), "state.db"))
+			srv.jobExecutor.maxConcurrent, srv.jobExecutor.maxQueued = 1, 1
+			projectA, projectB, absolute := t.TempDir(), t.TempDir(), t.TempDir()
+			srv.projectDir = projectA
+			started, release := make(chan struct{}), make(chan struct{})
+			var once sync.Once
+			unblock := func() { once.Do(func() { close(release) }) }
+			defer unblock()
+			launched := make(chan robot.SpawnOptions, 1)
+			srv.spawnAgents = func(ctx context.Context, opts robot.SpawnOptions) (*robot.SpawnOutput, error) {
+				out := &robot.SpawnOutput{Session: opts.Session, WorkingDir: opts.WorkingDir, DryRun: opts.DryRun}
+				if opts.Session == "blocker" {
+					close(started)
+					select {
+					case <-release:
+					case <-ctx.Done():
+						return out, ctx.Err()
+					}
+				} else {
+					launched <- opts
+					if scenario == "relative partial failure" {
+						out.Agents = []robot.SpawnedAgent{{Pane: "0.1", Type: "claude"}}
+						return out, errors.New("second launch failed")
+					}
+				}
+				out.Success = true
+				return out, nil
+			}
+			admissionAcceptedJob(t, srv, `{"type":"swarm_spawn","params":{"session":"blocker","cc_count":1}}`)
+			awaitExecutorSignal(t, started)
+			params := map[string]interface{}{"session": "fleet", "cc_count": 2}
+			want := projectA
+			if scenario == "relative partial failure" {
+				params["working_dir"] = "child"
+				want = filepath.Join(projectA, "child")
+			}
+			if scenario == "absolute preview" {
+				params["working_dir"], params["dry_run"] = absolute, true
+				want = absolute
+			}
+			body, err := json.Marshal(CreateJobRequest{Type: JobTypeSwarmSpawn, Params: params})
+			if err != nil {
+				t.Fatal(err)
+			}
+			queued := admissionAcceptedJob(t, srv, string(body))
+			if queued.ProjectDir != want || queued.Status != JobStatusPending {
+				t.Fatalf("202 lost pending swarm namespace: %+v, want %q", queued, want)
+			}
+			srv.mu.Lock()
+			srv.projectDir = projectB
+			srv.mu.Unlock()
+			dir, err := srv.jobJournalDir()
+			if err != nil {
+				t.Fatal(err)
+			}
+			assertSaved := func(status JobStatus) {
+				t.Helper()
+				jobs, err := (&jobJournal{dir: dir}).load()
+				if err != nil {
+					t.Fatal(err)
+				}
+				for _, job := range jobs {
+					if job.ID == queued.ID {
+						if job.ProjectDir != want || job.Status != status {
+							t.Fatalf("durable swarm namespace/state changed: %+v", job)
+						}
+						return
+					}
+				}
+				t.Fatal("accepted swarm has no durable receipt")
+			}
+			assertSaved(JobStatusPending)
+			if scenario == "queued cancellation" {
+				rec := admissionRequest(srv, http.MethodDelete, "/api/v1/jobs/"+queued.ID, "")
+				if rec.Code != http.StatusOK {
+					t.Fatalf("cancel = %d %s", rec.Code, rec.Body.String())
+				}
+				assertSaved(JobStatusCancelled)
+				select {
+				case <-launched:
+					t.Fatal("cancelled queued swarm reached the launch service")
+				default:
+				}
+				return
+			}
+			unblock()
+			final := pollJobTerminal(t, srv, queued.ID)
+			wantStatus := JobStatusCompleted
+			if scenario == "relative partial failure" {
+				wantStatus = JobStatusFailed
+				if !strings.Contains(final.Job.Error, "second launch failed") || final.Job.Result["agents"] == nil {
+					t.Fatalf("project binding discarded partial recovery output: %+v", final.Job)
+				}
+			}
+			if final.Job.Status != string(wantStatus) || final.Job.Result["working_dir"] != want || srv.jobStore.Get(queued.ID).ProjectDir != want {
+				t.Fatalf("queued launch did not retain the admitted project: %+v", final.Job)
+			}
+			select {
+			case opts := <-launched:
+				if opts.WorkingDir != want || opts.DryRun != (scenario == "absolute preview") {
+					t.Fatalf("launch service received the wrong namespace/options: %+v", opts)
+				}
+			default:
+				t.Fatal("completed job never reached spawn")
+			}
+		})
+	}
+}
+
+func TestJobAdmissionSwarmRejectsMalformedDirectoryWithoutAdmission(t *testing.T) {
+	srv := NewHermeticServer("swarm-project-test")
+	defer srv.Stop()
+	for _, value := range []string{`null`, `42`, `true`, `[]`, `{}`} {
+		rec := admissionRequest(srv, http.MethodPost, "/api/v1/jobs",
+			fmt.Sprintf(`{"type":"swarm_spawn","params":{"session":"fleet","cc_count":1,"working_dir":%s}}`, value))
+		if rec.Code != http.StatusBadRequest || !strings.Contains(rec.Body.String(), "working_dir") {
+			t.Fatalf("invalid directory %s = %d %s", value, rec.Code, rec.Body.String())
+		}
+	}
+	if len(srv.jobStore.List()) != 0 || srv.jobExecutor.snapshot().Owned != 0 {
+		t.Fatal("invalid project selection consumed a job or capacity")
 	}
 }
