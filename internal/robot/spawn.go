@@ -558,6 +558,16 @@ func GetSpawn(ctx context.Context, opts SpawnOptions, cfg *config.Config) (*Spaw
 		output.Session = opts.Session
 	}
 
+	expanded, selectedRecipe, recipeErr := loadSpawnRecipe(opts, cfg)
+	if recipeErr != nil {
+		output.Error = recipeErr.Error()
+		output.RobotResponse = NewErrorResponse(recipeErr, ErrCodeInvalidFlag,
+			"Choose a valid recipe without explicit counts; inspect ntm recipes show <name>")
+		return output, nil
+	}
+	opts = expanded
+	output.PresetUsed = opts.Preset
+
 	assignStrategy, validationErr := validateSpawnRequest(opts)
 	if validationErr != nil {
 		output.Error = validationErr.Error()
@@ -579,7 +589,11 @@ func GetSpawn(ctx context.Context, opts SpawnOptions, cfg *config.Config) (*Spaw
 	// Render launch commands up front so a model/effort override that the
 	// configured launch template cannot honor fails before any tmux session or
 	// pane is created (bd-rr8gn).
-	agentCommands, agentCommandsErr := getAgentCommandsWithOverrides(cfg, opts)
+	commandConfig := cfg
+	if selectedRecipe != nil && commandConfig == nil {
+		commandConfig = config.Default()
+	}
+	agentCommands, agentCommandsErr := getAgentCommandsWithOverrides(commandConfig, opts)
 	if agentCommandsErr != nil {
 		output.Error = agentCommandsErr.Error()
 		output.RobotResponse = NewErrorResponse(
@@ -669,18 +683,11 @@ func GetSpawn(ctx context.Context, opts SpawnOptions, cfg *config.Config) (*Spaw
 	}
 
 	// Get working directory
-	dir := opts.WorkingDir
-	if dir == "" && cfg != nil {
-		dir = cfg.GetProjectDir(opts.Session)
-	}
-	if dir == "" {
-		var err error
-		dir, err = os.Getwd()
-		if err != nil {
-			output.Error = fmt.Sprintf("could not determine working directory: %v", err)
-			output.RobotResponse = NewErrorResponse(err, ErrCodeInternalError, "Check working directory permissions")
-			return output, nil
-		}
+	dir, dirErr := spawnWorkingDirectory(opts, cfg)
+	if dirErr != nil {
+		output.Error = fmt.Sprintf("could not determine working directory: %v", dirErr)
+		output.RobotResponse = NewErrorResponse(dirErr, ErrCodeInternalError, "Check working directory permissions")
+		return output, nil
 	}
 	output.WorkingDir = dir
 	// Surface the key Agent Mail will actually register under whenever it
@@ -756,6 +763,14 @@ func GetSpawn(ctx context.Context, opts SpawnOptions, cfg *config.Config) (*Spaw
 		}
 		actionable = filterAssignableActionableRecommendationsForProject(dir, actionable, 0)
 		verifiedAssignmentPlan = restrictTriageToAssignable(nil, actionable)
+	}
+
+	recipeLaunches, recipeErr := renderSpawnRecipe(opts, selectedRecipe, cfg)
+	if recipeErr != nil {
+		output.Error = recipeErr.Error()
+		output.RobotResponse = NewErrorResponse(recipeErr, ErrCodeInvalidFlag,
+			"Fix the recipe's model/effort or the selected agent command templates")
+		return output, nil
 	}
 
 	// Load handoff context for session recovery (non-fatal if not found)
@@ -907,6 +922,7 @@ func GetSpawn(ctx context.Context, opts SpawnOptions, cfg *config.Config) (*Spaw
 			paneIdx++
 		}
 
+		applySpawnRecipePreview(output.WouldCreate, recipeLaunches)
 		output.Layout = "tiled"
 		return output, nil
 	}
@@ -1105,21 +1121,22 @@ func GetSpawn(ctx context.Context, opts SpawnOptions, cfg *config.Config) (*Spaw
 	// live pane IDs, so the manifest must carry "%N", never the physical
 	// address (W1 gate finding on bd-ws1-truth-safety-l5ddi.8).
 	monitorPaneIDs := make(map[string]string, len(launchRequests))
+	monitorCommands := make(map[string]string, len(launchRequests))
+	launchModels := spawnLaunchModels(cfg, opts)
 	launch := deps.LaunchAgent
-	if opts.LifecycleDeps == nil || opts.LifecycleDeps.LaunchAgent == nil {
-		launchModels := spawnLaunchModels(cfg, opts)
-		launch = func(ctx context.Context, pane tmux.Pane, session, agentType string, num int, dir, command string) (SpawnedAgent, error) {
-			return launchAgentWithModel(ctx, pane, session, agentType, num, dir, command, launchModels[agentType])
-		}
-	}
 	for i, request := range launchRequests {
 		if err := ctx.Err(); err != nil {
 			setSpawnCancellation(output, err)
 			return output, nil
 		}
 		pane := panes[startIdx+i]
+		command, model := agentCommands[request.agentType], launchModels[request.agentType]
+		if spec, ok := recipeLaunches[spawnRecipeKey{agentType: request.agentType, number: request.number}]; ok {
+			command, model = spec.command, spec.model
+		}
+		launchCtx := context.WithValue(ctx, spawnLaunchModelContextKey{}, model)
 		agent, launchErr := launch(
-			ctx, pane, opts.Session, request.agentType, request.number, dir, agentCommands[request.agentType],
+			launchCtx, pane, opts.Session, request.agentType, request.number, dir, command,
 		)
 		if agent.Pane == "" {
 			agent.Pane = fmt.Sprintf("%d.%d", pane.WindowIndex, pane.Index)
@@ -1130,6 +1147,10 @@ func GetSpawn(ctx context.Context, opts SpawnOptions, cfg *config.Config) (*Spaw
 		if agent.Title == "" {
 			agent.Title = fmt.Sprintf("%s__%s_%d", opts.Session, agentTypeShort(request.agentType), request.number)
 		}
+		if agent.Variant == "" {
+			agent.Variant = model.ModelAlias
+		}
+		monitorCommands[agent.Pane] = command
 		agent.Name = nameMap.AssignNew(request.agentType, agent.Pane)
 		if pane.ID != "" {
 			monitorPaneIDs[agent.Pane] = pane.ID
@@ -1153,7 +1174,7 @@ func GetSpawn(ctx context.Context, opts SpawnOptions, cfg *config.Config) (*Spaw
 	// must never fail the spawn itself — on failure the envelope carries
 	// monitor_started:false plus the error, and a degraded-event row is
 	// recorded so the degradation stays visible.
-	startSpawnSessionMonitor(ctx, deps, output, opts, cfg, dir, agentCommands, monitorPaneIDs)
+	startSpawnSessionMonitor(ctx, deps, output, opts, cfg, dir, monitorCommands, monitorPaneIDs)
 
 	if len(launchErrors) > 0 {
 		launchErr := errors.Join(launchErrors...)
@@ -1231,7 +1252,7 @@ func startSpawnSessionMonitor(
 	opts SpawnOptions,
 	cfg *config.Config,
 	dir string,
-	agentCommands map[string]string,
+	commandsByPane map[string]string,
 	monitorPaneIDs map[string]string,
 ) {
 	if deps.StartSessionMonitor == nil {
@@ -1261,7 +1282,7 @@ func startSpawnSessionMonitor(
 			PaneIndex: paneIndex,
 			Type:      agent.Type,
 			Model:     agent.Variant,
-			Command:   agentCommands[agent.Type],
+			Command:   commandsByPane[agent.Pane],
 		})
 	}
 
@@ -1333,11 +1354,11 @@ func PrintSpawn(ctx context.Context, opts SpawnOptions, cfg *config.Config) erro
 	return encodeTerminalRobotOutput(output, output.RobotResponse, "robot spawn failed")
 }
 
-// launchAgent launches a single agent and returns its info. Its launch
-// specification records no model; GetSpawn launches through
-// launchAgentWithModel so production panes record theirs.
+// launchAgent launches a single agent using the final model resolved by
+// GetSpawn. Lifecycle decorators preserve that per-call context, so paced and
+// journaled launches record the same specification as undecorated launches.
 func launchAgent(ctx context.Context, pane tmux.Pane, session, agentType string, num int, dir, command string) (SpawnedAgent, error) {
-	return launchAgentWithModel(ctx, pane, session, agentType, num, dir, command, spawnLaunchModel{})
+	return launchAgentWithModel(ctx, pane, session, agentType, num, dir, command, spawnLaunchModelFromContext(ctx))
 }
 
 // launchAgentWithModel launches a single agent, recording model in the pane's
@@ -1347,10 +1368,11 @@ func launchAgentWithModel(ctx context.Context, pane tmux.Pane, session, agentTyp
 
 	title := fmt.Sprintf("%s__%s_%d", session, agentTypeShort(agentType), num)
 	agent := SpawnedAgent{
-		Pane:  fmt.Sprintf("%d.%d", pane.WindowIndex, pane.Index),
-		Type:  agentType,
-		Title: title,
-		Ready: false,
+		Pane:    fmt.Sprintf("%d.%d", pane.WindowIndex, pane.Index),
+		Type:    agentType,
+		Variant: model.ModelAlias,
+		Title:   title,
+		Ready:   false,
 	}
 	if err := ctx.Err(); err != nil {
 		agent.Error = fmt.Sprintf("launch canceled: %v", err)
