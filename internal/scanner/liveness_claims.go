@@ -1,3 +1,5 @@
+//go:build !liveness_audit
+
 package scanner
 
 import (

@@ -41,13 +41,6 @@ import (
 // bounded tails, so a moderate capture is sufficient and cheap.
 const rotationCaptureLines = 100
 
-func init() {
-	// G2 config-key liveness claims (WS6-wire): this package reads the
-	// [rotation.thresholds] restart triggers in newRotationChecker.
-	config.RegisterReader("rotation.thresholds.restart_if_tokens_above", newRotationChecker)
-	config.RegisterReader("rotation.thresholds.restart_if_session_hours", newRotationChecker)
-}
-
 // rotationDecision records one trigger decision for logging and tests.
 type rotationDecision struct {
 	PaneID     string  // tmux pane ID (%N)

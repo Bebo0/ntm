@@ -47,9 +47,3 @@ func applyMemoryRecoveryLink(cfg *Config, md memoryAliasDefinedChecker) {
 		}
 	}
 }
-
-func init() {
-	// G2 liveness claim. memory.enabled is additionally read directly by the
-	// send injection path (internal/cli), but a key has exactly one claim.
-	RegisterReader("memory.enabled", applyMemoryRecoveryLink)
-}

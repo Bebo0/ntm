@@ -1,5 +1,4 @@
-//go:build ensemble_experimental
-// +build ensemble_experimental
+//go:build ensemble_experimental && !liveness_audit
 
 package cli
 

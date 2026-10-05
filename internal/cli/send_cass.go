@@ -21,18 +21,6 @@ import (
 	"github.com/Dicklesworthstone/ntm/internal/robot"
 )
 
-func init() {
-	// G2 config-key liveness claims (bd-ws2-wire-or-delete-ykmcz.11): the
-	// send-scoped [cass.context] keys are read here for both send surfaces.
-	config.RegisterReader("cass.context.enabled", robotSendCASSOptions)
-	config.RegisterReader("cass.context.max_sessions", robotSendCASSOptions)
-	config.RegisterReader("cass.context.lookback_days", robotSendCASSOptions)
-	config.RegisterReader("cass.context.max_tokens", robotSendCASSOptions)
-	config.RegisterReader("cass.context.min_relevance", robotSendCASSOptions)
-	config.RegisterReader("cass.context.skip_if_context_above", robotSendCASSOptions)
-	config.RegisterReader("cass.context.prefer_same_project", robotSendCASSOptions)
-}
-
 // resolveSendCASSEnabled applies the shared flag/config precedence:
 // --no-cass > --with-cass > [cass] enabled && [cass.context] enabled.
 func resolveSendCASSEnabled(withFlag, noFlag bool, cfg *config.Config) bool {

@@ -16,21 +16,6 @@ import (
 // injection the default for robot sends (the flag is then redundant);
 // [memory] enabled=false degrades an explicit --with-memory to a recorded
 // skip inside the robot layer instead of failing the send.
-func init() {
-	// G2 config-key liveness claims (WS6-wire, bd-ws6-config-truth-ienmd.1):
-	// the send-scoped [memory] keys are read here. They are NOT
-	// recovery-shadowed and stay in [memory]; the recovery-overlapping keys
-	// are aliased into [recovery] by internal/config (recovery_alias.go).
-	config.RegisterReader("memory.send_injection", robotSendMemoryOptions)
-	config.RegisterReader("memory.send_max_rules", robotSendMemoryOptions)
-	config.RegisterReader("memory.send_budget_tokens", robotSendMemoryOptions)
-	// memory.query_timeout_seconds bounds the cm query behind send-time
-	// injection. It used to be claimed by the [recovery] alias fold as well;
-	// that fold is gone (ntm#323) and this is now its only reader, so the
-	// claim belongs here with the rest of the send-scoped keys.
-	config.RegisterReader("memory.query_timeout_seconds", robotSendMemoryOptions)
-}
-
 func robotSendMemoryOptions(flagEnabled bool, cfg *config.Config) (bool, *robot.CMInjectConfig) {
 	enabled := flagEnabled
 	if cfg == nil {

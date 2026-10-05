@@ -1,6 +1,9 @@
+//go:build !liveness_audit
+
 package cli
 
 import (
+	"github.com/Dicklesworthstone/ntm/internal/agentmail"
 	"github.com/Dicklesworthstone/ntm/internal/bv"
 	"github.com/Dicklesworthstone/ntm/internal/config"
 	"github.com/Dicklesworthstone/ntm/internal/encryption"
@@ -11,8 +14,10 @@ import (
 // WS0-G2 config-key liveness claims for keys consumed by internal/cli
 // (bd-g2-claims-backlog-o787y). Each claim references the real function on
 // the read path; see internal/config/liveness.go for the contract.
-// Pre-existing per-call-site claims (memory.send_*, cass.context.*,
-// retry.agent_mail.*) stay in their own files.
+//
+// Every claim lives in a liveness_claims*.go file: the dead-code gate builds
+// with -tags liveness_audit, which drops these files, so a reader that is
+// reachable only through its claim is reported dead (bd-ir0li).
 func init() {
 	// Agent Mail client + daemon wiring (mail.go, spawn.go, monitor.go).
 	config.RegisterReader("agent_mail.enabled", newAgentMailClient)
@@ -269,4 +274,33 @@ func init() {
 	// CAAM seat selection for unpinned spawn/add panes (caam_seat.go,
 	// spawn.go, add.go). ntm#319.
 	config.RegisterReader("integrations.caam.seat_selection", caamSeatSelectionEnabled)
+
+	// [retry.agent_mail] (bd-ws6-config-truth-ienmd.1). The reader is
+	// agentmail.ApplyRetryPolicy, handed the loaded values by
+	// applyConfiguredPolicies (policy_wiring.go); the claim lives here because
+	// internal/agentmail cannot import internal/config (import cycle via
+	// internal/watcher → agentmail).
+	config.RegisterReader("retry.agent_mail.max_attempts", agentmail.ApplyRetryPolicy)
+	config.RegisterReader("retry.agent_mail.initial_delay_ms", agentmail.ApplyRetryPolicy)
+
+	// Send-scoped [memory] keys (robot_memory.go). They are NOT
+	// recovery-shadowed and stay in [memory]; the recovery-overlapping keys
+	// are aliased into [recovery] by internal/config (recovery_alias.go).
+	// memory.query_timeout_seconds bounds the cm query behind send-time
+	// injection; since the [recovery] alias fold went (ntm#323) this is its
+	// only reader.
+	config.RegisterReader("memory.send_injection", robotSendMemoryOptions)
+	config.RegisterReader("memory.send_max_rules", robotSendMemoryOptions)
+	config.RegisterReader("memory.send_budget_tokens", robotSendMemoryOptions)
+	config.RegisterReader("memory.query_timeout_seconds", robotSendMemoryOptions)
+
+	// Send-scoped [cass.context] keys, read for both send surfaces
+	// (send_cass.go, bd-ws2-wire-or-delete-ykmcz.11).
+	config.RegisterReader("cass.context.enabled", robotSendCASSOptions)
+	config.RegisterReader("cass.context.max_sessions", robotSendCASSOptions)
+	config.RegisterReader("cass.context.lookback_days", robotSendCASSOptions)
+	config.RegisterReader("cass.context.max_tokens", robotSendCASSOptions)
+	config.RegisterReader("cass.context.min_relevance", robotSendCASSOptions)
+	config.RegisterReader("cass.context.skip_if_context_above", robotSendCASSOptions)
+	config.RegisterReader("cass.context.prefer_same_project", robotSendCASSOptions)
 }

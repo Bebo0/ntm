@@ -7,8 +7,6 @@ import (
 	"net/http"
 	"sync"
 	"time"
-
-	"github.com/Dicklesworthstone/ntm/internal/config"
 )
 
 // AlertType categorizes alert events
@@ -125,13 +123,6 @@ func ApplyAlertRetryPolicy(maxAttempts, initialDelayMs int) {
 	if initialDelayMs > 0 {
 		alertRetryInitialDelay = time.Duration(initialDelayMs) * time.Millisecond
 	}
-}
-
-func init() {
-	// G2 config-key liveness claims: this package reads the [retry.alerts]
-	// override via ApplyAlertRetryPolicy at startup.
-	config.RegisterReader("retry.alerts.max_attempts", ApplyAlertRetryPolicy)
-	config.RegisterReader("retry.alerts.initial_delay_ms", ApplyAlertRetryPolicy)
 }
 
 // =============================================================================

@@ -13,8 +13,6 @@ import (
 	"math/rand"
 	"sync"
 	"time"
-
-	"github.com/Dicklesworthstone/ntm/internal/config"
 )
 
 type retryPolicy struct {
@@ -100,16 +98,4 @@ func nextRetryDelay(attempt int, base, max time.Duration) time.Duration {
 		delay = half + time.Duration(rand.Int63n(int64(half)+1))
 	}
 	return delay
-}
-
-func init() {
-	// G2 config-key liveness claims: this package reads the [retry] globals
-	// and the [retry.webhook] override via ApplyRetryPolicy at startup.
-	config.RegisterReader("retry.max_attempts", ApplyRetryPolicy)
-	config.RegisterReader("retry.initial_delay_ms", ApplyRetryPolicy)
-	config.RegisterReader("retry.max_delay_ms", ApplyRetryPolicy)
-	config.RegisterReader("retry.backoff_factor", ApplyRetryPolicy)
-	config.RegisterReader("retry.jitter", ApplyRetryPolicy)
-	config.RegisterReader("retry.webhook.max_attempts", ApplyRetryPolicy)
-	config.RegisterReader("retry.webhook.initial_delay_ms", ApplyRetryPolicy)
 }

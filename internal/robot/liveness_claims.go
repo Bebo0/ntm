@@ -1,3 +1,5 @@
+//go:build !liveness_audit
+
 package robot
 
 import (
@@ -7,8 +9,8 @@ import (
 // WS0-G2 config-key liveness claims for keys consumed by internal/robot
 // (bd-g2-claims-backlog-o787y). Each claim references the real function on
 // the read path of the key; see internal/config/liveness.go for the
-// contract. Per-call-site claims that predate this file (retry.alerts.*,
-// integrations.xf.enabled) stay where they are.
+// contract. The liveness_audit tag drops this file for the dead-code gate
+// (bd-ir0li).
 func init() {
 	// Alert thresholds: copied from cfg.Alerts into alerts.Config by
 	// alertConfigForProject (robot.go), on the GetAlerts/status/snapshot path.
@@ -113,4 +115,13 @@ func init() {
 
 	// Safety profile echoed on the robot status/snapshot surfaces (robot.go).
 	config.RegisterReader("safety.profile", newStatusOutput)
+
+	// [retry.alerts] override, applied at startup (alerts.go).
+	config.RegisterReader("retry.alerts.max_attempts", ApplyAlertRetryPolicy)
+	config.RegisterReader("retry.alerts.initial_delay_ms", ApplyAlertRetryPolicy)
+
+	// integrations.xf.enabled is a LIVE knob, kept while the rest of
+	// [integrations.xf] was removed (bd-ws6-config-truth-ienmd.2): it gates
+	// the built-in xf-search entry in GetPalette output (tui_parity.go).
+	config.RegisterReader("integrations.xf.enabled", GetPalette)
 }

@@ -47,21 +47,11 @@ import (
 	"time"
 
 	"github.com/Dicklesworthstone/ntm/internal/agentmail"
-	"github.com/Dicklesworthstone/ntm/internal/config"
 	dispatchsvc "github.com/Dicklesworthstone/ntm/internal/dispatch"
 	"github.com/Dicklesworthstone/ntm/internal/robot"
 	"github.com/Dicklesworthstone/ntm/internal/state"
 	"github.com/Dicklesworthstone/ntm/internal/tmux"
 )
-
-func init() {
-	// WS0-G2 config-key liveness claims: this package reads the
-	// [coordinator] mail-nudge knobs in newMailNudgeChecker (via the
-	// CoordinatorConfig the CLI bridges from TOML).
-	config.RegisterReader("coordinator.mail_nudge", newMailNudgeChecker)
-	config.RegisterReader("coordinator.nudge_cooldown_seconds", newMailNudgeChecker)
-	config.RegisterReader("coordinator.nudge_message", newMailNudgeChecker)
-}
 
 // mailNudgeCaptureLines is how much fresh pane tail is captured for the
 // fire-time safety gates (same bound rotation.go and caam_failover.go use).
