@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/Dicklesworthstone/ntm/internal/config"
 )
@@ -21,14 +22,63 @@ type Manager struct {
 	globalConfig config.PrivacyConfig
 	sessions     map[string]*SessionState
 	mu           sync.RWMutex
+	// lookup finds settings another ntm process recorded for a session
+	// (`ntm spawn --privacy` records them on the tmux session); nil means
+	// only this process's registrations count. misses throttles repeat
+	// lookups for sessions that recorded nothing.
+	lookup func(session string) (*SessionState, bool)
+	misses map[string]time.Time
 }
+
+// sessionLookupMissTTL bounds how long "nothing recorded" is trusted before
+// the next lookup, which bounds both tmux calls from busy writers and how
+// long a process can miss a session that was just created private.
+const sessionLookupMissTTL = 5 * time.Second
 
 // New creates a new privacy Manager with the given global config.
 func New(cfg config.PrivacyConfig) *Manager {
 	return &Manager{
 		globalConfig: cfg,
 		sessions:     make(map[string]*SessionState),
+		misses:       make(map[string]time.Time),
 	}
+}
+
+// WithSessionLookup installs the lookup for settings recorded by other ntm
+// processes and returns m.
+func (m *Manager) WithSessionLookup(lookup func(session string) (*SessionState, bool)) *Manager {
+	m.mu.Lock()
+	m.lookup = lookup
+	m.mu.Unlock()
+	return m
+}
+
+// sessionState returns a session's settings: registered in this process,
+// else recorded by the process that created the session. A recorded answer
+// is kept for the manager's lifetime: settings are fixed at spawn, and a
+// later failed lookup must never downgrade a private session to persisting.
+func (m *Manager) sessionState(session string) *SessionState {
+	m.mu.RLock()
+	state, lookup, missed := m.sessions[session], m.lookup, m.misses[session]
+	m.mu.RUnlock()
+	if state != nil || lookup == nil || session == "" || time.Since(missed) < sessionLookupMissTTL {
+		return state
+	}
+	found, ok := lookup(session)
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if existing := m.sessions[session]; existing != nil {
+		return existing
+	}
+	if !ok || found == nil {
+		m.misses[session] = time.Now()
+		return nil
+	}
+	recorded := *found
+	recorded.PrivacyMode = recorded.PrivacyMode || m.globalConfig.Enabled // as RegisterSession
+	m.sessions[session] = &recorded
+	delete(m.misses, session)
+	return &recorded
 }
 
 // RegisterSession registers a session with its privacy settings.
@@ -39,6 +89,7 @@ func (m *Manager) RegisterSession(session string, privacyMode, allowPersist bool
 		PrivacyMode:  privacyMode || m.globalConfig.Enabled,
 		AllowPersist: allowPersist,
 	}
+	delete(m.misses, session)
 }
 
 // UnregisterSession removes a session from tracking.
@@ -59,9 +110,7 @@ func (m *Manager) GetState(session string) *SessionState {
 // IsPrivacyEnabled returns true if privacy mode is enabled for the session.
 // Returns the global default if session is not registered.
 func (m *Manager) IsPrivacyEnabled(session string) bool {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-	if state, ok := m.sessions[session]; ok {
+	if state := m.sessionState(session); state != nil {
 		return state.PrivacyMode
 	}
 	return m.globalConfig.Enabled
@@ -70,10 +119,7 @@ func (m *Manager) IsPrivacyEnabled(session string) bool {
 // CanPersist checks if persistence is allowed for the session.
 // Returns an error explaining why if persistence is blocked.
 func (m *Manager) CanPersist(session string, operation PersistOperation) error {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-
-	state := m.sessions[session]
+	state := m.sessionState(session)
 
 	// Check if privacy mode is enabled
 	privacyEnabled := m.globalConfig.Enabled

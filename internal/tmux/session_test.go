@@ -384,6 +384,8 @@ func TestClassifySessionExistsResultUsesExactExitStatus(t *testing.T) {
 	wrappedExitTwo := fmt.Errorf("tmux has-session -t broken: %w: can't find session: broken", exitTwo)
 	noServer := fmt.Errorf("tmux has-session -t first: %w: no server running on /tmp/tmux-1000/default", exitOne)
 	noSocket := fmt.Errorf("tmux has-session -t first: %w: error connecting to /tmp/tmux-1000/default (No such file or directory)", exitOne)
+	// tmux 3.6 with exit-empty off: a live server holding no sessions at all.
+	emptyServer := fmt.Errorf("tmux has-session -t =absent: %w: no current target", exitOne)
 	permissionSocket := fmt.Errorf("tmux has-session -t private: %w: error connecting to /tmp/tmux-1000/default (Permission denied)", exitOne)
 	staleSocket := fmt.Errorf("tmux has-session -t stale: %w: error connecting to /tmp/tmux-1000/default (Connection refused)", exitOne)
 	remoteFailure := fmt.Errorf("ssh -- host tmux has-session -t absent: %w: can't find session: absent", exit255)
@@ -402,6 +404,7 @@ func TestClassifySessionExistsResultUsesExactExitStatus(t *testing.T) {
 		{name: "wrapped has-session exit one", err: wrappedExitOne},
 		{name: "first session without server", err: noServer},
 		{name: "first session without socket", err: noSocket},
+		{name: "live server with no sessions", err: emptyServer},
 		{name: "socket permission denied", err: permissionSocket, wantErr: true},
 		{name: "stale socket connection refused", err: staleSocket, wantErr: true},
 		{name: "exit two", err: exitTwo, wantErr: true},
@@ -522,6 +525,50 @@ func skipIfNoTmux(t *testing.T) {
 	t.Helper()
 	if !IsInstalled() {
 		t.Skip("tmux not installed, skipping test")
+	}
+}
+
+// ntm spawn --privacy records its settings on the session, where every other
+// ntm process reads them back for as long as the session exists.
+func TestRealSessionPrivacyRoundTrip(t *testing.T) {
+	session := createTestSession(t)
+	ctx := context.Background()
+
+	read := func() (bool, bool, bool) {
+		t.Helper()
+		privacyMode, allowPersist, recorded, err := SessionPrivacyContext(ctx, session)
+		if err != nil {
+			t.Fatalf("SessionPrivacyContext: %v", err)
+		}
+		return privacyMode, allowPersist, recorded
+	}
+	if _, _, recorded := read(); recorded {
+		t.Fatal("a fresh session reported recorded privacy settings")
+	}
+	if err := SetSessionPrivacyContext(ctx, session, true, false); err != nil {
+		t.Fatal(err)
+	}
+	if p, a, recorded := read(); !recorded || !p || a {
+		t.Fatalf("after --privacy: privacy=%v allow=%v recorded=%v", p, a, recorded)
+	}
+	if err := SetSessionPrivacyContext(ctx, session, true, true); err != nil {
+		t.Fatal(err)
+	}
+	if p, a, recorded := read(); !recorded || !p || !a {
+		t.Fatalf("after --privacy --allow-persist: privacy=%v allow=%v recorded=%v", p, a, recorded)
+	}
+	if err := SetSessionPrivacyContext(ctx, session, false, false); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, recorded := read(); recorded {
+		t.Fatal("clearing the settings left them recorded")
+	}
+
+	if err := KillSession(session); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, recorded, err := SessionPrivacyContext(ctx, session); recorded || err != nil {
+		t.Fatalf("a killed session = recorded %v, err %v; want nothing recorded and no error", recorded, err)
 	}
 }
 

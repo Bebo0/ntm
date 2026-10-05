@@ -888,7 +888,9 @@ func isExpectedSessionAbsence(err error) bool {
 	if strings.Contains(message, "can't find session") ||
 		strings.Contains(message, "no such session") ||
 		strings.Contains(message, "session not found") ||
-		strings.Contains(message, "no server running") {
+		strings.Contains(message, "no server running") ||
+		// tmux 3.6, exit-empty off: the server is up but holds no sessions.
+		strings.Contains(message, "no current target") {
 		return true
 	}
 	return strings.Contains(message, "error connecting to") &&
@@ -1084,6 +1086,59 @@ func CreateSessionWithHistoryLimit(name, directory string, historyLimit int) err
 // custom scrollback limit and cancellation support using the default client.
 func CreateSessionWithHistoryLimitContext(ctx context.Context, name, directory string, historyLimit int) error {
 	return DefaultClient.CreateSessionWithHistoryLimitContext(ctx, name, directory, historyLimit)
+}
+
+// SessionOptionPrivacy records `ntm spawn --privacy` / `--allow-persist` on
+// the session itself, so every ntm process that persists session data
+// (prompt history, event logs, checkpoints) honors it for exactly as long as
+// the session exists. Value: comma-separated "privacy", "allow-persist".
+const SessionOptionPrivacy = "@ntm_privacy"
+
+// SetSessionPrivacyContext records a session's privacy settings.
+func (c *Client) SetSessionPrivacyContext(ctx context.Context, session string, privacyMode, allowPersist bool) error {
+	var parts []string
+	if privacyMode {
+		parts = append(parts, "privacy")
+	}
+	if allowPersist {
+		parts = append(parts, "allow-persist")
+	}
+	if len(parts) == 0 {
+		return c.RunSilentContext(ctx, "set-option", "-u", "-t", SessionOptionTarget(session), SessionOptionPrivacy)
+	}
+	return c.RunSilentContext(ctx, "set-option", "-t", SessionOptionTarget(session), SessionOptionPrivacy, strings.Join(parts, ","))
+}
+
+// SetSessionPrivacyContext records a session's privacy settings (default client).
+func SetSessionPrivacyContext(ctx context.Context, session string, privacyMode, allowPersist bool) error {
+	return DefaultClient.SetSessionPrivacyContext(ctx, session, privacyMode, allowPersist)
+}
+
+// SessionPrivacyContext reads the settings SetSessionPrivacyContext recorded.
+// recorded is false when the session has none (or no longer exists); err is
+// set only when tmux could not be asked.
+func (c *Client) SessionPrivacyContext(ctx context.Context, session string) (privacyMode, allowPersist, recorded bool, err error) {
+	if exists, existsErr := c.SessionExistsContext(ctx, session); existsErr != nil || !exists {
+		return false, false, false, existsErr
+	}
+	out, err := c.RunContext(ctx, "show-options", "-q", "-v", "-t", SessionOptionTarget(session), SessionOptionPrivacy)
+	if err != nil {
+		return false, false, false, err
+	}
+	for _, part := range strings.Split(strings.TrimSpace(out), ",") {
+		switch strings.TrimSpace(part) {
+		case "privacy":
+			privacyMode, recorded = true, true
+		case "allow-persist":
+			allowPersist, recorded = true, true
+		}
+	}
+	return privacyMode, allowPersist, recorded, nil
+}
+
+// SessionPrivacyContext reads a session's recorded privacy settings (default client).
+func SessionPrivacyContext(ctx context.Context, session string) (privacyMode, allowPersist, recorded bool, err error) {
+	return DefaultClient.SessionPrivacyContext(ctx, session)
 }
 
 // GetPanes returns all panes in a session

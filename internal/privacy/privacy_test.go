@@ -261,6 +261,64 @@ func TestSetDefaultManager_NilIgnored(t *testing.T) {
 	}
 }
 
+// Settings another ntm process recorded for a session (ntm spawn --privacy)
+// bind this process too: before the lookup existed, the flag only reached
+// the spawn process itself, so every later writer persisted the session.
+func TestSessionLookupBindsRecordedSettings(t *testing.T) {
+	cfg := config.DefaultPrivacyConfig()
+	cfg.DisablePromptHistory = true
+	calls := map[string]int{}
+	fail := false
+	m := New(cfg).WithSessionLookup(func(session string) (*SessionState, bool) {
+		calls[session]++
+		if fail {
+			return nil, false
+		}
+		switch session {
+		case "private":
+			return &SessionState{PrivacyMode: true}, true
+		case "private-persist":
+			return &SessionState{PrivacyMode: true, AllowPersist: true}, true
+		}
+		return nil, false
+	})
+
+	if err := m.CanPersist("private", OpPromptHistory); !IsPrivacyError(err) {
+		t.Fatalf("recorded private session persisted prompt history: %v", err)
+	}
+	if err := m.CanPersist("private-persist", OpPromptHistory); err != nil {
+		t.Fatalf("recorded --allow-persist was not honored: %v", err)
+	}
+	if err := m.CanPersist("ordinary", OpPromptHistory); err != nil {
+		t.Fatalf("a session with nothing recorded must follow the global default: %v", err)
+	}
+
+	// A later failed lookup never downgrades a session known to be private,
+	// and "nothing recorded" is not re-asked on every write.
+	fail = true
+	if !m.IsPrivacyEnabled("private") {
+		t.Fatal("a failed lookup downgraded a recorded private session")
+	}
+	_ = m.CanPersist("ordinary", OpPromptHistory)
+	if calls["private"] != 1 || calls["ordinary"] != 1 {
+		t.Fatalf("lookups = %v, want one per session", calls)
+	}
+
+	// A registration in this process wins over the recorded settings.
+	m.RegisterSession("private", false, true)
+	if err := m.CanPersist("private", OpPromptHistory); err != nil {
+		t.Fatalf("this process's registration was overridden: %v", err)
+	}
+
+	// Global privacy still applies to a session that recorded only --allow-persist.
+	global := config.DefaultPrivacyConfig()
+	global.Enabled = true
+	g := New(global).WithSessionLookup(func(string) (*SessionState, bool) { return &SessionState{AllowPersist: true}, true })
+	if !g.IsPrivacyEnabled("s") {
+		t.Fatal("recorded --allow-persist alone turned global privacy off")
+	}
+}
+
 func TestGetDefaultManager_ReturnsNonNil(t *testing.T) {
 	m := GetDefaultManager()
 	if m == nil {

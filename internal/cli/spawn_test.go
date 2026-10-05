@@ -22,7 +22,9 @@ import (
 	"github.com/Dicklesworthstone/ntm/internal/config"
 	"github.com/Dicklesworthstone/ntm/internal/persona"
 	"github.com/Dicklesworthstone/ntm/internal/plugins"
+	"github.com/Dicklesworthstone/ntm/internal/privacy"
 	"github.com/Dicklesworthstone/ntm/internal/resilience"
+	"github.com/Dicklesworthstone/ntm/internal/session"
 	"github.com/Dicklesworthstone/ntm/internal/tmux"
 	"github.com/Dicklesworthstone/ntm/tests/testutil"
 )
@@ -1589,6 +1591,47 @@ func TestSpawnSessionLogic_Ollama(t *testing.T) {
 
 	if _, err := os.Stat(projectDir); os.IsNotExist(err) {
 		t.Fatalf("project directory %s was not created", projectDir)
+	}
+}
+
+// `ntm spawn --privacy` only bound the spawn process: SpawnOptions.PrivacyMode
+// reached nothing, so `ntm send` and every other writer kept persisting the
+// session. Spawn now records the settings on the session (the call below is
+// the one spawn makes), and every ntm process installs tmuxSessionPrivacy
+// (root.go), so a real writer in a fresh manager refuses the session.
+func TestSpawnPrivacyBindsOtherProcessWriters(t *testing.T) {
+	if !tmux.IsInstalled() {
+		t.Skip("tmux not installed")
+	}
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("XDG_DATA_HOME", t.TempDir())
+	ctx := context.Background()
+	private := fmt.Sprintf("ntm_privacy_%d", time.Now().UnixNano())
+	ordinary := private + "_open"
+	for _, name := range []string{private, ordinary} {
+		if err := tmux.CreateSession(name, t.TempDir()); err != nil {
+			t.Fatalf("CreateSession(%s): %v", name, err)
+		}
+		t.Cleanup(func() { _ = tmux.KillSession(name) })
+	}
+	if err := tmux.SetSessionPrivacyContext(ctx, private, true, false); err != nil {
+		t.Fatal(err)
+	}
+
+	original := privacy.GetDefaultManager()
+	t.Cleanup(func() { privacy.SetDefaultManager(original) })
+	privacy.SetDefaultManager(privacy.New(config.DefaultPrivacyConfig()).WithSessionLookup(tmuxSessionPrivacy))
+
+	for _, name := range []string{private, ordinary} {
+		if err := session.SavePrompt(session.PromptEntry{Session: name, Content: "deploy key is hunter2", Source: "cli"}); err != nil {
+			t.Fatalf("SavePrompt(%s): %v", name, err)
+		}
+	}
+	if history, err := session.LoadPromptHistory(private); err != nil || len(history.Prompts) != 0 {
+		t.Fatalf("private session persisted prompts: %+v, %v", history, err)
+	}
+	if history, err := session.LoadPromptHistory(ordinary); err != nil || len(history.Prompts) != 1 {
+		t.Fatalf("ordinary session prompts = %+v, %v; want the one prompt persisted", history, err)
 	}
 }
 

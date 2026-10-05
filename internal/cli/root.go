@@ -767,7 +767,9 @@ Shell Integration:
 				// ([integrations.bv] timeout_seconds; NTM_BV_TIMEOUT wins, GH#253).
 				bv.ConfigureCommandTimeout(cfg.Integrations.BV.TimeoutSeconds)
 
-				privacy.SetDefaultManager(privacy.New(cfg.Privacy))
+				// The lookup lets every ntm process honor the privacy
+				// settings `ntm spawn --privacy` recorded on a session.
+				privacy.SetDefaultManager(privacy.New(cfg.Privacy).WithSessionLookup(tmuxSessionPrivacy))
 
 				redactCfg := cfg.Redaction.ToRedactionLibConfig()
 				history.SetRedactionConfig(&redactCfg)
@@ -5809,6 +5811,18 @@ func pluginConfigDirForArgs(args []string) string {
 
 func pluginAgentsDirForArgs(args []string) string {
 	return filepath.Join(filepath.Dir(configPathFromArgs(args)), "agents")
+}
+
+// tmuxSessionPrivacy reads the privacy settings `ntm spawn --privacy` /
+// `--allow-persist` recorded on a session, for the privacy manager.
+func tmuxSessionPrivacy(session string) (*privacy.SessionState, bool) {
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	privacyMode, allowPersist, recorded, err := tmux.SessionPrivacyContext(ctx, session)
+	if err != nil || !recorded {
+		return nil, false
+	}
+	return &privacy.SessionState{PrivacyMode: privacyMode, AllowPersist: allowPersist}, true
 }
 
 func loadSelectedConfigOrDefault() *config.Config {

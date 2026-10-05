@@ -41,6 +41,7 @@ import (
 	"github.com/Dicklesworthstone/ntm/internal/output"
 	"github.com/Dicklesworthstone/ntm/internal/persona"
 	"github.com/Dicklesworthstone/ntm/internal/plugins"
+	"github.com/Dicklesworthstone/ntm/internal/privacy"
 	"github.com/Dicklesworthstone/ntm/internal/ratelimit"
 	"github.com/Dicklesworthstone/ntm/internal/recipe"
 	"github.com/Dicklesworthstone/ntm/internal/recovery"
@@ -2678,6 +2679,16 @@ func spawnSessionLogicContextWithOutput(ctx context.Context, opts SpawnOptions, 
 		}
 	}
 	lifecycleSessionMayExist = true
+
+	// --privacy / --allow-persist bind every ntm process that persists this
+	// session's data, so they are recorded on the session before any agent
+	// starts. A privacy promise that cannot be recorded aborts the spawn.
+	if opts.PrivacyMode || opts.AllowPersist {
+		if err := tmux.SetSessionPrivacyContext(ctx, opts.Session, opts.PrivacyMode, opts.AllowPersist); err != nil {
+			return outputError(fmt.Errorf("recording privacy settings for session %s: %w", opts.Session, err))
+		}
+		privacy.GetDefaultManager().RegisterSession(opts.Session, opts.PrivacyMode, opts.AllowPersist)
+	}
 
 	// Make pane titles visible on stock tmux: pane-border-status defaults to
 	// "off", which hides every title NTM sets. Session-local only, and an
