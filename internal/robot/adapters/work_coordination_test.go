@@ -477,6 +477,38 @@ func TestNormalizeCoordinationDerivesReservationConflicts(t *testing.T) {
 	}
 }
 
+// Reservation overlap compares the patterns' path languages, as the
+// coordinator does. Matching one glob against the other's literal spelling
+// missed globs that only intersect, and a plain string glob let * cross
+// directories.
+func TestNormalizeCoordinationReservationOverlapUsesPathSemantics(t *testing.T) {
+	t.Parallel()
+
+	now := time.Date(2026, 3, 22, 4, 0, 0, 0, time.UTC)
+	for _, tc := range []struct {
+		name          string
+		left, right   string
+		wantConflicts int
+	}{
+		{name: "intersecting globs", left: "src/*/main.go", right: "src/service/*.go", wantConflicts: 1},
+		{name: "star stays within a directory", left: "src/*.go", right: "src/deep/main.go", wantConflicts: 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			section := NormalizeCoordination(CoordinationInputs{
+				Reservations: []agentmail.FileReservation{
+					{ID: 1, PathPattern: tc.left, AgentName: "BlueLake", Exclusive: true, ExpiresTS: agentmail.FlexTime{Time: now.Add(time.Hour)}},
+					{ID: 2, PathPattern: tc.right, AgentName: "GreenStone", Exclusive: true, ExpiresTS: agentmail.FlexTime{Time: now.Add(time.Hour)}},
+				},
+				Now: now,
+			})
+			if section.Reservations == nil || section.Reservations.Conflicts != tc.wantConflicts {
+				t.Fatalf("%s vs %s: reservations = %+v, want %d conflict(s)", tc.left, tc.right, section.Reservations, tc.wantConflicts)
+			}
+		})
+	}
+}
+
 func mustJSONText(t *testing.T, value any) string {
 	t.Helper()
 

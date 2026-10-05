@@ -253,34 +253,6 @@ func TestFormatTimestamp(t *testing.T) {
 	t.Logf("FORMAT_TIMESTAMP input=%v output=%s", ts, result)
 }
 
-func TestMatchesPattern(t *testing.T) {
-	t.Parallel()
-
-	tests := []struct {
-		pattern  string
-		value    string
-		expected bool
-	}{
-		{"*", "anything", true},
-		{"beads", "beads", true},
-		{"beads", "quota", false},
-		{"beads*", "beads_v2", true},
-		{"*beads", "my_beads", true},
-		{"", "", false},          // empty pattern returns false
-		{"", "something", false}, // empty pattern returns false
-		{"pattern", "", false},   // empty value returns false
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.pattern+"_"+tc.value, func(t *testing.T) {
-			result := matchesPattern(tc.pattern, tc.value)
-			if result != tc.expected {
-				t.Errorf("pattern=%q value=%q: expected %v, got %v", tc.pattern, tc.value, tc.expected, result)
-			}
-		})
-	}
-}
-
 func TestSourceHealthReasonCodes_Unavailable(t *testing.T) {
 	t.Parallel()
 

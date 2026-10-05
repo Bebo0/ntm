@@ -34,6 +34,7 @@ import (
 	"github.com/Dicklesworthstone/ntm/internal/pressure"
 	"github.com/Dicklesworthstone/ntm/internal/recipe"
 	"github.com/Dicklesworthstone/ntm/internal/redaction"
+	"github.com/Dicklesworthstone/ntm/internal/reservationpath"
 	"github.com/Dicklesworthstone/ntm/internal/robot/adapters"
 	"github.com/Dicklesworthstone/ntm/internal/state"
 	"github.com/Dicklesworthstone/ntm/internal/status"
@@ -3435,7 +3436,10 @@ func reservationPatternsConflict(a, b string) bool {
 	if a == b {
 		return true
 	}
-	return matchesPattern(a, b) || matchesPattern(b, a)
+	// Matching one glob against the other's literal spelling misses
+	// intersections such as src/*/main.go and src/service/*.go. Compare their
+	// path languages, as the coordinator does.
+	return reservationpath.MayOverlap(a, b)
 }
 
 func normalizeConflictPattern(a, b string) string {

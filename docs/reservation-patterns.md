@@ -1,7 +1,8 @@
 # Reservation pattern overlap
 
-The coordinator compares reservation path sets, not one glob against the text
-of another glob. For example, `src/*/main.go` and `src/service/*.go` overlap at
+The coordinator, and the reservation conflicts the robot surfaces report (Agent
+Mail conflicts and work coordination), compare reservation path sets, not one
+glob against the text of another glob. For example, `src/*/main.go` and `src/service/*.go` overlap at
 `src/service/main.go` even though neither pattern matches the other pattern's
 literal spelling. No file needs to exist yet for this conflict to be detected.
 

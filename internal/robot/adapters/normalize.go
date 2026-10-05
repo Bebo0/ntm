@@ -300,47 +300,6 @@ func FormatTimestamp(t time.Time) string {
 	return t.UTC().Format(time.RFC3339)
 }
 
-// matchesPattern checks if value matches pattern using glob semantics.
-// Supports * for any sequence and ? for single character.
-func matchesPattern(pattern, value string) bool {
-	if pattern == "" || value == "" {
-		return false
-	}
-	if pattern == value {
-		return true
-	}
-	if pattern == "*" {
-		return true
-	}
-
-	// Simple glob matching
-	pIdx, vIdx := 0, 0
-	starIdx, matchIdx := -1, 0
-
-	for vIdx < len(value) {
-		if pIdx < len(pattern) && (pattern[pIdx] == '?' || pattern[pIdx] == value[vIdx]) {
-			pIdx++
-			vIdx++
-		} else if pIdx < len(pattern) && pattern[pIdx] == '*' {
-			starIdx = pIdx
-			matchIdx = vIdx
-			pIdx++
-		} else if starIdx != -1 {
-			pIdx = starIdx + 1
-			matchIdx++
-			vIdx = matchIdx
-		} else {
-			return false
-		}
-	}
-
-	for pIdx < len(pattern) && pattern[pIdx] == '*' {
-		pIdx++
-	}
-
-	return pIdx == len(pattern)
-}
-
 // NormalizeHealth transforms health sources to SourceHealthSection
 func NormalizeHealth(sources map[string]HealthSource) *SourceHealthSection {
 	section := &SourceHealthSection{

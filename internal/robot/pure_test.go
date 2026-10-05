@@ -251,6 +251,24 @@ func TestDetectReservationConflicts(t *testing.T) {
 			},
 			wantCount: 1,
 		},
+		{
+			// Neither glob matches the other's spelling, but both match
+			// src/service/main.go: a conflict before that file exists.
+			name: "intersecting globs conflict",
+			reservations: []agentmail.FileReservation{
+				{PathPattern: "src/*/main.go", AgentName: "Alpha", Exclusive: true},
+				{PathPattern: "src/service/*.go", AgentName: "Beta", Exclusive: true},
+			},
+			wantCount: 1,
+		},
+		{
+			name: "a single star does not cross directories",
+			reservations: []agentmail.FileReservation{
+				{PathPattern: "src/*.go", AgentName: "Alpha", Exclusive: true},
+				{PathPattern: "src/deep/main.go", AgentName: "Beta", Exclusive: true},
+			},
+			wantCount: 0,
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
