@@ -145,3 +145,40 @@ resolution and checkpoint source/destination execution are not changed.
 The private execution binding is not included in the public request fingerprint:
 retrying an existing `operation_id` still asks for its original recorded outcome,
 not a rerun in whatever project is currently selected on the server.
+
+## Readiness-gated fleet startup
+
+A `swarm_spawn` job can require each newly launched agent to initialize before
+starting the next one. Send this body to `POST /api/v1/jobs`:
+
+```json
+{
+  "type": "swarm_spawn",
+  "params": {
+    "session": "myproject",
+    "cc_count": 3,
+    "cod_count": 2,
+    "launch_ready_timeout": "45s",
+    "launch_interval": "2s",
+    "startup_timeout": "5m"
+  }
+}
+```
+
+`launch_ready_timeout` is a positive Go duration for each agent's readiness
+check, starting after its process launch returns. It uses the shared spawn
+readiness detector and its existing agent-type safety preflight. The last agent
+is checked too. Omit the field for the original launch-all behavior; zero,
+negative, empty, null and malformed supplied values fail before spawning.
+`launch_interval` remains an optional minimum start-to-start spacing, while
+`startup_timeout` bounds the entire spawn, including launches, readiness waits
+and work assignment. Previews validate these controls but never launch or wait.
+
+Failure or cancellation stops later agent launches; it does not kill processes,
+remove panes, or retry commands. The spawn engine still prepares the session's
+pane topology first. Inspect the partial result before retrying. Persistent jobs
+record each launch before its readiness wait and merge individual readiness
+updates without losing earlier agents or their durable pane identities. The
+result echoes the effective `launch_ready_timeout`. Readiness is an initialization
+observation, not a guarantee of later availability or an atomic work claim; all
+existing assignment and reservation gates still apply.

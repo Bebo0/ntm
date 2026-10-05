@@ -13,6 +13,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"sync"
 	"time"
 
@@ -302,9 +303,10 @@ type jobSwarmSpawnParams struct {
 	DryRun              bool     `json:"dry_run,omitempty"`
 	Safety              bool     `json:"safety,omitempty"`
 	NoUserPane          bool     `json:"no_user_pane,omitempty"`
-	ReadyTimeout        string   `json:"ready_timeout,omitempty"`   // Positive Go duration, e.g. "45s".
-	LaunchInterval      string   `json:"launch_interval,omitempty"` // Minimum launch start interval, e.g. "2s"; zero disables pacing.
-	StartupTimeout      string   `json:"startup_timeout,omitempty"` // Whole spawn budget, including pacing and assignment.
+	ReadyTimeout        string   `json:"ready_timeout,omitempty"`        // Positive Go duration, e.g. "45s".
+	LaunchInterval      string   `json:"launch_interval,omitempty"`      // Minimum launch start interval, e.g. "2s"; zero disables pacing.
+	LaunchReadyTimeout  string   `json:"launch_ready_timeout,omitempty"` // Require each launched agent to become ready before launching the next.
+	StartupTimeout      string   `json:"startup_timeout,omitempty"`      // Whole spawn budget, including pacing and assignment.
 	CCModel             string   `json:"cc_model,omitempty"`
 	CCReasoningEffort   string   `json:"cc_reasoning_effort,omitempty"`
 	CodModel            string   `json:"cod_model,omitempty"`
@@ -361,6 +363,21 @@ func (s *Server) jobSwarmSpawn(ctx context.Context, params map[string]interface{
 		}
 	}
 	var startupTimeout time.Duration
+	var launchReadyTimeout time.Duration
+	launchReadySupplied := false
+	for key := range params {
+		if strings.EqualFold(key, "launch_ready_timeout") {
+			launchReadySupplied = true
+			break
+		}
+	}
+	if launchReadySupplied {
+		var err error
+		launchReadyTimeout, err = time.ParseDuration(req.LaunchReadyTimeout)
+		if err != nil || launchReadyTimeout <= 0 {
+			return nil, fmt.Errorf("launch_ready_timeout must be a positive duration such as 45s")
+		}
+	}
 	if req.StartupTimeout != "" {
 		var err error
 		startupTimeout, err = time.ParseDuration(req.StartupTimeout)
@@ -417,8 +434,13 @@ func (s *Server) jobSwarmSpawn(ctx context.Context, params map[string]interface{
 		defer cancel(nil)
 		opts = robot.WithSpawnProgress(opts, spawnJobProgressObserver(spawnCtx, cancel))
 	}
-	// The progress observer runs inside pacing, after a wait has completed.
+	// Record each launch before waiting for its readiness. Readiness is the
+	// outer gate so a failed startup never waits for another pacing interval.
 	opts, err := robot.WithSpawnLaunchInterval(opts, launchInterval)
+	if err != nil {
+		return nil, err
+	}
+	opts, err = robot.WithSpawnLaunchReadiness(opts, launchReadyTimeout)
 	if err != nil {
 		return nil, err
 	}
@@ -444,6 +466,9 @@ func (s *Server) jobSwarmSpawn(ctx context.Context, params map[string]interface{
 		}
 		if req.StartupTimeout != "" {
 			payload["startup_timeout"] = startupTimeout.String()
+		}
+		if req.LaunchReadyTimeout != "" {
+			payload["launch_ready_timeout"] = launchReadyTimeout.String()
 		}
 	}
 	if err != nil {
@@ -504,10 +529,15 @@ func spawnJobProgressObserver(ctx context.Context, cancel context.CancelCauseFun
 				paneIDs[agent.Pane] = event.PaneID
 			}
 			if event.Stage == "wait_ready" && event.Agents != nil {
-				agents = append([]robot.SpawnedAgent{}, event.Agents...)
-				agentPositions = make(map[string]int, len(agents))
-				for i, agent := range agents {
-					agentPositions[agent.Pane] = i
+				// Readiness-gated startup observes one agent at a time. A subset
+				// is an update, not a replacement for the fleet already launched.
+				for _, agent := range event.Agents {
+					if index, exists := agentPositions[agent.Pane]; exists {
+						agents[index] = agent
+					} else {
+						agentPositions[agent.Pane] = len(agents)
+						agents = append(agents, agent)
+					}
 				}
 			}
 		}

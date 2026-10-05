@@ -76,6 +76,92 @@ func WithSpawnLaunchInterval(opts SpawnOptions, interval time.Duration) (SpawnOp
 	return opts, nil
 }
 
+// WithSpawnLaunchReadiness gates each launch on that agent's actual readiness
+// before admitting another launch. It reuses GetSpawn's launcher and readiness
+// detector, not a second startup protocol. Zero leaves the request unchanged.
+// A failed launch or readiness check permanently stops this request's launcher;
+// already created panes and launched processes are left intact for inspection.
+//
+// Install after WithSpawnProgress and WithSpawnLaunchInterval: progress records
+// the launched process before waiting, and interval pacing still bounds starts.
+// The readiness gate is outermost so a failed request cannot wait for another
+// interval before observing its stop condition. Dry runs invoke no ports.
+func WithSpawnLaunchReadiness(opts SpawnOptions, timeout time.Duration) (SpawnOptions, error) {
+	if timeout < 0 {
+		return opts, errors.New("launch_ready_timeout must be a non-negative duration")
+	}
+	if timeout == 0 {
+		return opts, nil
+	}
+	base := spawnLifecycleDeps(opts.LifecycleDeps)
+	deps := base
+	gate := make(chan struct{}, 1)
+	var halted error // Protected by gate, including concurrent custom port calls.
+	deps.LaunchAgent = func(ctx context.Context, pane tmux.Pane, session, agentType string, number int, dir, command string) (SpawnedAgent, error) {
+		if ctx == nil {
+			return SpawnedAgent{}, errors.New("readiness-gated spawn requires a context")
+		}
+		select {
+		case gate <- struct{}{}:
+		case <-ctx.Done():
+			return SpawnedAgent{}, ctx.Err()
+		}
+		defer func() { <-gate }()
+		if err := ctx.Err(); err != nil {
+			return SpawnedAgent{}, err
+		}
+		if halted != nil {
+			return SpawnedAgent{}, halted
+		}
+		agent, err := base.LaunchAgent(ctx, pane, session, agentType, number, dir, command)
+		if agent.Pane == "" {
+			agent.Pane = fmt.Sprintf("%d.%d", pane.WindowIndex, pane.Index)
+		}
+		if agent.Type == "" {
+			agent.Type = agentType
+		}
+		// Never trust a launch receipt's Ready bit as a fresh observation.
+		agent.Ready = false
+		if ctx.Err() != nil {
+			err = errors.Join(err, ctx.Err())
+		}
+		if err == nil && agent.Error != "" {
+			err = errors.New(agent.Error)
+		}
+		if err == nil && (agent.Pane != fmt.Sprintf("%d.%d", pane.WindowIndex, pane.Index) || agent.Type != agentType) {
+			err = errors.New("launch receipt does not identify the requested agent pane")
+		}
+		if err == nil {
+			observation := &SpawnOutput{Session: session, WorkingDir: dir, Agents: []SpawnedAgent{agent}}
+			readyCtx, cancel := context.WithTimeout(ctx, timeout)
+			err = base.WaitForReady(readyCtx, observation, timeout)
+			// A backend returning nil after the deadline cannot grant readiness.
+			if readyCtx.Err() != nil {
+				err = errors.Join(err, readyCtx.Err())
+			}
+			cancel()
+			if err == nil && (observation.Session != session || len(observation.Agents) != 1 ||
+				observation.Agents[0].Pane != agent.Pane || observation.Agents[0].Type != agent.Type ||
+				!observation.Agents[0].Ready || observation.Agents[0].Error != "") {
+				err = errors.New("readiness check returned no ready observation for the launched agent")
+			}
+		}
+		if err != nil {
+			halted = fmt.Errorf("startup stopped at %s agent %d (%s): %w", agentType, number, agent.Pane, err)
+			agent.Error = halted.Error()
+			return agent, halted
+		}
+		agent.Ready = true
+		return agent, nil
+	}
+	opts.LifecycleDeps = &deps
+	// Existing preflight must reject types whose readiness protocol is not
+	// supported (including types expanded from presets). The final readiness
+	// pass sees the same agents already marked ready by these individual checks.
+	opts.WaitReady = true
+	return opts, nil
+}
+
 // SpawnProgress describes a lifecycle boundary without retaining launch commands
 // or prompts. A started phase is intent, not proof the side effect completed.
 // PaneID is the durable tmux identity; Agent.Pane is its physical window.pane.
