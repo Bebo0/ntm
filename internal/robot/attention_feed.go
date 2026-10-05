@@ -2683,6 +2683,12 @@ func NewLoggedAttentionEvent(event ntmevents.Event) (AttentionEvent, bool) {
 func NewBusAttentionEvent(event ntmevents.BusEvent) (AttentionEvent, bool) {
 	switch e := event.(type) {
 	case ntmevents.WebhookEvent:
+		// Every kill emits session_killed and, for webhook configs that use
+		// the legacy name, session_ended; the feed records the kill once,
+		// from session_ended (which a natural end emits too).
+		if e.Type == ntmevents.WebhookSessionKilled {
+			return AttentionEvent{}, false
+		}
 		return attentionFromWebhookEvent(e), true
 	case ntmevents.BaseEvent:
 		return attentionFromBusStruct(e, "event_bus", nil, EventCategorySystem, EventTypeSystemHealthChange, ActionabilityBackground, SeverityInfo, attentionHumanize(e.Type), nil), true
@@ -2880,7 +2886,7 @@ func attentionFromWebhookEvent(event ntmevents.WebhookEvent) AttentionEvent {
 	switch event.Type {
 	case ntmevents.WebhookSessionCreated:
 		return attentionFromBusStruct(base, "event_bus.webhook", details, EventCategorySession, EventTypeSessionCreated, ActionabilityInteresting, SeverityInfo, "session created", []NextAction{attentionStatusNextAction("Inspect active sessions and panes")})
-	case ntmevents.WebhookSessionKilled, ntmevents.WebhookSessionEnded:
+	case ntmevents.WebhookSessionEnded:
 		return attentionFromBusStruct(base, "event_bus.webhook", details, EventCategorySession, EventTypeSessionDestroyed, ActionabilityInteresting, SeverityWarning, "session ended", nil)
 	case ntmevents.WebhookAgentStarted:
 		return attentionFromBusStruct(base, "event_bus.webhook", details, EventCategoryAgent, EventTypeAgentStarted, ActionabilityInteresting, SeverityInfo, attentionAgentSummary("agent started", event.Agent, details), nil)

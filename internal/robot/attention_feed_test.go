@@ -1003,6 +1003,18 @@ func TestAttentionFeed_PublishActuationVerificationTimeout(t *testing.T) {
 	}
 }
 
+// A kill emits session_killed and the legacy session_ended; the feed keeps one
+// record of it (bd-zp9su).
+func TestNewBusAttentionEvent_KillRecordedOnce(t *testing.T) {
+	if _, ok := NewBusAttentionEvent(ntmevents.NewWebhookEvent(ntmevents.WebhookSessionKilled, "proj", "", "", "Killed session 'proj'", nil)); ok {
+		t.Fatal("session_killed must not add a second record next to session_ended")
+	}
+	ended, ok := NewBusAttentionEvent(ntmevents.NewWebhookEvent(ntmevents.WebhookSessionEnded, "proj", "", "", "Killed session 'proj'", nil))
+	if !ok || ended.Type != EventTypeSessionDestroyed {
+		t.Fatalf("session_ended = %+v ok=%v, want one session destroyed record", ended, ok)
+	}
+}
+
 func TestAttentionFeed_SubscribeEventBus(t *testing.T) {
 	feed := newTestAttentionFeed(t)
 	bus := ntmevents.NewEventBus(10)
