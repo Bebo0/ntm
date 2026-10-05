@@ -282,6 +282,28 @@ func TestInitGlobalMonitor(t *testing.T) {
 	}
 }
 
+// The monitor InitGlobalMonitor installs (and the caller starts) is the one
+// every reader gets. A sync.Once in GetGlobalMonitor used to replace it with a
+// fresh, unstarted monitor on the first read, so the dashboard and robot
+// agent-health saw no process states even under `ntm serve`.
+func TestGetGlobalMonitorReturnsTheInstalledMonitor(t *testing.T) {
+	globalMonitorMu.Lock()
+	previous := globalMonitor
+	globalMonitor = nil
+	globalMonitorMu.Unlock()
+	t.Cleanup(func() {
+		globalMonitorMu.Lock()
+		globalMonitor = previous
+		globalMonitorMu.Unlock()
+	})
+
+	cfg := config.DefaultProcessTriageConfig()
+	installed := InitGlobalMonitor(&cfg, withSessionForTest("installed"))
+	if got := GetGlobalMonitor(); got != installed {
+		t.Fatal("GetGlobalMonitor replaced the monitor InitGlobalMonitor installed")
+	}
+}
+
 func TestMapPTClassification(t *testing.T) {
 	t.Parallel()
 

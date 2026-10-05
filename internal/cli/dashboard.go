@@ -13,6 +13,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/Dicklesworthstone/ntm/internal/config"
+	"github.com/Dicklesworthstone/ntm/internal/integrations/pt"
 	"github.com/Dicklesworthstone/ntm/internal/tmux"
 	"github.com/Dicklesworthstone/ntm/internal/tui/dashboard"
 	"github.com/Dicklesworthstone/ntm/internal/watcher"
@@ -460,6 +461,12 @@ func runDashboard(ctx context.Context, w io.Writer, errW io.Writer, session stri
 	// Any parse warning prints here, before the TUI owns the terminal.
 	cfg := loadDashboardConfig(projectDir, errW)
 
+	// The process-health panel reads the process-triage monitor, which only
+	// `ntm serve` started; in the dashboard's own process it stayed empty.
+	if stopPT := startDashboardProcessTriage(cfg); stopPT != nil {
+		defer stopPT()
+	}
+
 	action, err := dashboard.RunWithOptions(session, projectDir, dashboard.RunOptions{
 		PopupMode:       popup,
 		AttentionCursor: attentionCursor,
@@ -480,6 +487,25 @@ func runDashboard(ctx context.Context, w io.Writer, errW io.Writer, session stri
 // current directory when the session's project is unknown). A config that
 // cannot be loaded is reported on errW and yields nil, which keeps the
 // dashboard on built-in defaults exactly as before.
+// startDashboardProcessTriage starts the process-triage monitor for the
+// dashboard's process-health panel when [integrations.process_triage] is
+// enabled and pt is installed, and returns its stop function (nil otherwise;
+// the panel then reports pt unavailable).
+func startDashboardProcessTriage(cfg *config.Config) func() {
+	ptCfg := config.DefaultProcessTriageConfig()
+	if cfg != nil {
+		ptCfg = cfg.Integrations.ProcessTriage
+	}
+	if !ptCfg.Enabled {
+		return nil
+	}
+	monitor := pt.InitGlobalMonitor(&ptCfg)
+	if err := monitor.Start(); err != nil {
+		return nil
+	}
+	return monitor.Stop
+}
+
 func loadDashboardConfig(projectDir string, errW io.Writer) *config.Config {
 	cwd := strings.TrimSpace(projectDir)
 	if cwd == "" {

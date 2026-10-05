@@ -645,18 +645,21 @@ func (m *HealthMonitor) GetStats() MonitorStats {
 // Global singleton monitor
 
 var (
-	globalMonitor     *HealthMonitor
-	globalMonitorOnce sync.Once
-	globalMonitorMu   sync.RWMutex
+	globalMonitor   *HealthMonitor
+	globalMonitorMu sync.RWMutex
 )
 
-// GetGlobalMonitor returns the global health monitor singleton.
-// It uses the default ProcessTriageConfig from config.
+// GetGlobalMonitor returns the global health monitor: the one
+// InitGlobalMonitor installed, else a default (unstarted) one. A sync.Once
+// here used to replace a monitor InitGlobalMonitor had installed and started
+// with a fresh unstarted one on the first read, so every reader saw no states.
 func GetGlobalMonitor() *HealthMonitor {
-	globalMonitorOnce.Do(func() {
+	globalMonitorMu.Lock()
+	defer globalMonitorMu.Unlock()
+	if globalMonitor == nil {
 		cfg := config.DefaultProcessTriageConfig()
 		globalMonitor = NewHealthMonitor(&cfg)
-	})
+	}
 	return globalMonitor
 }
 
