@@ -9,6 +9,7 @@
 package pressure
 
 import (
+	"fmt"
 	"sort"
 	"strconv"
 	"time"
@@ -141,30 +142,52 @@ type SpawnAdmissionInput struct {
 	MaxAgents           int
 	LargeSpawnThreshold int
 	Pressure            Snapshot
+	// Count maps use canonical agent types, including every requested/live
+	// agent, not only types with configured caps. They must describe the same
+	// observation as the scalar totals. InventoryError means counts are unknown.
+	RequestedByType map[string]int
+	RunningByType   map[string]int
+	MaxAgentsByType map[string]int
+	InventoryError  string
 }
 
 // SpawnAdmission is the robot-stable explanation for a pre-spawn
 // admission check.
 type SpawnAdmission struct {
-	Decision            SpawnAdmissionDecision `json:"decision"`
-	Reason              string                 `json:"reason"`
-	Hint                string                 `json:"hint,omitempty"`
-	Session             string                 `json:"session,omitempty"`
-	RequestedAgents     int                    `json:"requested_agents"`
-	RequestedPanes      int                    `json:"requested_panes"`
-	SessionPanes        int                    `json:"session_panes"`
-	AdditionalPanes     int                    `json:"additional_panes"`
-	CurrentPanes        int                    `json:"current_panes"`
-	ProjectedPanes      int                    `json:"projected_panes"`
-	RunningAgents       int                    `json:"running_agents"`
-	RunningSessions     int                    `json:"running_sessions"`
-	MaxAgents           int                    `json:"max_agents,omitempty"`
-	AgentHeadroom       int                    `json:"agent_headroom,omitempty"`
-	LargeSpawn          bool                   `json:"large_spawn"`
-	LargeSpawnThreshold int                    `json:"large_spawn_threshold,omitempty"`
-	PressureLevel       string                 `json:"pressure_level"`
-	Limiting            []string               `json:"limiting,omitempty"`
-	Sources             []SpawnAdmissionSource `json:"sources,omitempty"`
+	Decision                SpawnAdmissionDecision     `json:"decision"`
+	Reason                  string                     `json:"reason"`
+	Hint                    string                     `json:"hint,omitempty"`
+	Session                 string                     `json:"session,omitempty"`
+	RequestedAgents         int                        `json:"requested_agents"`
+	RequestedPanes          int                        `json:"requested_panes"`
+	SessionPanes            int                        `json:"session_panes"`
+	AdditionalPanes         int                        `json:"additional_panes"`
+	CurrentPanes            int                        `json:"current_panes"`
+	ProjectedPanes          int                        `json:"projected_panes"`
+	RunningAgents           int                        `json:"running_agents"`
+	RunningSessions         int                        `json:"running_sessions"`
+	MaxAgents               int                        `json:"max_agents,omitempty"`
+	AgentHeadroom           int                        `json:"agent_headroom,omitempty"`
+	LargeSpawn              bool                       `json:"large_spawn"`
+	LargeSpawnThreshold     int                        `json:"large_spawn_threshold,omitempty"`
+	PressureLevel           string                     `json:"pressure_level"`
+	Limiting                []string                   `json:"limiting,omitempty"`
+	Sources                 []SpawnAdmissionSource     `json:"sources,omitempty"`
+	AgentInventoryAvailable bool                       `json:"agent_inventory_available"`
+	AgentInventoryError     string                     `json:"agent_inventory_error,omitempty"`
+	AgentTypeLimits         []SpawnAdmissionAgentLimit `json:"agent_type_limits,omitempty"`
+}
+
+// SpawnAdmissionAgentLimit explains a configured per-type bound. These are
+// observed counts, not capacity reservations or estimates of provider quota.
+type SpawnAdmissionAgentLimit struct {
+	AgentType     string `json:"agent_type"`
+	Running       int    `json:"running"`
+	Requested     int    `json:"requested"`
+	Projected     int    `json:"projected"`
+	Limit         int    `json:"limit"`
+	Headroom      int    `json:"headroom"`
+	BlocksRequest bool   `json:"blocks_request"`
 }
 
 // SpawnAdmissionSource records the source-level pressure inputs used by
@@ -193,29 +216,31 @@ func EvaluateSpawnAdmission(in SpawnAdmissionInput) SpawnAdmission {
 	if additionalPanes < 0 {
 		additionalPanes = 0
 	}
-	projectedPanes := currentPanes + additionalPanes
+	projectedPanes := addSpawnCounts(currentPanes, additionalPanes)
 	largeSpawn := largeThreshold > 0 && requestedAgents >= largeThreshold
 	pressureLevel := in.Pressure.Overall
 	limiting := limitingStrings(in.Pressure.Limiting)
 
 	out := SpawnAdmission{
-		Decision:            SpawnAdmissionAdmit,
-		Reason:              "headroom_available",
-		Session:             in.Session,
-		RequestedAgents:     requestedAgents,
-		RequestedPanes:      requestedPanes,
-		SessionPanes:        sessionPanes,
-		AdditionalPanes:     additionalPanes,
-		CurrentPanes:        currentPanes,
-		ProjectedPanes:      projectedPanes,
-		RunningAgents:       runningAgents,
-		RunningSessions:     runningSessions,
-		MaxAgents:           maxAgents,
-		LargeSpawn:          largeSpawn,
-		LargeSpawnThreshold: largeThreshold,
-		PressureLevel:       pressureLevel.String(),
-		Limiting:            limiting,
-		Sources:             spawnAdmissionSources(in.Pressure),
+		Decision:                SpawnAdmissionAdmit,
+		Reason:                  "headroom_available",
+		Session:                 in.Session,
+		RequestedAgents:         requestedAgents,
+		RequestedPanes:          requestedPanes,
+		SessionPanes:            sessionPanes,
+		AdditionalPanes:         additionalPanes,
+		CurrentPanes:            currentPanes,
+		ProjectedPanes:          projectedPanes,
+		RunningAgents:           runningAgents,
+		RunningSessions:         runningSessions,
+		MaxAgents:               maxAgents,
+		LargeSpawn:              largeSpawn,
+		LargeSpawnThreshold:     largeThreshold,
+		PressureLevel:           pressureLevel.String(),
+		Limiting:                limiting,
+		Sources:                 spawnAdmissionSources(in.Pressure),
+		AgentInventoryAvailable: in.InventoryError == "",
+		AgentInventoryError:     in.InventoryError,
 	}
 	// postSpawnAgents is what the host would be running AFTER this
 	// admission. The cap exists to bound concurrent agents — running +
@@ -223,11 +248,53 @@ func EvaluateSpawnAdmission(in SpawnAdmissionInput) SpawnAdmission {
 	// looked at requestedAgents, so 10 running + 5 requested with a cap
 	// of 12 was admitted (15 > 12) — the tmux-derived RunningAgents
 	// field was collected and reported but never enforced (bd-1oenb).
-	postSpawnAgents := runningAgents + requestedAgents
+	postSpawnAgents := addSpawnCounts(runningAgents, requestedAgents)
 	if maxAgents > 0 {
 		out.AgentHeadroom = maxAgents - postSpawnAgents
 		if out.AgentHeadroom < 0 {
 			out.AgentHeadroom = 0
+		}
+	}
+
+	// Per-type caps supplement the existing shared host budget. A type that
+	// is already over its cap does not prevent launching a different type.
+	// Never infer a checked-empty inventory from a missing or partial map.
+	var firstBlocked *SpawnAdmissionAgentLimit
+	var invalidLimits, invalidRequestCounts bool
+	types := make([]string, 0, len(in.MaxAgentsByType))
+	for kind, limit := range in.MaxAgentsByType {
+		if limit < 0 || kind == "" {
+			invalidLimits = true
+		}
+		if limit > 0 {
+			types = append(types, kind)
+		}
+	}
+	sort.Strings(types)
+	if in.RequestedByType != nil || len(types) > 0 {
+		count, valid := sumSpawnCounts(in.RequestedByType)
+		invalidRequestCounts = !valid || count != requestedAgents
+	}
+	if len(types) > 0 {
+		count, valid := sumSpawnCounts(in.RunningByType)
+		if (!valid || count != runningAgents) && out.AgentInventoryAvailable {
+			out.AgentInventoryAvailable = false
+			out.AgentInventoryError = "agent-type inventory is missing or disagrees with the fleet total"
+		}
+		if !invalidRequestCounts && out.AgentInventoryAvailable {
+			for _, kind := range types {
+				running, requested, limit := in.RunningByType[kind], in.RequestedByType[kind], in.MaxAgentsByType[kind]
+				projected := addSpawnCounts(running, requested)
+				row := SpawnAdmissionAgentLimit{
+					AgentType: kind, Running: running, Requested: requested,
+					Projected: projected, Limit: limit, Headroom: maxInt(limit-projected, 0),
+					BlocksRequest: requested > 0 && (running > limit || requested > limit-running),
+				}
+				out.AgentTypeLimits = append(out.AgentTypeLimits, row)
+				if row.BlocksRequest && firstBlocked == nil {
+					firstBlocked = &out.AgentTypeLimits[len(out.AgentTypeLimits)-1]
+				}
+			}
 		}
 	}
 
@@ -236,13 +303,30 @@ func EvaluateSpawnAdmission(in SpawnAdmissionInput) SpawnAdmission {
 		out.Decision = SpawnAdmissionRefuse
 		out.Reason = "invalid_request"
 		out.Hint = "specify at least one agent"
-	case maxAgents > 0 && postSpawnAgents > maxAgents:
+	case invalidLimits:
+		out.Decision = SpawnAdmissionRefuse
+		out.Reason = "invalid_agent_type_limits"
+		out.Hint = "agent-type limits require non-empty type names and non-negative counts"
+	case invalidRequestCounts:
+		out.Decision = SpawnAdmissionRefuse
+		out.Reason = "invalid_request"
+		out.Hint = "requested agent-type counts must be complete and match requested_agents"
+	case (maxAgents > 0 || len(types) > 0) && !out.AgentInventoryAvailable:
+		out.Decision = SpawnAdmissionDefer
+		out.Reason = "agent_inventory_unavailable"
+		out.Hint = "restore tmux fleet enumeration and retry; unknown running counts cannot authorize a capped spawn"
+	case maxAgents > 0 && (runningAgents > maxAgents || requestedAgents > maxAgents-runningAgents):
 		out.Decision = SpawnAdmissionRefuse
 		out.Reason = "agent_limit_exceeded"
 		out.Hint = "running " + strconv.Itoa(runningAgents) +
 			" + requested " + strconv.Itoa(requestedAgents) +
 			" exceeds cap " + strconv.Itoa(maxAgents) +
 			"; reduce requested agents or raise spawn_pacing agent caps"
+	case firstBlocked != nil:
+		out.Decision = SpawnAdmissionRefuse
+		out.Reason = "agent_type_limit_exceeded"
+		out.Hint = fmt.Sprintf("%s: running %d + requested %d exceeds per-type cap %d; reduce that agent type or adjust spawn_pacing.agent_type_limits.%s",
+			firstBlocked.AgentType, firstBlocked.Running, firstBlocked.Requested, firstBlocked.Limit, firstBlocked.AgentType)
 	case largeSpawn && pressureLevel >= LevelCritical:
 		out.Decision = SpawnAdmissionRefuse
 		out.Reason = "pressure_critical"
@@ -253,6 +337,31 @@ func EvaluateSpawnAdmission(in SpawnAdmissionInput) SpawnAdmission {
 		out.Hint = recommendation(ActionSwarmSpawn, in.Pressure.Limiting)
 	}
 	return out
+}
+
+// addSpawnCounts saturates diagnostic totals. Gate comparisons use subtraction
+// so an unrepresentable sum cannot wrap below a cap, even a MaxInt cap.
+func addSpawnCounts(a, b int) int {
+	maxValue := int(^uint(0) >> 1)
+	if a > maxValue-b {
+		return maxValue
+	}
+	return a + b
+}
+
+func sumSpawnCounts(counts map[string]int) (int, bool) {
+	if counts == nil {
+		return 0, false
+	}
+	total := 0
+	maxValue := int(^uint(0) >> 1)
+	for kind, count := range counts {
+		if kind == "" || count < 0 || total > maxValue-count {
+			return 0, false
+		}
+		total += count
+	}
+	return total, true
 }
 
 func spawnAdmissionSources(snap Snapshot) []SpawnAdmissionSource {

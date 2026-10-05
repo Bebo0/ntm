@@ -2,6 +2,7 @@ package config
 
 import (
 	"fmt"
+	"sort"
 )
 
 // SpawnPacingConfig configures the spawn admission control consulted by the
@@ -24,6 +25,11 @@ type SpawnPacingConfig struct {
 
 	// AgentCaps contains per-agent-type concurrency caps.
 	AgentCaps AgentPacingConfig `toml:"agent_caps"`
+
+	// AgentTypeLimits optionally bounds each canonical agent type across the
+	// observed tmux fleet. These limits are independent of AgentCaps' shared
+	// budget. Zero or an omitted type means no additional per-type limit.
+	AgentTypeLimits map[string]int `toml:"agent_type_limits"`
 }
 
 // AgentPacingConfig holds per-agent-type concurrency caps.
@@ -81,6 +87,22 @@ func ValidateSpawnPacingConfig(cfg *SpawnPacingConfig) error {
 	}
 	if cfg.AgentCaps.OmpMaxConcurrent < 0 {
 		return fmt.Errorf("agent_caps: omp_max_concurrent must be non-negative, got %d", cfg.AgentCaps.OmpMaxConcurrent)
+	}
+	// Sort keys so multiple invalid settings have a deterministic diagnostic.
+	types := make([]string, 0, len(cfg.AgentTypeLimits))
+	for kind := range cfg.AgentTypeLimits {
+		types = append(types, kind)
+	}
+	sort.Strings(types)
+	for _, kind := range types {
+		switch kind {
+		case "claude", "codex", "gemini", "antigravity", "grok", "omp", "opencode":
+		default:
+			return fmt.Errorf("agent_type_limits: unknown agent type %q; use claude, codex, gemini, antigravity, grok, omp, or opencode", kind)
+		}
+		if cfg.AgentTypeLimits[kind] < 0 {
+			return fmt.Errorf("agent_type_limits: %s must be non-negative, got %d", kind, cfg.AgentTypeLimits[kind])
+		}
 	}
 	return nil
 }

@@ -235,12 +235,21 @@ func validateSpawnRequest(opts SpawnOptions) (string, error) {
 		{flag: "--spawn-omp", value: opts.OmpCount},
 		{flag: "--spawn-oc", value: opts.OcCount},
 	}
+	maxAgents := int(^uint(0) >> 1)
+	if !opts.NoUserPane {
+		maxAgents-- // Leave room for the user pane in totalPanes.
+	}
+	total := 0
 	for _, count := range counts {
 		if count.value < 0 {
 			return "", fmt.Errorf("%s must be zero or greater, got %d", count.flag, count.value)
 		}
+		if count.value > maxAgents-total {
+			return "", errors.New("requested agent count exceeds supported pane capacity")
+		}
+		total += count.value
 	}
-	if opts.totalAgentCount() <= 0 {
+	if total == 0 {
 		return "", errors.New("no agents specified (use cc, cod, gmi, agy, grok, omp, or oc counts)")
 	}
 	if opts.GrokCount > 0 && opts.WaitReady {
@@ -412,6 +421,12 @@ func collectSpawnAdmissionInputWithPanes(
 		Session:         opts.Session,
 		RequestedAgents: totalAgents,
 		RequestedPanes:  totalPanes,
+		RequestedByType: map[string]int{
+			"claude": opts.CCCount, "codex": opts.CodCount,
+			"gemini": opts.GmiCount, "antigravity": opts.AgyCount,
+			"grok": opts.GrokCount, "omp": opts.OmpCount, "opencode": opts.OcCount,
+		},
+		RunningByType: make(map[string]int),
 	}
 
 	if cfg == nil || cfg.SpawnPacing.Enabled {
@@ -421,12 +436,14 @@ func collectSpawnAdmissionInputWithPanes(
 				input.LargeSpawnThreshold = cfg.SpawnPacing.MaxConcurrentSpawns
 			}
 			input.MaxAgents = spawnAdmissionAgentLimit(cfg)
+			input.MaxAgentsByType = spawnAdmissionAgentTypeLimits(cfg)
 		}
 		input.Pressure = collectSystemPressureSnapshot(ctx)
 	}
 
 	panesBySession, err := getAllPanes(ctx)
 	if err != nil {
+		input.InventoryError = "enumerate tmux fleet: " + err.Error()
 		return input
 	}
 	input.RunningSessions = len(panesBySession)
@@ -438,6 +455,7 @@ func collectSpawnAdmissionInputWithPanes(
 		for _, pane := range panes {
 			if isSpawnAdmissionAgentPane(pane) {
 				input.RunningAgents++
+				input.RunningByType[spawnAdmissionAgentType(pane.Type)]++
 			}
 		}
 	}
@@ -452,10 +470,44 @@ func spawnAdmissionAgentLimit(cfg *config.Config) int {
 	total := 0
 	for _, cap := range []int{caps.ClaudeMaxConcurrent, caps.CodexMaxConcurrent, caps.GeminiMaxConcurrent, caps.OmpMaxConcurrent} {
 		if cap > 0 {
+			if total > int(^uint(0)>>1)-cap {
+				return int(^uint(0) >> 1)
+			}
 			total += cap
 		}
 	}
 	return total
+}
+
+func spawnAdmissionAgentTypeLimits(cfg *config.Config) map[string]int {
+	if cfg == nil || len(cfg.SpawnPacing.AgentTypeLimits) == 0 {
+		return nil
+	}
+	limits := make(map[string]int, len(cfg.SpawnPacing.AgentTypeLimits))
+	for kind, count := range cfg.SpawnPacing.AgentTypeLimits {
+		limits[kind] = count
+	}
+	return limits
+}
+
+// spawnAdmissionAgentType translates tmux's canonical short identifiers into
+// the public configuration vocabulary. Keep all live/requested count keys in
+// that vocabulary so aliases cannot hide existing agents from their limits.
+func spawnAdmissionAgentType(kind tmux.AgentType) string {
+	switch kind.Canonical() {
+	case tmux.AgentClaude:
+		return "claude"
+	case tmux.AgentCodex:
+		return "codex"
+	case tmux.AgentGemini:
+		return "gemini"
+	case tmux.AgentAntigravity:
+		return "antigravity"
+	case tmux.AgentOpencode:
+		return "opencode"
+	default:
+		return string(kind.Canonical())
+	}
 }
 
 func collectSystemPressureSnapshot(ctx context.Context) pressure.Snapshot {

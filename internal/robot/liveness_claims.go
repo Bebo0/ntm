@@ -40,6 +40,7 @@ func init() {
 	config.RegisterReader("spawn_pacing.agent_caps.codex_max_concurrent", spawnAdmissionAgentLimit)
 	config.RegisterReader("spawn_pacing.agent_caps.gemini_max_concurrent", spawnAdmissionAgentLimit)
 	config.RegisterReader("spawn_pacing.agent_caps.omp_max_concurrent", spawnAdmissionAgentLimit)
+	config.RegisterReader("spawn_pacing.agent_type_limits", spawnAdmissionAgentTypeLimits)
 
 	// Swarm snapshot surface (robot.go).
 	config.RegisterReader("swarm.enabled", buildSwarmSnapshot)
