@@ -3497,6 +3497,69 @@ esac
 	}
 }
 
+// GH #283 field case (a), end to end: br reports bead c blocked, but triage
+// does not list it, so its blocker IDs are unknown. The old row path stored it
+// as an open row with no blockers and counted it ready. Through the real
+// refresh and the real verified read, the snapshot counts only a and b.
+func TestSnapshotNeverCountsAnUntriagedBlockedBeadAsReady(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("tool fixtures require /bin/sh")
+	}
+	project, bin := t.TempDir(), t.TempDir()
+	if err := os.Mkdir(filepath.Join(project, ".beads"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	jsonl := "{\"id\":\"a\",\"status\":\"open\"}\n{\"id\":\"b\",\"status\":\"open\"}\n" +
+		"{\"id\":\"c\",\"status\":\"open\",\"dependencies\":[{\"depends_on_id\":\"a\",\"type\":\"blocks\"}]}\n"
+	if err := os.WriteFile(filepath.Join(project, ".beads", "issues.jsonl"), []byte(jsonl), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	br := `#!/bin/sh
+case "$*" in
+ *stats*) printf '%s\n' '{"summary":{"total_issues":3,"open_issues":3,"in_progress_issues":0,"blocked_issues":1,"ready_issues":2,"closed_issues":0}}' ;;
+ *blocked*) printf '%s\n' '[{"id":"c","title":"Task C","priority":1}]' ;;
+ *ready*) printf '%s\n' '[{"id":"a","title":"Task A","priority":2},{"id":"b","title":"Task B","priority":2}]' ;;
+ *) printf '%s\n' '[]' ;;
+esac
+`
+	for name, script := range map[string]string{"br": br, "bv": "#!/bin/sh\nprintf '%s\\n' '{\"triage\":{\"recommendations\":[]}}'\n"} {
+		if err := os.WriteFile(filepath.Join(bin, name), []byte(script), 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	t.Setenv("NTM_CONFIG", filepath.Join(t.TempDir(), "config.toml"))
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("AGENT_MAIL_URL", "http://127.0.0.1:1/mcp/")
+	t.Setenv("AGENT_MAIL_TOKEN", "")
+	bv.InvalidateTriageCache()
+	t.Cleanup(bv.InvalidateTriageCache)
+	stubRobotWork(t, adapters.CollectDurableWork)
+
+	store := newProjectionTestStore(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	if err := RefreshNormalizedProjection(ctx, store, project, ""); err != nil {
+		t.Fatalf("RefreshNormalizedProjection: %v", err)
+	}
+	output, err := buildProjectionBackedSnapshot(store, config.Default(), PaginationOptions{}, newSnapshotOutput(config.Default()), nil, project)
+	if err != nil {
+		t.Fatalf("buildProjectionBackedSnapshot: %v", err)
+	}
+	snapshotFinalize(output, PaginationOptions{})
+
+	if output.Work == nil || !output.Work.Available {
+		t.Fatalf("work = %+v, want the verified observation", output.Work)
+	}
+	for _, item := range output.Work.Ready {
+		if item.ID == "c" {
+			t.Fatalf("blocked bead c served as ready: %+v", output.Work.Ready)
+		}
+	}
+	if output.Summary.ReadyWork != 2 || output.BeadsSummary == nil || output.BeadsSummary.Ready != 2 {
+		t.Fatalf("ready_work = %d, beads_summary = %+v; want 2 (a and b), never c", output.Summary.ReadyWork, output.BeadsSummary)
+	}
+}
+
 // GH #283 field case (b): RuntimeWork rows are fresh by age alone. Rows that
 // still advertise a ready bead must not reach the snapshot, its beads summary
 // or its ready_work count once the verified read cannot vouch for them.
