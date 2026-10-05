@@ -128,6 +128,43 @@ type serveOptions struct {
 	CORSAllowOrigins []string
 }
 
+// serveStateMaintenance keeps serve's runtime state current and bounded until
+// ctx ends: the normalized projection refresh every refreshEvery, and a full
+// state-store GC (stale projections and source health, resolved incidents,
+// expired attention and audit rows, completed send operations, idle output
+// watermarks) at start and every gcEvery. Nothing else runs the full GC, so
+// without it those tables grow for as long as the state DB exists (bd-a25g6).
+func serveStateMaintenance(ctx context.Context, store *state.Store, refreshEvery, gcEvery time.Duration) {
+	collect := func() {
+		result, err := store.RunGC(state.RuntimeGCConfig{})
+		if err != nil {
+			slog.Warn("state store GC failed", "err", err)
+			return
+		}
+		slog.Debug("state store GC", "result", result)
+	}
+	collect()
+
+	refresh := time.NewTicker(refreshEvery)
+	defer refresh.Stop()
+	gc := time.NewTicker(gcEvery)
+	defer gc.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-refresh.C:
+			refreshCtx, refreshCancel := context.WithTimeout(ctx, 10*time.Second)
+			if err := robot.RefreshNormalizedProjection(refreshCtx, store, "", ""); err != nil {
+				slog.Warn("normalized projection refresh failed", "err", err)
+			}
+			refreshCancel()
+		case <-gc.C:
+			collect()
+		}
+	}
+}
+
 func runServe(opts serveOptions) error {
 	// Open state store
 	stateStore, err := state.Open("")
@@ -279,23 +316,7 @@ func runServe(opts serveOptions) error {
 	}
 	refreshCancel()
 
-	go func() {
-		ticker := time.NewTicker(15 * time.Second)
-		defer ticker.Stop()
-
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			case <-ticker.C:
-				refreshCtx, refreshCancel := context.WithTimeout(ctx, 10*time.Second)
-				if err := robot.RefreshNormalizedProjection(refreshCtx, stateStore, "", ""); err != nil {
-					slog.Warn("normalized projection refresh failed", "err", err)
-				}
-				refreshCancel()
-			}
-		}
-	}()
+	go serveStateMaintenance(ctx, stateStore, 15*time.Second, time.Hour)
 
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
