@@ -4,7 +4,6 @@ import (
 	"os"
 	"strconv"
 	"testing"
-	"time"
 
 	"github.com/Dicklesworthstone/ntm/internal/tmux"
 )
@@ -80,12 +79,9 @@ func TestPIDMapOperations(t *testing.T) {
 		AgentType: tmux.AgentClaude,
 		NTMIndex:  1,
 	}
-	m.paneToShellPID["test__cc_1"] = 1234
 	m.pidToPane[1234] = identity
 	m.pidToPane[1235] = identity // child process
 	m.pidToPane[1236] = identity // another child
-	m.shellToChildren[1234] = []int{1235, 1236}
-	m.lastRefresh = time.Now()
 	m.mu.Unlock()
 
 	t.Run("GetPaneForPID shell", func(t *testing.T) {
@@ -115,37 +111,6 @@ func TestPIDMapOperations(t *testing.T) {
 		}
 	})
 
-	t.Run("GetShellPID", func(t *testing.T) {
-		got := m.GetShellPID("test__cc_1")
-		if got != 1234 {
-			t.Errorf("GetShellPID = %d, want %d", got, 1234)
-		}
-	})
-
-	t.Run("GetShellPID unknown", func(t *testing.T) {
-		got := m.GetShellPID("unknown__pane")
-		if got != 0 {
-			t.Errorf("GetShellPID should return 0 for unknown pane, got %d", got)
-		}
-	})
-
-	t.Run("GetAllPIDsForPane", func(t *testing.T) {
-		pids := m.GetAllPIDsForPane("test__cc_1")
-		if len(pids) != 3 {
-			t.Errorf("GetAllPIDsForPane returned %d PIDs, want 3", len(pids))
-		}
-		// Should include shell + children
-		pidSet := make(map[int]bool)
-		for _, pid := range pids {
-			pidSet[pid] = true
-		}
-		for _, expected := range []int{1234, 1235, 1236} {
-			if !pidSet[expected] {
-				t.Errorf("missing expected PID %d", expected)
-			}
-		}
-	})
-
 	t.Run("GetPIDLabels", func(t *testing.T) {
 		labels := m.GetPIDLabels()
 		if len(labels) != 3 {
@@ -153,32 +118,6 @@ func TestPIDMapOperations(t *testing.T) {
 		}
 		if labels[1234] != "test__cc_1" {
 			t.Errorf("label for PID 1234 = %q, want %q", labels[1234], "test__cc_1")
-		}
-	})
-
-	t.Run("GetStats", func(t *testing.T) {
-		stats := m.GetStats()
-		if stats.PaneCount != 1 {
-			t.Errorf("PaneCount = %d, want 1", stats.PaneCount)
-		}
-		if stats.TotalPIDCount != 3 {
-			t.Errorf("TotalPIDCount = %d, want 3", stats.TotalPIDCount)
-		}
-		if stats.ShellPIDCount != 1 {
-			t.Errorf("ShellPIDCount = %d, want 1", stats.ShellPIDCount)
-		}
-		if stats.ChildPIDCount != 2 {
-			t.Errorf("ChildPIDCount = %d, want 2", stats.ChildPIDCount)
-		}
-		if stats.ByAgentType["cc"] != 3 {
-			t.Errorf("ByAgentType[cc] = %d, want 3", stats.ByAgentType["cc"])
-		}
-	})
-
-	t.Run("LastRefresh", func(t *testing.T) {
-		lastRefresh := m.LastRefresh()
-		if time.Since(lastRefresh) > time.Minute {
-			t.Error("LastRefresh seems too old")
 		}
 	})
 }
@@ -342,47 +281,6 @@ func trimSpace(s string) string {
 	return result
 }
 
-func TestGetAllPIDsForPaneUnknown(t *testing.T) {
-	t.Parallel()
-
-	m := NewPIDMap("test")
-
-	// Test with unknown pane
-	pids := m.GetAllPIDsForPane("unknown__pane")
-	if pids != nil {
-		t.Errorf("GetAllPIDsForPane for unknown pane should return nil, got %v", pids)
-	}
-}
-
-func TestGetStatsEmptyMap(t *testing.T) {
-	t.Parallel()
-
-	m := NewPIDMap("test")
-	stats := m.GetStats()
-
-	if stats.PaneCount != 0 {
-		t.Errorf("PaneCount = %d, want 0", stats.PaneCount)
-	}
-	if stats.TotalPIDCount != 0 {
-		t.Errorf("TotalPIDCount = %d, want 0", stats.TotalPIDCount)
-	}
-	if stats.ShellPIDCount != 0 {
-		t.Errorf("ShellPIDCount = %d, want 0", stats.ShellPIDCount)
-	}
-	if stats.ChildPIDCount != 0 {
-		t.Errorf("ChildPIDCount = %d, want 0", stats.ChildPIDCount)
-	}
-	if stats.Session != "test" {
-		t.Errorf("Session = %q, want %q", stats.Session, "test")
-	}
-	if len(stats.ByAgentType) != 0 {
-		t.Errorf("ByAgentType = %v, want empty map", stats.ByAgentType)
-	}
-	if !stats.LastRefresh.IsZero() {
-		t.Errorf("LastRefresh should be zero for new map, got %v", stats.LastRefresh)
-	}
-}
-
 func TestGetPIDLabelsEmpty(t *testing.T) {
 	t.Parallel()
 
@@ -391,51 +289,6 @@ func TestGetPIDLabelsEmpty(t *testing.T) {
 
 	if len(labels) != 0 {
 		t.Errorf("GetPIDLabels for empty map should return empty map, got %v", labels)
-	}
-}
-
-func TestLastRefreshEmpty(t *testing.T) {
-	t.Parallel()
-
-	m := NewPIDMap("test")
-	lastRefresh := m.LastRefresh()
-
-	if !lastRefresh.IsZero() {
-		t.Errorf("LastRefresh for new map should be zero, got %v", lastRefresh)
-	}
-}
-
-func TestGetStatsWithMixedAgentTypes(t *testing.T) {
-	t.Parallel()
-
-	m := NewPIDMap("test")
-
-	// Populate with multiple agent types
-	m.mu.Lock()
-	m.pidToPane[1000] = &PaneIdentity{AgentType: tmux.AgentClaude}
-	m.pidToPane[1001] = &PaneIdentity{AgentType: tmux.AgentClaude}
-	m.pidToPane[1002] = &PaneIdentity{AgentType: tmux.AgentCodex}
-	m.pidToPane[1003] = &PaneIdentity{AgentType: tmux.AgentGemini}
-	m.pidToPane[1004] = &PaneIdentity{AgentType: ""} // no agent type
-	m.mu.Unlock()
-
-	stats := m.GetStats()
-
-	if stats.TotalPIDCount != 5 {
-		t.Errorf("TotalPIDCount = %d, want 5", stats.TotalPIDCount)
-	}
-	if stats.ByAgentType["cc"] != 2 {
-		t.Errorf("ByAgentType[cc] = %d, want 2", stats.ByAgentType["cc"])
-	}
-	if stats.ByAgentType["cod"] != 1 {
-		t.Errorf("ByAgentType[cod] = %d, want 1", stats.ByAgentType["cod"])
-	}
-	if stats.ByAgentType["gmi"] != 1 {
-		t.Errorf("ByAgentType[gmi] = %d, want 1", stats.ByAgentType["gmi"])
-	}
-	// Empty agent type should not be counted
-	if _, exists := stats.ByAgentType[""]; exists {
-		t.Error("empty agent type should not be in ByAgentType")
 	}
 }
 

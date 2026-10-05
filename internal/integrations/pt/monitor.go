@@ -103,10 +103,9 @@ type HealthMonitor struct {
 	ptAdapter   *tools.PTAdapter
 	ranoAdapter *tools.RanoAdapter
 
-	states  map[string]*AgentState // pane -> state
-	alertCh chan Alert
-	stopCh  chan struct{}
-	doneCh  chan struct{}
+	states map[string]*AgentState // pane -> state
+	stopCh chan struct{}
+	doneCh chan struct{}
 
 	running bool
 	session string
@@ -165,11 +164,6 @@ func NewHealthMonitor(cfg *config.ProcessTriageConfig, opts ...HealthMonitorOpti
 
 	// Create PID map for the session
 	m.pidMap = rano.NewPIDMap(m.session)
-
-	// If no alert channel provided, create an internal one
-	if m.alertCh == nil {
-		m.alertCh = make(chan Alert, 100)
-	}
 
 	return m
 }
@@ -235,23 +229,6 @@ func (m *HealthMonitor) Running() bool {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	return m.running
-}
-
-// Alerts returns the channel for receiving health alerts.
-func (m *HealthMonitor) Alerts() <-chan Alert {
-	return m.alertCh
-}
-
-// GetState returns the current state for a pane.
-func (m *HealthMonitor) GetState(pane string) *AgentState {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-	if state, ok := m.states[pane]; ok {
-		// Return a copy to avoid data races
-		stateCopy := *state
-		return &stateCopy
-	}
-	return nil
 }
 
 // GetAllStates returns the current state for all monitored panes.
@@ -544,22 +521,17 @@ func (m *HealthMonitor) checkAlerts(pane string) []Alert {
 	return alerts
 }
 
-// sendAlert sends an alert on the alert channel and then notifies callbacks.
+// sendAlert logs an alert and delivers it to the registered callbacks (ntm
+// serve publishes them on the event bus). There is deliberately no alert
+// channel: nothing in production drained the old one, so after 100 alerts
+// every later alert logged a spurious "channel full, dropping" warning.
 func (m *HealthMonitor) sendAlert(alert Alert) {
-	select {
-	case m.alertCh <- alert:
-		monitorLogger().Info("alert sent",
-			"type", alert.Type,
-			"pane", alert.Pane,
-			"state", alert.State,
-			"duration", alert.Duration,
-		)
-	default:
-		monitorLogger().Warn("alert channel full, dropping alert",
-			"type", alert.Type,
-			"pane", alert.Pane,
-		)
-	}
+	monitorLogger().Info("alert sent",
+		"type", alert.Type,
+		"pane", alert.Pane,
+		"state", alert.State,
+		"duration", alert.Duration,
+	)
 	m.emitAlert(alert)
 }
 
@@ -592,53 +564,6 @@ func (m *HealthMonitor) emitAlert(alert Alert) {
 			}()
 			cb(alert)
 		}()
-	}
-}
-
-// ForceCheck triggers an immediate health check outside the regular interval.
-func (m *HealthMonitor) ForceCheck() {
-	m.mu.RLock()
-	running := m.running
-	m.mu.RUnlock()
-
-	if running {
-		m.checkAll()
-	}
-}
-
-// MonitorStats holds statistics about the health monitor.
-type MonitorStats struct {
-	Running        bool           `json:"running"`
-	Session        string         `json:"session,omitempty"`
-	CheckInterval  int            `json:"check_interval_seconds"`
-	IdleThreshold  int            `json:"idle_threshold_seconds"`
-	StuckThreshold int            `json:"stuck_threshold_seconds"`
-	UseRano        bool           `json:"use_rano"`
-	AgentCount     int            `json:"agent_count"`
-	ByState        map[string]int `json:"by_state"`
-	AlertsInQueue  int            `json:"alerts_in_queue"`
-}
-
-// GetStats returns statistics about the monitor.
-func (m *HealthMonitor) GetStats() MonitorStats {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-
-	byState := make(map[string]int)
-	for _, state := range m.states {
-		byState[string(state.Classification)]++
-	}
-
-	return MonitorStats{
-		Running:        m.running,
-		Session:        m.session,
-		CheckInterval:  m.config.CheckInterval,
-		IdleThreshold:  m.config.IdleThreshold,
-		StuckThreshold: m.config.StuckThreshold,
-		UseRano:        m.useRano,
-		AgentCount:     len(m.states),
-		ByState:        byState,
-		AlertsInQueue:  len(m.alertCh),
 	}
 }
 

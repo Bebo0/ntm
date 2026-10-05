@@ -1,6 +1,8 @@
 package pt
 
 import (
+	"bytes"
+	"log/slog"
 	"testing"
 	"time"
 
@@ -27,9 +29,6 @@ func TestNewHealthMonitor(t *testing.T) {
 	if m.states == nil {
 		t.Error("expected non-nil states map")
 	}
-	if m.alertCh == nil {
-		t.Error("expected non-nil alert channel")
-	}
 	if m.running {
 		t.Error("expected monitor not to be running initially")
 	}
@@ -37,13 +36,11 @@ func TestNewHealthMonitor(t *testing.T) {
 
 func TestHealthMonitorOptions(t *testing.T) {
 	cfg := config.DefaultProcessTriageConfig()
-	alertCh := make(chan Alert, 10)
 	stateChangeCalls := 0
 	alertCalls := 0
 
 	m := NewHealthMonitor(&cfg,
 		withSessionForTest("test-session"),
-		withAlertChannelForTest(alertCh),
 		WithStateChangeCallback(func(ClassificationStateChange) {
 			stateChangeCalls++
 		}),
@@ -55,9 +52,6 @@ func TestHealthMonitorOptions(t *testing.T) {
 
 	if m.session != "test-session" {
 		t.Errorf("expected session 'test-session', got %q", m.session)
-	}
-	if m.alertCh != alertCh {
-		t.Error("expected custom alert channel")
 	}
 	if len(m.stateChangeCallbacks) != 1 {
 		t.Errorf("expected 1 state change callback, got %d", len(m.stateChangeCallbacks))
@@ -133,40 +127,6 @@ func TestAlert(t *testing.T) {
 	}
 	if alert.Pane != "test__cc_1" {
 		t.Errorf("expected pane 'test__cc_1', got %q", alert.Pane)
-	}
-}
-
-func TestMonitorStats(t *testing.T) {
-	cfg := config.DefaultProcessTriageConfig()
-	m := NewHealthMonitor(&cfg)
-
-	stats := m.GetStats()
-
-	if stats.Running {
-		t.Error("expected monitor not to be running")
-	}
-	if stats.CheckInterval != cfg.CheckInterval {
-		t.Errorf("expected check interval %d, got %d", cfg.CheckInterval, stats.CheckInterval)
-	}
-	if stats.IdleThreshold != cfg.IdleThreshold {
-		t.Errorf("expected idle threshold %d, got %d", cfg.IdleThreshold, stats.IdleThreshold)
-	}
-	if stats.StuckThreshold != cfg.StuckThreshold {
-		t.Errorf("expected stuck threshold %d, got %d", cfg.StuckThreshold, stats.StuckThreshold)
-	}
-	if stats.AgentCount != 0 {
-		t.Errorf("expected agent count 0, got %d", stats.AgentCount)
-	}
-}
-
-func TestGetState(t *testing.T) {
-	cfg := config.DefaultProcessTriageConfig()
-	m := NewHealthMonitor(&cfg)
-
-	// No state should exist initially
-	state := m.GetState("nonexistent")
-	if state != nil {
-		t.Error("expected nil state for nonexistent pane")
 	}
 }
 
@@ -349,7 +309,7 @@ func TestUpdateState(t *testing.T) {
 	change1 := m.updateState("test__cc_1", 12345, event1)
 	m.mu.Unlock()
 
-	state := m.GetState("test__cc_1")
+	state := m.GetAllStates()["test__cc_1"]
 	if state == nil {
 		t.Fatal("expected non-nil state")
 	}
@@ -393,7 +353,7 @@ func TestUpdateState(t *testing.T) {
 	change2 := m.updateState("test__cc_1", 12345, event2)
 	m.mu.Unlock()
 
-	state = m.GetState("test__cc_1")
+	state = m.GetAllStates()["test__cc_1"]
 	if state.ConsecutiveCount != 2 {
 		t.Errorf("expected consecutive count 2, got %d", state.ConsecutiveCount)
 	}
@@ -419,7 +379,7 @@ func TestUpdateState(t *testing.T) {
 	change3 := m.updateState("test__cc_1", 12345, event3)
 	m.mu.Unlock()
 
-	state = m.GetState("test__cc_1")
+	state = m.GetAllStates()["test__cc_1"]
 	if state.Classification != ClassStuck {
 		t.Errorf("expected classification stuck, got %s", state.Classification)
 	}
@@ -463,7 +423,7 @@ func TestUpdateStateHistoryTrimming(t *testing.T) {
 		m.mu.Unlock()
 	}
 
-	state := m.GetState("test__cc_1")
+	state := m.GetAllStates()["test__cc_1"]
 	if len(state.History) != 5 {
 		t.Errorf("expected history to be trimmed to 5, got %d", len(state.History))
 	}
@@ -616,68 +576,6 @@ func TestCheckAlertsNonexistentPane(t *testing.T) {
 	}
 }
 
-func TestSendAlertChannelFull(t *testing.T) {
-	cfg := config.DefaultProcessTriageConfig()
-	// Create a channel with capacity 1
-	alertCh := make(chan Alert, 1)
-
-	m := NewHealthMonitor(&cfg, withAlertChannelForTest(alertCh))
-
-	// Fill the channel
-	alertCh <- Alert{Type: AlertStuck, Pane: "filler"}
-
-	// Try to send another alert - should drop without blocking
-	alert := Alert{
-		Type:      AlertStuck,
-		Pane:      "test__cc_1",
-		PID:       12345,
-		State:     ClassStuck,
-		Duration:  time.Minute,
-		Timestamp: time.Now(),
-		Message:   "Test alert",
-	}
-
-	done := make(chan bool, 1)
-	go func() {
-		m.mu.Lock()
-		m.sendAlert(alert)
-		m.mu.Unlock()
-		done <- true
-	}()
-
-	select {
-	case <-done:
-		// Good - didn't block
-	case <-time.After(100 * time.Millisecond):
-		t.Error("sendAlert blocked when channel was full")
-	}
-}
-
-func TestAlertsChannelAccessor(t *testing.T) {
-	cfg := config.DefaultProcessTriageConfig()
-	alertCh := make(chan Alert, 10)
-
-	m := NewHealthMonitor(&cfg, withAlertChannelForTest(alertCh))
-
-	ch := m.Alerts()
-	if ch == nil {
-		t.Error("expected non-nil alert channel")
-	}
-
-	// Verify it's the same channel
-	testAlert := Alert{Type: AlertStuck, Pane: "test"}
-	alertCh <- testAlert
-
-	select {
-	case received := <-ch:
-		if received.Pane != "test" {
-			t.Errorf("expected pane 'test', got %q", received.Pane)
-		}
-	case <-time.After(100 * time.Millisecond):
-		t.Error("expected to receive alert")
-	}
-}
-
 func TestStateChangeCallbackInvokedForInitialAndTransitionOnly(t *testing.T) {
 	cfg := config.DefaultProcessTriageConfig()
 	var changes []ClassificationStateChange
@@ -736,18 +634,30 @@ func TestStateChangeCallbackInvokedForInitialAndTransitionOnly(t *testing.T) {
 	}
 }
 
-func TestAlertCallbackInvokedEvenWhenChannelIsFull(t *testing.T) {
+// TestSendAlertReachesEveryCallbackWithoutAQueue covers the delivery path ntm
+// serve depends on. Alerts used to be pushed onto a 100-slot channel that
+// nothing in production drained; past 100 alerts each one logged a "channel
+// full, dropping alert" warning. Delivery is now callbacks only.
+func TestSendAlertReachesEveryCallbackWithoutAQueue(t *testing.T) {
+	var logged bytes.Buffer
+	previous := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logged, &slog.HandlerOptions{Level: slog.LevelWarn})))
+	t.Cleanup(func() { slog.SetDefault(previous) })
+
 	cfg := config.DefaultProcessTriageConfig()
-	alertCh := make(chan Alert, 1)
-	var seen []Alert
+	var seen, also []Alert
 	m := NewHealthMonitor(&cfg,
-		withAlertChannelForTest(alertCh),
 		WithAlertCallback(func(alert Alert) {
 			seen = append(seen, alert)
 		}),
+		WithAlertCallback(func(alert Alert) {
+			also = append(also, alert)
+		}),
 	)
 
-	alertCh <- Alert{Type: AlertIdle, Pane: "filler"}
+	for i := 0; i < 150; i++ {
+		m.sendAlert(Alert{Type: AlertIdle, Pane: "filler"})
+	}
 	alert := Alert{
 		Session:   "callback-session",
 		Type:      AlertStuck,
@@ -761,62 +671,14 @@ func TestAlertCallbackInvokedEvenWhenChannelIsFull(t *testing.T) {
 
 	m.sendAlert(alert)
 
-	if len(seen) != 1 {
-		t.Fatalf("expected 1 callback alert, got %d", len(seen))
+	if len(seen) != 151 || len(also) != 151 {
+		t.Fatalf("expected every alert at both callbacks, got %d and %d", len(seen), len(also))
 	}
-	if seen[0].Type != AlertStuck || seen[0].Pane != "test__cc_1" {
-		t.Fatalf("unexpected callback alert: %#v", seen[0])
+	if last := seen[150]; last.Type != AlertStuck || last.Pane != "test__cc_1" {
+		t.Fatalf("unexpected callback alert: %#v", last)
 	}
-}
-
-func TestForceCheck(t *testing.T) {
-	cfg := config.DefaultProcessTriageConfig()
-	m := NewHealthMonitor(&cfg)
-
-	// ForceCheck when not running should be a no-op (no panic)
-	m.ForceCheck()
-
-	// We can't easily test ForceCheck when running without mocks
-	// but we verify it doesn't crash
-}
-
-func TestGetStateWithPopulatedStates(t *testing.T) {
-	cfg := config.DefaultProcessTriageConfig()
-	m := NewHealthMonitor(&cfg)
-
-	// Populate some states
-	now := time.Now()
-	m.mu.Lock()
-	m.states["test__cc_1"] = &AgentState{
-		Pane:           "test__cc_1",
-		PID:            12345,
-		Classification: ClassUseful,
-		Since:          now,
-		LastCheck:      now,
-	}
-	m.states["test__cod_1"] = &AgentState{
-		Pane:           "test__cod_1",
-		PID:            12346,
-		Classification: ClassWaiting,
-		Since:          now,
-		LastCheck:      now,
-	}
-	m.mu.Unlock()
-
-	// Get existing state
-	state := m.GetState("test__cc_1")
-	if state == nil {
-		t.Fatal("expected non-nil state")
-	}
-	if state.PID != 12345 {
-		t.Errorf("expected PID 12345, got %d", state.PID)
-	}
-
-	// Verify it's a copy (modifying shouldn't affect original)
-	state.PID = 99999
-	originalState := m.GetState("test__cc_1")
-	if originalState.PID == 99999 {
-		t.Error("GetState should return a copy, not the original")
+	if logged.Len() != 0 {
+		t.Fatalf("delivering alerts logged warnings:\n%s", logged.String())
 	}
 }
 
@@ -860,54 +722,6 @@ func TestGetAllStatesWithPopulatedStates(t *testing.T) {
 	originalStates := m.GetAllStates()
 	if originalStates["test__cc_1"].PID == 99999 {
 		t.Error("GetAllStates should return copies, not originals")
-	}
-}
-
-func TestMonitorStatsWithPopulatedStates(t *testing.T) {
-	cfg := config.DefaultProcessTriageConfig()
-	m := NewHealthMonitor(&cfg, withSessionForTest("stats-test"))
-
-	// Populate some states with different classifications
-	now := time.Now()
-	m.mu.Lock()
-	m.states["test__cc_1"] = &AgentState{
-		Pane:           "test__cc_1",
-		Classification: ClassUseful,
-		Since:          now,
-	}
-	m.states["test__cc_2"] = &AgentState{
-		Pane:           "test__cc_2",
-		Classification: ClassUseful,
-		Since:          now,
-	}
-	m.states["test__cod_1"] = &AgentState{
-		Pane:           "test__cod_1",
-		Classification: ClassWaiting,
-		Since:          now,
-	}
-	m.states["test__gmi_1"] = &AgentState{
-		Pane:           "test__gmi_1",
-		Classification: ClassStuck,
-		Since:          now,
-	}
-	m.mu.Unlock()
-
-	stats := m.GetStats()
-
-	if stats.AgentCount != 4 {
-		t.Errorf("expected agent count 4, got %d", stats.AgentCount)
-	}
-	if stats.Session != "stats-test" {
-		t.Errorf("expected session 'stats-test', got %q", stats.Session)
-	}
-	if stats.ByState["useful"] != 2 {
-		t.Errorf("expected 2 useful, got %d", stats.ByState["useful"])
-	}
-	if stats.ByState["waiting"] != 1 {
-		t.Errorf("expected 1 waiting, got %d", stats.ByState["waiting"])
-	}
-	if stats.ByState["stuck"] != 1 {
-		t.Errorf("expected 1 stuck, got %d", stats.ByState["stuck"])
 	}
 }
 
@@ -981,32 +795,20 @@ func TestClassificationEventFields(t *testing.T) {
 	}
 }
 
-func TestDefaultAlertChannel(t *testing.T) {
-	cfg := config.DefaultProcessTriageConfig()
-
-	// Without providing a custom channel, one should be created
-	m := NewHealthMonitor(&cfg)
-
-	if m.alertCh == nil {
-		t.Error("expected default alert channel to be created")
-	}
-
-	// Verify the default channel has capacity
-	select {
-	case m.alertCh <- Alert{Type: AlertStuck}:
-		// Good - channel has capacity
-	default:
-		t.Error("expected default channel to have capacity")
-	}
-}
-
 // Test-local option helpers standing in for removed production options.
 func withSessionForTest(session string) HealthMonitorOption {
 	return func(m *HealthMonitor) { m.session = session }
 }
 
+// withAlertChannelForTest collects alerts through the production callback
+// path (the monitor has no alert channel of its own).
 func withAlertChannelForTest(ch chan Alert) HealthMonitorOption {
-	return func(m *HealthMonitor) { m.alertCh = ch }
+	return WithAlertCallback(func(alert Alert) {
+		select {
+		case ch <- alert:
+		default:
+		}
+	})
 }
 
 func withRanoForTest(enabled bool) HealthMonitorOption {

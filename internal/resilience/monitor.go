@@ -161,14 +161,9 @@ func (m *Monitor) SetCodexThrottle(ct *ratelimit.CodexThrottle) {
 	m.codexThrottle = ct
 }
 
-// RegisterAgent adds an agent to be monitored.
-// shellPID is the tmux pane's shell PID for PID-based liveness checking.
-func (m *Monitor) RegisterAgent(paneID string, paneIndex int, shellPID int, agentType, model, command string) {
-	m.RegisterAgentWithBinding(paneID, paneIndex, shellPID, agentType, model, command, nil)
-}
-
 // RegisterAgentWithBinding registers an agent together with its persisted,
-// provider-scoped launch affinity.
+// provider-scoped launch affinity. shellPID is the tmux pane's shell PID for
+// PID-based liveness checking (0 when unknown).
 func (m *Monitor) RegisterAgentWithBinding(
 	paneID string,
 	paneIndex int,
@@ -252,99 +247,6 @@ func (m *Monitor) reconcileFromManifest() {
 	}
 }
 
-// ScanAndRegisterAgents discovers agents from existing tmux panes
-func (m *Monitor) ScanAndRegisterAgents() error {
-	panes, err := tmux.GetPanes(m.session)
-	if err != nil {
-		return err
-	}
-
-	m.mu.Lock()
-	defer m.mu.Unlock()
-
-	for _, p := range panes {
-		// Only monitor agent panes (not user or unknown)
-		if p.Type == tmux.AgentUser {
-			continue
-		}
-
-		// Skip if already registered
-		if _, exists := m.agents[p.ID]; exists {
-			continue
-		}
-
-		// Determine command template
-		var agentCmdTemplate string
-		switch p.Type {
-		case tmux.AgentClaude:
-			agentCmdTemplate = m.cfg.Agents.Claude
-		case tmux.AgentCodex:
-			agentCmdTemplate = m.cfg.Agents.Codex
-		case tmux.AgentGemini:
-			agentCmdTemplate = m.cfg.Agents.Gemini
-		case tmux.AgentAntigravity:
-			agentCmdTemplate = m.cfg.Agents.Antigravity
-		case tmux.AgentOllama:
-			agentCmdTemplate = m.cfg.Agents.Ollama
-		case tmux.AgentCursor:
-			agentCmdTemplate = m.cfg.Agents.Cursor
-		case tmux.AgentWindsurf:
-			agentCmdTemplate = m.cfg.Agents.Windsurf
-		case tmux.AgentAider:
-			agentCmdTemplate = m.cfg.Agents.Aider
-		case tmux.AgentOmp:
-			agentCmdTemplate = config.OmpCommandOrDefault(m.cfg.Agents.Omp)
-		default:
-			// Check plugins
-			if cmd, ok := m.cfg.Agents.Plugins[string(p.Type)]; ok {
-				agentCmdTemplate = cmd
-			}
-		}
-
-		if agentCmdTemplate == "" {
-			log.Printf("[resilience] Warning: no command template found for agent type %s (pane %s)", p.Type, p.ID)
-			continue
-		}
-
-		// Resolve model
-		modelName := m.cfg.Models.GetModelName(string(p.Type), p.Variant)
-
-		// Generate command
-		// Use NTM index (logical agent number) if available, otherwise fallback to tmux pane index
-		paneIdx := p.Index
-		if p.NTMIndex > 0 {
-			paneIdx = p.NTMIndex
-		}
-
-		cmd, err := config.GenerateAgentCommand(agentCmdTemplate, config.AgentTemplateVars{
-			Model:          modelName,
-			ModelAlias:     p.Variant,
-			ModelRequested: strings.TrimSpace(p.Variant) != "",
-			SessionName:    m.session,
-			PaneIndex:      paneIdx,
-			AgentType:      string(p.Type),
-			ProjectDir:     m.projectDir,
-			// Note: SystemPromptFile is lost in reconstruction
-		})
-
-		if err != nil {
-			log.Printf("[resilience] Failed to reconstruct command for %s: %v", p.ID, err)
-			continue
-		}
-
-		m.agents[p.ID] = &AgentState{
-			PaneID:    p.ID,
-			PaneIndex: paneIdx,
-			ShellPID:  p.PID,
-			AgentType: string(p.Type),
-			Model:     p.Variant,
-			Command:   cmd,
-			Healthy:   true,
-		}
-	}
-	return nil
-}
-
 // Start begins monitoring agent health in the background.
 func (m *Monitor) Start(ctx context.Context) {
 	if ctx == nil {
@@ -391,29 +293,12 @@ func (m *Monitor) Stop() {
 	cancel()
 	<-done
 	m.wg.Wait()
-}
 
-// GetRestartCount returns the number of restarts for an agent
-func (m *Monitor) GetRestartCount(paneID string) int {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-
-	if agent, ok := m.agents[paneID]; ok {
-		return agent.RestartCount
+	// Every async notification has finished; release the notifier's idle
+	// keep-alive connections (the client stays usable if Start runs again).
+	if m.notifier != nil {
+		_ = m.notifier.Close()
 	}
-	return 0
-}
-
-// GetAgentStates returns a copy of all agent states
-func (m *Monitor) GetAgentStates() map[string]AgentState {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-
-	states := make(map[string]AgentState, len(m.agents))
-	for id, agent := range m.agents {
-		states[id] = *agent
-	}
-	return states
 }
 
 // monitorLoop is the main health check loop

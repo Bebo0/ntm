@@ -21,7 +21,6 @@ import (
 	"github.com/Dicklesworthstone/ntm/internal/coordinator"
 	"github.com/Dicklesworthstone/ntm/internal/ensemble"
 	"github.com/Dicklesworthstone/ntm/internal/events"
-	"github.com/Dicklesworthstone/ntm/internal/plugins"
 	"github.com/Dicklesworthstone/ntm/internal/resilience"
 	"github.com/Dicklesworthstone/ntm/internal/state"
 	statuspkg "github.com/Dicklesworthstone/ntm/internal/status"
@@ -122,17 +121,6 @@ func runMonitorContext(parent context.Context, session string) (runErr error) {
 			slog.Default().Debug("webhook bridge init failed", "session", session, "error", err)
 		} else if bridge != nil {
 			defer bridge.Close()
-		}
-	}
-
-	// Load plugins to populate config
-	pluginsDir := filepath.Join(selectedConfigDir(), "agents")
-	if loadedPlugins, err := plugins.LoadAgentPlugins(pluginsDir); err == nil && cfg != nil {
-		if cfg.Agents.Plugins == nil {
-			cfg.Agents.Plugins = make(map[string]string)
-		}
-		for _, p := range loadedPlugins {
-			cfg.Agents.Plugins[p.Name] = p.Command
 		}
 	}
 

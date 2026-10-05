@@ -92,21 +92,6 @@ func (m *Manager) RegisterSession(session string, privacyMode, allowPersist bool
 	delete(m.misses, session)
 }
 
-// UnregisterSession removes a session from tracking.
-func (m *Manager) UnregisterSession(session string) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	delete(m.sessions, session)
-}
-
-// GetState returns the privacy state for a session.
-// Returns nil if session is not registered.
-func (m *Manager) GetState(session string) *SessionState {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-	return m.sessions[session]
-}
-
 // IsPrivacyEnabled returns true if privacy mode is enabled for the session.
 // Returns the global default if session is not registered.
 func (m *Manager) IsPrivacyEnabled(session string) bool {

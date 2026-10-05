@@ -9,7 +9,16 @@
 # The unaudited-debt backlog (the G1 triage bead) burned to ZERO open lines on
 # 2026-08-19: every symbol was deleted, wired, or moved to a justified
 # permanent entry below. Only permanent (tool blind spot) entries remain.
+# 2026-10-05 (bd-ir0li): the gate now builds with -tags liveness_audit, which
+# drops the G2 claim files, so readers alive only through a RegisterReader
+# claim are reported. The never-constructed CodexThrottle is waived below until
+# its deletion is approved (bd-vsubm).
+internal/ratelimit/tracker.go:CodexThrottle.ClearAffectedPane	bd-vsubm	CodexThrottle is never constructed in production; delete pending operator approval (removes tracker_helpers_test.go)
+internal/ratelimit/tracker.go:CodexThrottle.MayLaunch	bd-vsubm	CodexThrottle is never constructed in production; delete pending operator approval (removes tracker_helpers_test.go)
+internal/ratelimit/tracker.go:CodexThrottle.Reset	bd-vsubm	CodexThrottle is never constructed in production; delete pending operator approval (removes tracker_helpers_test.go)
+internal/resilience/monitor.go:Monitor.SetCodexThrottle	bd-vsubm	only attach point for the never-constructed CodexThrottle; goes with it
 # permanent: test-helper
+internal/config/liveness.go:RegisterReader	permanent	liveness_audit exclusion: called only from liveness_claims*.go, which the gate's -tags liveness_audit build drops by design (bd-ir0li)
 internal/backpressure/heatmap.go:BackpressureSnapshot.LoadSheddingContract	permanent	reached by the permanent backpressure Evaluate chain (snapshot builds LoadShedding/Heatmap fields for the kept verification-matrix harness)
 internal/backpressure/heatmap.go:BackpressureSnapshot.OperatorHeatmap	permanent	reached by the permanent backpressure Evaluate chain (snapshot builds LoadShedding/Heatmap fields for the kept verification-matrix harness)
 internal/backpressure/heatmap.go:bucketNameForSeverity	permanent	reached by the permanent backpressure Evaluate chain (snapshot builds LoadShedding/Heatmap fields for the kept verification-matrix harness)

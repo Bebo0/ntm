@@ -3,6 +3,9 @@ package resilience
 import (
 	"context"
 	"fmt"
+	"net"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"sync"
 	"testing"
@@ -10,8 +13,15 @@ import (
 
 	"github.com/Dicklesworthstone/ntm/internal/config"
 	"github.com/Dicklesworthstone/ntm/internal/health"
+	"github.com/Dicklesworthstone/ntm/internal/notify"
 	"github.com/Dicklesworthstone/ntm/internal/tmux"
 )
+
+// RegisterAgent registers a pane with no launch binding: test shorthand for
+// the production RegisterAgentWithBinding path (cli/monitor.go).
+func (m *Monitor) RegisterAgent(paneID string, paneIndex int, shellPID int, agentType, model, command string) {
+	m.RegisterAgentWithBinding(paneID, paneIndex, shellPID, agentType, model, command, nil)
+}
 
 // saveHooks saves all original hooks and returns a restore function.
 // Uses hooksMu to synchronize with spawned goroutines that read hooks.
@@ -306,7 +316,10 @@ func TestHandleCrashSchedulesGrokRestart(t *testing.T) {
 	if gotBuild != 1 || gotSend != 1 {
 		t.Fatalf("Grok crash restart hooks: build=%d send=%d, want 1 and 1", gotBuild, gotSend)
 	}
-	if count := m.GetRestartCount("pane-1"); count != 1 {
+	m.mu.RLock()
+	count := m.agents["pane-1"].RestartCount
+	m.mu.RUnlock()
+	if count != 1 {
 		t.Fatalf("Grok crash restart count = %d, want 1", count)
 	}
 }
@@ -315,10 +328,12 @@ func TestRegisterAgent(t *testing.T) {
 	cfg := config.Default()
 	m := NewMonitor("test-session", "/tmp/project", cfg, true)
 
-	m.RegisterAgent("pane-1", 1, 0, "cc", "opus", "claude --model opus")
-	m.RegisterAgent("pane-2", 2, 0, "gmi", "pro", "gemini --model pro")
+	m.RegisterAgentWithBinding("pane-1", 1, 0, "cc", "opus", "claude --model opus", nil)
+	m.RegisterAgentWithBinding("pane-2", 2, 0, "gmi", "pro", "gemini --model pro", nil)
 
-	states := m.GetAgentStates()
+	m.mu.RLock()
+	states := m.agents
+	m.mu.RUnlock()
 	if len(states) != 2 {
 		t.Fatalf("expected 2 agents, got %d", len(states))
 	}
@@ -346,49 +361,6 @@ func TestRegisterAgent(t *testing.T) {
 	}
 	if agent2.AgentType != "gmi" {
 		t.Errorf("expected agent type 'gmi', got %s", agent2.AgentType)
-	}
-}
-
-func TestGetRestartCount(t *testing.T) {
-	cfg := config.Default()
-	m := NewMonitor("test-session", "/tmp/project", cfg, true)
-
-	// Non-existent agent should return 0
-	if count := m.GetRestartCount("nonexistent"); count != 0 {
-		t.Errorf("expected 0 for nonexistent, got %d", count)
-	}
-
-	m.RegisterAgent("pane-1", 1, 0, "cc", "opus", "claude")
-
-	// Initial restart count should be 0
-	if count := m.GetRestartCount("pane-1"); count != 0 {
-		t.Errorf("expected 0, got %d", count)
-	}
-
-	// Manually increment to test getter
-	m.mu.Lock()
-	m.agents["pane-1"].RestartCount = 3
-	m.mu.Unlock()
-
-	if count := m.GetRestartCount("pane-1"); count != 3 {
-		t.Errorf("expected 3, got %d", count)
-	}
-}
-
-func TestGetAgentStatesReturnsCopy(t *testing.T) {
-	cfg := config.Default()
-	m := NewMonitor("test-session", "/tmp/project", cfg, true)
-
-	m.RegisterAgent("pane-1", 1, 0, "cc", "opus", "claude")
-
-	states := m.GetAgentStates()
-	// Modify the copy
-	states["pane-1"] = AgentState{PaneID: "modified"}
-
-	// Original should be unchanged
-	original := m.GetAgentStates()
-	if original["pane-1"].PaneID != "pane-1" {
-		t.Error("GetAgentStates should return a copy, not the original")
 	}
 }
 
@@ -429,6 +401,72 @@ func TestStartAndStop(t *testing.T) {
 		// Success
 	case <-time.After(2 * time.Second):
 		t.Fatal("Stop() timed out")
+	}
+}
+
+// TestStopReleasesNotifierConnections: the monitor owns its notifier, so
+// stopping the monitor closes the webhook client's idle keep-alive
+// connections instead of leaving them to the server's idle timeout.
+func TestStopReleasesNotifierConnections(t *testing.T) {
+	restore := saveHooks()
+	defer restore()
+	setHooksLocked(func() {
+		checkSessionFn = func(_ context.Context, session string) (*health.SessionHealth, error) {
+			return &health.SessionHealth{Session: session}, nil
+		}
+	})
+
+	closed := make(chan struct{}, 1)
+	hits := make(chan struct{}, 1)
+	ts := httptest.NewUnstartedServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+		select {
+		case hits <- struct{}{}:
+		default:
+		}
+	}))
+	ts.Config.ConnState = func(_ net.Conn, state http.ConnState) {
+		if state == http.StateClosed {
+			select {
+			case closed <- struct{}{}:
+			default:
+			}
+		}
+	}
+	ts.Start()
+	defer ts.Close()
+
+	cfg := config.Default()
+	cfg.Resilience.HealthCheckSeconds = 1
+	cfg.Notifications = notify.Config{
+		Enabled: true,
+		Events:  []string{string(notify.EventAgentCrashed)},
+		Webhook: notify.WebhookConfig{Enabled: true, URL: ts.URL},
+	}
+	m := NewMonitor("test-session", t.TempDir(), cfg, false)
+	if m.notifier == nil {
+		t.Fatal("notifications enabled but the monitor built no notifier")
+	}
+
+	m.Start(context.Background())
+	if err := m.notifier.Notify(notify.NewAgentCrashedEvent("test-session", "%1", "cc")); err != nil {
+		t.Fatalf("webhook notify: %v", err)
+	}
+	select {
+	case <-hits:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the webhook was never delivered")
+	}
+	select {
+	case <-closed:
+		t.Fatal("the webhook connection closed before Stop; keep-alive premise does not hold")
+	case <-time.After(100 * time.Millisecond):
+	}
+
+	m.Stop()
+	select {
+	case <-closed:
+	case <-time.After(5 * time.Second):
+		t.Fatal("Stop left the notifier's keep-alive connection open")
 	}
 }
 
@@ -1543,7 +1581,10 @@ func TestCheckHealthKnownDeadPIDBypassesActiveOutputGuard(t *testing.T) {
 	if gotRestartAttempts != 1 {
 		t.Fatalf("restart attempts = %d, want 1 for authoritatively dead PID", gotRestartAttempts)
 	}
-	if got := m.GetRestartCount("pane-1"); got != 1 {
+	m.mu.RLock()
+	got := m.agents["pane-1"].RestartCount
+	m.mu.RUnlock()
+	if got != 1 {
 		t.Fatalf("restart count = %d, want 1", got)
 	}
 }

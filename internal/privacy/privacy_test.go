@@ -20,37 +20,19 @@ func TestNew(t *testing.T) {
 }
 
 func TestRegisterSession(t *testing.T) {
-	m := DefaultManager()
+	m := New(config.PrivacyConfig{DisableCheckpoints: true})
 
 	m.RegisterSession("test-session", true, false)
+	m.RegisterSession("persisting", true, true)
 
 	if !m.IsPrivacyEnabled("test-session") {
 		t.Error("Privacy should be enabled for registered session")
 	}
-
-	state := m.GetState("test-session")
-	if state == nil {
-		t.Fatal("GetState returned nil for registered session")
+	if err := m.CanPersist("test-session", OpCheckpoint); !IsPrivacyError(err) {
+		t.Errorf("a private session without allow-persist must refuse checkpoints, got %v", err)
 	}
-
-	if !state.PrivacyMode {
-		t.Error("PrivacyMode should be true")
-	}
-
-	if state.AllowPersist {
-		t.Error("AllowPersist should be false")
-	}
-}
-
-func TestUnregisterSession(t *testing.T) {
-	m := DefaultManager()
-
-	m.RegisterSession("test-session", true, false)
-	m.UnregisterSession("test-session")
-
-	state := m.GetState("test-session")
-	if state != nil {
-		t.Error("GetState should return nil after unregister")
+	if err := m.CanPersist("persisting", OpCheckpoint); err != nil {
+		t.Errorf("allow-persist must let a private session checkpoint, got %v", err)
 	}
 }
 
@@ -208,15 +190,11 @@ func TestGlobalInheritance(t *testing.T) {
 	m.RegisterSession("test-session", false, false)
 
 	// Should inherit global privacy mode (OR of global and session flags)
-	state := m.GetState("test-session")
-	if state == nil {
-		t.Fatal("GetState returned nil")
+	if !m.IsPrivacyEnabled("test-session") {
+		t.Error("a session registered without privacy must inherit global privacy mode")
 	}
-
-	// The session will have privacy enabled because global is enabled
-	if !state.PrivacyMode {
-		// Note: In RegisterSession, we do: privacyMode || m.globalConfig.Enabled
-		t.Log("Session privacy mode inherits from global config")
+	if err := m.CanPersist("test-session", OpCheckpoint); !IsPrivacyError(err) {
+		t.Errorf("inherited privacy must refuse checkpoints, got %v", err)
 	}
 }
 

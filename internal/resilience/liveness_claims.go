@@ -39,9 +39,6 @@ func init() {
 	config.RegisterReader("rotation.auto_trigger", NewMonitor)
 	config.RegisterReader("rotation.auto_initiate", NewMonitor)
 
-	// Plugin agent launch commands (monitor.go ScanAndRegisterAgents).
-	config.RegisterReader("agents.plugins", (*Monitor).ScanAndRegisterAgents)
-
 	// notifications.* — consumed by internal/notify (notify.go).
 	for _, key := range []string{
 		"notifications.enabled",
