@@ -3478,6 +3478,7 @@ func initializeRobotPersistence(ctx context.Context, refreshProjection bool) err
 	))
 	robot.SetProjectionStore(store)
 	robotStateStore = store
+	collectStateGarbageOccasionally(store, state.DefaultPath()+".gc", robotStateGCInterval, time.Now())
 
 	if !refreshProjection {
 		return nil
@@ -3498,6 +3499,33 @@ func initializeRobotPersistence(ctx context.Context, refreshProjection bool) err
 		return err
 	}
 	return nil
+}
+
+// robotStateGCInterval bounds how often CLI robot processes run the full
+// state-store GC. ntm serve collects hourly as well (serveStateMaintenance);
+// this covers hosts that never run serve (bd-7dhqw).
+const robotStateGCInterval = time.Hour
+
+// collectStateGarbageOccasionally runs Store.RunGC when the previous pass,
+// recorded as the mtime of a stamp file next to the state DB, is older than
+// interval or never happened. The stamp is claimed before collecting so a
+// burst of concurrent robot commands collects once. Failures only log: GC is
+// maintenance and never fails the command.
+func collectStateGarbageOccasionally(store *state.Store, stamp string, interval time.Duration, now time.Time) bool {
+	if info, err := os.Stat(stamp); err == nil && now.Sub(info.ModTime()) < interval {
+		return false
+	}
+	if err := os.WriteFile(stamp, nil, 0o600); err != nil {
+		slog.Debug("state GC stamp not writable; skipping", "path", stamp, "err", err)
+		return false
+	}
+	if err := os.Chtimes(stamp, now, now); err != nil {
+		slog.Debug("state GC stamp time not set", "path", stamp, "err", err)
+	}
+	if _, err := store.RunGC(state.RuntimeGCConfig{}); err != nil {
+		slog.Warn("state store GC failed", "err", err)
+	}
+	return true
 }
 
 func closeRobotPersistence() {

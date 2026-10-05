@@ -60,6 +60,51 @@ func TestServeStateMaintenanceCollectsStaleRuntimeRows(t *testing.T) {
 	}
 }
 
+// TestCollectStateGarbageOccasionallyThrottlesCLIPasses: hosts that never run
+// serve must still collect (bd-7dhqw), but robot commands run constantly, so
+// a pass happens only when the stamp next to the DB is older than the interval.
+func TestCollectStateGarbageOccasionallyThrottlesCLIPasses(t *testing.T) {
+	dir := t.TempDir()
+	store, err := state.Open(filepath.Join(dir, "state.db"))
+	if err != nil {
+		t.Fatalf("open state store: %v", err)
+	}
+	if err := store.Migrate(); err != nil {
+		t.Fatalf("migrate state store: %v", err)
+	}
+	t.Cleanup(func() { store.Close() })
+	seedStale := func(name string) {
+		t.Helper()
+		now := time.Now().UTC()
+		if err := store.UpsertRuntimeSession(&state.RuntimeSession{Name: name, CollectedAt: now.Add(-time.Hour), StaleAfter: now.Add(-30 * time.Minute)}); err != nil {
+			t.Fatalf("seed %s: %v", name, err)
+		}
+	}
+	present := func(name string) bool {
+		t.Helper()
+		sess, err := store.GetRuntimeSession(name)
+		if err != nil {
+			t.Fatalf("read %s: %v", name, err)
+		}
+		return sess != nil
+	}
+	stamp := filepath.Join(dir, "state.db.gc")
+	now := time.Now()
+
+	seedStale("first")
+	if !collectStateGarbageOccasionally(store, stamp, time.Hour, now) || present("first") {
+		t.Fatal("first pass with no stamp must collect the stale session")
+	}
+
+	seedStale("second")
+	if collectStateGarbageOccasionally(store, stamp, time.Hour, now.Add(30*time.Minute)) || !present("second") {
+		t.Fatal("a pass inside the interval must be skipped")
+	}
+	if !collectStateGarbageOccasionally(store, stamp, time.Hour, now.Add(61*time.Minute)) || present("second") {
+		t.Fatal("a pass after the interval must collect again")
+	}
+}
+
 func TestServeCmdRejectsUnexpectedArguments(t *testing.T) {
 	cmd := newServeCmd()
 	cmd.SetArgs([]string{"unexpected"})
