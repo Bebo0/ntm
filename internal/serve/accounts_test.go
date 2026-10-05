@@ -106,8 +106,25 @@ func TestAutoRotateConfigGet(t *testing.T) {
 	}
 }
 
+// restoreAccountStateAfter puts the process-global accounts config and history
+// back when the test ends. Every test that changes them must call it, or a
+// later test (and every -count=N rerun) sees the leftover config instead of
+// the defaults TestAutoRotateConfigGet pins.
+func restoreAccountStateAfter(t *testing.T) {
+	t.Helper()
+	accountState.mu.Lock()
+	config, history := accountState.config, append([]AccountRotationEvent(nil), accountState.history...)
+	accountState.mu.Unlock()
+	t.Cleanup(func() {
+		accountState.mu.Lock()
+		accountState.config, accountState.history = config, history
+		accountState.mu.Unlock()
+	})
+}
+
 // TestAutoRotateConfigPatch tests updating auto-rotate configuration.
 func TestAutoRotateConfigPatch(t *testing.T) {
+	restoreAccountStateAfter(t)
 	// Reset state
 	accountState.mu.Lock()
 	accountState.config = AccountsConfig{
@@ -207,6 +224,7 @@ func TestAutoRotateConfigPatchValidation(t *testing.T) {
 
 // TestAccountsHistoryEmpty tests empty history response.
 func TestAccountsHistoryEmpty(t *testing.T) {
+	restoreAccountStateAfter(t)
 	// Reset history
 	accountState.mu.Lock()
 	accountState.history = make([]AccountRotationEvent, 0)

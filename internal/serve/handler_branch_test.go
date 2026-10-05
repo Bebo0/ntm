@@ -2943,6 +2943,7 @@ func TestHandlePatchAutoRotateConfigV1_CooldownTooLow(t *testing.T) {
 }
 
 func TestHandlePatchAutoRotateConfigV1_ValidUpdate(t *testing.T) {
+	restoreAccountStateAfter(t)
 	srv, _ := setupTestServer(t)
 
 	rec := httptest.NewRecorder()
@@ -5890,6 +5891,7 @@ func TestHandlePolicyAutomationUpdateV1_NoChanges(t *testing.T) {
 // --- handleAccountHistoryV1: limit truncation + reverse order ---
 
 func TestHandleAccountHistoryV1_LimitTruncation(t *testing.T) {
+	restoreAccountStateAfter(t)
 	// Pre-fill history with 5 events
 	accountState.mu.Lock()
 	accountState.history = []AccountRotationEvent{
