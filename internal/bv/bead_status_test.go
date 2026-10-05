@@ -1001,16 +1001,24 @@ func TestReleaseBeadClaimRetryFinalizesCommittedSQLiteMutation(t *testing.T) {
 	if err != nil || !txnResult.Released || !txnResult.NeedsFinalization || txnResult.Status != "open" {
 		t.Fatalf("release transaction result=%+v error=%v", txnResult, err)
 	}
-	database, err := sql.Open(sqliteutil.DriverName, sqliteutil.FileDSN(databasePath, "busy_timeout(5000)", "foreign_keys(ON)"))
-	if err != nil {
-		t.Fatalf("open Beads database: %v", err)
+	// Each inspection closes its connection: br cannot finish the recovery
+	// sync while another connection to the database stays open (br 0.7.4
+	// timed out after 30s with this test's idle handle held).
+	inspect := func(stage string) (int, sql.NullString) {
+		t.Helper()
+		database, err := sql.Open(sqliteutil.DriverName, sqliteutil.FileDSN(databasePath, "busy_timeout(5000)", "foreign_keys(ON)"))
+		if err != nil {
+			t.Fatalf("open Beads database: %v", err)
+		}
+		defer database.Close()
+		var dirty int
+		var contentHash sql.NullString
+		if err := database.QueryRow("SELECT EXISTS(SELECT 1 FROM dirty_issues WHERE issue_id = ?), content_hash FROM issues WHERE id = ?", beadID, beadID).Scan(&dirty, &contentHash); err != nil {
+			t.Fatalf("inspect %s release: %v", stage, err)
+		}
+		return dirty, contentHash
 	}
-	defer database.Close()
-	var dirty int
-	var contentHash sql.NullString
-	if err := database.QueryRow("SELECT EXISTS(SELECT 1 FROM dirty_issues WHERE issue_id = ?), content_hash FROM issues WHERE id = ?", beadID, beadID).Scan(&dirty, &contentHash); err != nil {
-		t.Fatalf("inspect interrupted release: %v", err)
-	}
+	dirty, contentHash := inspect("interrupted")
 	if dirty != 1 || contentHash.Valid {
 		t.Fatalf("interrupted release dirty=%d content_hash=%q", dirty, contentHash.String)
 	}
@@ -1019,9 +1027,7 @@ func TestReleaseBeadClaimRetryFinalizesCommittedSQLiteMutation(t *testing.T) {
 	if err != nil || released {
 		t.Fatalf("recovery ReleaseBeadClaim() released=%v error=%v", released, err)
 	}
-	if err := database.QueryRow("SELECT EXISTS(SELECT 1 FROM dirty_issues WHERE issue_id = ?), content_hash FROM issues WHERE id = ?", beadID, beadID).Scan(&dirty, &contentHash); err != nil {
-		t.Fatalf("inspect finalized release: %v", err)
-	}
+	dirty, contentHash = inspect("finalized")
 	if dirty != 0 || !contentHash.Valid || strings.TrimSpace(contentHash.String) == "" {
 		t.Fatalf("finalized release dirty=%d content_hash=%q", dirty, contentHash.String)
 	}
