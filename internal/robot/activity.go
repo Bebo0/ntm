@@ -905,6 +905,7 @@ func (sc *StateClassifier) classifyInternal(sample *VelocitySample) (*AgentActiv
 	liveMatches := sc.patternLibrary.Match(liveContent, sc.agentType)
 	effectiveMatches := filterThinkingToLive(matches, liveMatches)
 	effectiveMatches = filterErrorToLiveWithCurrentSignal(effectiveMatches, liveMatches)
+	effectiveMatches = filterClaudeToolOutputErrors(effectiveMatches, visibleContent, sc.agentType, sc.paneWidth)
 
 	// Calculate proposed state and confidence
 	proposedState, confidence, trigger := sc.classifyState(velocity, effectiveMatches)
@@ -957,6 +958,31 @@ var rateLimitPatternNames = map[string]bool{
 // known rate-limit pattern.  This bridges the gap between the generic
 // CategoryError classification and the explicit RateLimited flag that wait
 // conditions and health surfaces depend on.
+// filterClaudeToolOutputErrors drops error matches from a Claude pane whose
+// newest turn marker is a live spinner or a completed turn. Claude prints its
+// own tool results inline ("⎿  Error: Exit code 1", compiler and test output),
+// and the generic error patterns cannot tell those from the agent failing; the
+// ordering-aware turn parser can. Rate-limit banners are kept: they are the
+// provider talking, and their own live-window rules decide them.
+func filterClaudeToolOutputErrors(matches []PatternMatch, content, agentType string, paneWidth int) []PatternMatch {
+	if normalizeAgentType(agentType) != "claude" {
+		return matches
+	}
+	switch agent.DetectClaudeTurnState(content, paneWidth) {
+	case agent.ClaudeTurnWorking, agent.ClaudeTurnEnded:
+	default:
+		return matches
+	}
+	out := make([]PatternMatch, 0, len(matches))
+	for _, m := range matches {
+		if m.Category == CategoryError && !rateLimitPatternNames[m.Pattern] {
+			continue
+		}
+		out = append(out, m)
+	}
+	return out
+}
+
 func isRateLimitPatternMatch(matches []PatternMatch) bool {
 	for _, m := range matches {
 		if rateLimitPatternNames[m.Pattern] {

@@ -892,6 +892,44 @@ func TestGeneratorDetectErrorState_SeverityClassification(t *testing.T) {
 	}
 }
 
+// A Claude pane prints its own failed tool calls ("⎿  Error: Exit code 144",
+// captured from a live swarm pane that kept working) and the output of builds
+// it runs. Those are the agent's work, not the agent failing, unless the error
+// is Claude's newest marker or no Claude marker is left at all.
+func TestGeneratorDetectErrorState_ClaudeToolOutputIsNotAnAgentError(t *testing.T) {
+	t.Parallel()
+
+	gen := NewGenerator(DefaultConfig())
+	claude := tmux.Pane{ID: "%13", Type: tmux.AgentClaude, Width: 160}
+	toolFailure := "● Bash(pkill -f \"run_c7.sh\"; sleep 1; echo cleared)\n" +
+		"  ⎿  Error: Exit code 144\n\n" +
+		"● Bash(go build ./...)\n" +
+		"  ⎿  error: undefined: worksource.ProjectPolicy\n\n"
+	split := func(capture string) []string { return strings.Split(capture, "\n") }
+
+	tests := []struct {
+		name      string
+		pane      tmux.Pane
+		capture   string
+		wantAlert bool
+	}{
+		{"still working", claude, toolFailure + "✻ Simmering… (esc to interrupt · 12s)\n\n❯ \n", false},
+		{"turn completed", claude, toolFailure + "● Fixed the import; the build passes now.\n\n✻ Worked for 2m 4s · done 11:09 PM · 1 shell still running\n\n❯ \n", false},
+		{"stopped on the error", claude, toolFailure, true},
+		{"CLI exited to a shell", claude, "Error: unable to connect to the Anthropic API\nubuntu@host:~/proj$ \n", true},
+		{"other agents unchanged", tmux.Pane{ID: "%14", Type: tmux.AgentCodex}, toolFailure + "✻ Simmering… (esc to interrupt · 12s)\n", true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			alert := gen.detectErrorState("sess", tt.pane, split(tt.capture))
+			if got := alert != nil; got != tt.wantAlert {
+				t.Fatalf("alert = %+v, want alert=%v", alert, tt.wantAlert)
+			}
+		})
+	}
+}
+
 func TestGeneratorDetectRateLimit_Last20Lines(t *testing.T) {
 	t.Parallel()
 

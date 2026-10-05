@@ -206,6 +206,44 @@ func TestClassifyWithOutput_MultipleErrors(t *testing.T) {
 	}
 }
 
+// A Claude pane that ran a failing command ("⎿  Error: Exit code 144") or a
+// failing build and then finished its turn is idle, not in ERROR: live swarm
+// panes in exactly this layout were reported ERROR at 0.95 confidence while
+// --robot-is-working correctly called them idle. Only an error that is
+// Claude's newest marker, or any agent other than Claude, keeps ERROR.
+func TestClassifyWithOutput_ClaudeToolOutputIsNotAnAgentError(t *testing.T) {
+	toolFailure := "● Bash(pkill -f \"run_c7.sh\"; sleep 1; echo cleared)\n" +
+		"  ⎿  Error: Exit code 144\n\n" +
+		"● Bash(cargo test -p fs-mesh)\n" +
+		"  ⎿  error: could not compile `fs-mesh` (lib) due to 2 previous errors\n\n"
+	composer := "────────────────────────────────────────\n❯ \n────────────────────────────────────────\n" +
+		"  ⏵⏵ bypass permissions on · 1 shell · ↓ to manage\n"
+	tests := []struct {
+		name      string
+		agentType string
+		content   string
+		wantError bool
+	}{
+		{"claude turn completed", "claude", toolFailure + "✻ Crunched for 10s · done 11:09 PM · 1 shell still running\n\n" + composer, false},
+		{"claude still working", "claude", toolFailure + "✻ Brewing… (ctrl+c to interrupt · 41s · ↓ 1.2k tokens)\n\n" + composer, false},
+		{"claude stopped on the error", "claude", toolFailure + composer, true},
+		{"codex unchanged", "codex", toolFailure + "✻ Crunched for 10s · done 11:09 PM\n\n" + composer, true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			sc := NewStateClassifier("pane", &ClassifierConfig{AgentType: tt.agentType, HysteresisDuration: 0})
+			_, _ = sc.ClassifyWithOutput("baseline")
+			activity, err := sc.ClassifyWithOutput(tt.content)
+			if err != nil {
+				t.Fatalf("ClassifyWithOutput: %v", err)
+			}
+			if got := activity.State == StateError; got != tt.wantError {
+				t.Fatalf("State = %q (patterns %v), want ERROR=%v", activity.State, activity.DetectedPatterns, tt.wantError)
+			}
+		})
+	}
+}
+
 // TestClassifyWithOutput_CodexIdlePrompt verifies codex-specific idle detection.
 func TestClassifyWithOutput_CodexIdlePrompt(t *testing.T) {
 

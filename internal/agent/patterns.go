@@ -130,11 +130,16 @@ var (
 	//
 	//   ✻ Cooked for 1m 42s
 	//   ✻ Baked for 44m 28s
+	//   ✻ Crunched for 10s · done 11:09 PM · 1 shell still running
+	//
+	// Current Claude Code appends " · done <time>" and " · N shell(s) still
+	// running" segments; every completion line in a live swarm (2026-10)
+	// carried one, so a bare end-of-line anchor recognized none of them.
 	//
 	// It must NOT match an active spinner ("Whirlpooling… (… · 2m 44s …)") nor a
 	// "thought for 14s" prose annotation, hence: the leading glyph + verb, the
-	// literal " for ", a duration, and a deliberately strict end-of-line anchor
-	// that rejects any trailing "(" / "…" progress decoration.
+	// literal " for ", a duration, then only "·"-separated segments that carry
+	// no "(" / "…" progress decoration up to the end of the line.
 	//
 	// The verb class is the Unicode capitalized-word class `\p{Lu}\p{Ll}+`
 	// rather than ASCII `[A-Z][a-z]+`: Claude's whimsical spinner verbs include
@@ -144,7 +149,7 @@ var (
 	// pane misclassified as still WORKING. `\p{Lu}` (capitalized first letter)
 	// preserves the anti-prose constraint; the whole-line and duration anchors
 	// are unchanged.
-	claudeCompletionLineRe = regexp.MustCompile(`(?m)^\s*[✻✶✳✢✽✦*]\s+\p{Lu}\p{Ll}+\s+for\s+(?:\d+\s*[hms]\s*)+$`)
+	claudeCompletionLineRe = regexp.MustCompile(`(?m)^\s*[✻✶✳✢✽✦*]\s+\p{Lu}\p{Ll}+\s+for\s+(?:\d+\s*[hms]\s*)+(?:·[^\n…(]*)?$`)
 
 	// claudeNewTaskFooterRe matches the post-turn "new task?" hint Claude parks at
 	// after a turn ends (often paired with a "/clear to save … tokens" line). It

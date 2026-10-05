@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	agentpkg "github.com/Dicklesworthstone/ntm/internal/agent"
 	"github.com/Dicklesworthstone/ntm/internal/bv"
 	"github.com/Dicklesworthstone/ntm/internal/errsig"
 	"github.com/Dicklesworthstone/ntm/internal/tmux"
@@ -196,6 +197,18 @@ func agentAlertSource(session string) string {
 
 // detectErrorState checks pane output for error patterns
 func (g *Generator) detectErrorState(session string, pane tmux.Pane, lines []string) *Alert {
+	// Claude Code prints its own tool results inline: "⎿  Error: Exit code 1"
+	// for a grep with no match, compiler and test output for a failing build.
+	// While a live spinner or a completed turn is the newest marker, those
+	// lines are the agent's work, not the agent failing. A terminal error
+	// marker, or no marker at all (the CLI exited to a shell), still alerts.
+	if agentpkg.AgentType(pane.Type).Canonical() == agentpkg.AgentTypeClaudeCode {
+		switch agentpkg.DetectClaudeTurnState(strings.Join(lines, "\n"), pane.Width) {
+		case agentpkg.ClaudeTurnWorking, agentpkg.ClaudeTurnEnded:
+			return nil
+		}
+	}
+
 	// Check last N lines for patterns — return the highest-severity match
 	checkLines := lines
 	if len(checkLines) > 20 {
