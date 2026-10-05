@@ -262,6 +262,71 @@ func TestScanAgentSessions_RespectsSessionFilterBeforePaneLookup(t *testing.T) {
 	}
 }
 
+// TestScanAgentSessions_ContextWarningAtThreshold: alerts.context_warning_threshold
+// had no consumer (bd-r0j1n). A pane whose injected context usage reaches the
+// threshold raises one context_warning keyed by session and pane under the
+// session's agent source; panes below it, or without a reading, raise none.
+func TestScanAgentSessions_ContextWarningAtThreshold(t *testing.T) {
+	t.Parallel()
+
+	panes := []tmux.Pane{
+		{ID: "%1", Title: "proj__cc_1", Type: tmux.AgentClaude},
+		{ID: "%2", Title: "proj__cod_1", Type: tmux.AgentCodex},
+		{ID: "%3", Title: "proj__cc_2", Type: tmux.AgentClaude},
+		{ID: "%4", Title: "user", Type: tmux.AgentUser},
+	}
+	scan := func(threshold float64) ([]Alert, int) {
+		lookups := 0
+		g := &Generator{config: Config{
+			Enabled:                 true,
+			ContextWarningThreshold: threshold,
+			PaneContextUsage: func(session string, got []tmux.Pane) map[string]float64 {
+				lookups++
+				if session != "proj" || len(got) != len(panes) {
+					t.Errorf("usage source got session %q with %d panes", session, len(got))
+				}
+				return map[string]float64{"%1": 80, "%2": 60, "%3": 75}
+			},
+		}}
+		alerts, failed := g.scanAgentSessions(
+			[]tmux.Session{{Name: "proj"}},
+			func(string) ([]tmux.Pane, error) { return panes, nil },
+			func(string, int) (string, error) { return "all good", nil },
+		)
+		if len(failed) != 0 {
+			t.Fatalf("failed sources = %v", failed)
+		}
+		return alerts, lookups
+	}
+
+	alerts, lookups := scan(75)
+	if lookups != 1 {
+		t.Fatalf("usage source called %d times, want once per session", lookups)
+	}
+	warned := map[string]Alert{}
+	for _, alert := range alerts {
+		if alert.Type != AlertContextWarning {
+			t.Fatalf("unexpected alert %+v", alert)
+		}
+		warned[alert.Pane] = alert
+	}
+	if len(warned) != 2 || warned["%2"].Pane != "" {
+		t.Fatalf("warned panes = %v, want %%1 (80%%) and %%3 (75%%, at threshold) only", warned)
+	}
+	got := warned["%1"]
+	if got.ID != generateAlertID(AlertContextWarning, "proj", "%1") || got.Source != agentAlertSource("proj") ||
+		got.Severity != SeverityWarning || got.Session != "proj" {
+		t.Fatalf("context warning keyed wrong: %+v", got)
+	}
+	if got.Context["context_percent"] != 80.0 || !strings.Contains(got.Message, "proj__cc_1 is at 80%") {
+		t.Fatalf("context warning content: %+v", got)
+	}
+
+	if alerts, lookups := scan(0); len(alerts) != 0 || lookups != 0 {
+		t.Fatalf("threshold 0 must disable context warnings: %d alerts, %d lookups", len(alerts), lookups)
+	}
+}
+
 type assertErr string
 
 func (e assertErr) Error() string { return string(e) }

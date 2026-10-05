@@ -13,18 +13,21 @@ import (
 // (bd-ir0li).
 func init() {
 	// Alert thresholds: copied from cfg.Alerts into alerts.Config by
-	// alertConfigForProject (robot.go), on the GetAlerts/status/snapshot path.
+	// AlertConfigForProject (robot.go), on the GetAlerts/status/snapshot and
+	// dashboard paths.
 	for _, key := range []string{
 		"alerts.enabled",
 		"alerts.agent_stuck_minutes",
 		"alerts.disk_low_threshold_gb",
 		"alerts.mail_backlog_threshold",
 		"alerts.bead_stale_hours",
-		"alerts.context_warning_threshold",
 		"alerts.resolved_prune_minutes",
 	} {
-		config.RegisterReader(key, alertConfigForProject)
+		config.RegisterReader(key, AlertConfigForProject)
 	}
+	// Acted on (not just copied) by the context-warning check; the usage it
+	// compares against comes from paneContextUsagePercents (bd-r0j1n).
+	config.RegisterReader("alerts.context_warning_threshold", paneContextUsagePercents)
 	// Disk-full trajectory horizon (disk.go).
 	config.RegisterReader("alerts.disk_full_horizon_hours", attachSnapshotDisk)
 

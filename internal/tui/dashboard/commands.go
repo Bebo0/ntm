@@ -24,7 +24,6 @@ import (
 	"github.com/Dicklesworthstone/ntm/internal/tmux"
 	"github.com/Dicklesworthstone/ntm/internal/tracker"
 	"github.com/Dicklesworthstone/ntm/internal/tui/dashboard/panels"
-	"github.com/Dicklesworthstone/ntm/internal/util"
 )
 
 const (
@@ -307,26 +306,9 @@ func (m *Model) fetchAlertsCmd() tea.Cmd {
 	gen := m.nextGen(refreshAlerts)
 	cfg := m.cfg
 	return func() tea.Msg {
-		projectDir := strings.TrimSpace(m.projectDir)
-		if projectDir == "" {
-			projectDir = util.ResolveProjectDir("")
-		}
-		var alertCfg alerts.Config
-		if cfg != nil {
-			alertCfg = alerts.ToConfigAlerts(
-				cfg.Alerts.Enabled,
-				cfg.Alerts.AgentStuckMinutes,
-				cfg.Alerts.DiskLowThresholdGB,
-				cfg.Alerts.MailBacklogThreshold,
-				cfg.Alerts.BeadStaleHours,
-				cfg.Alerts.ContextWarningThreshold,
-				cfg.Alerts.ResolvedPruneMinutes,
-				projectDir,
-			)
-		} else {
-			alertCfg = alerts.DefaultConfig()
-			alertCfg.ProjectsDir = projectDir
-		}
+		// The robot surfaces' builder: same thresholds, plus the transcript
+		// context-usage source behind context warnings.
+		alertCfg := robot.AlertConfigForProject(cfg, m.projectDir)
 
 		// Use GenerateAndTrack to benefit from lifecycle management and error handling
 		tracker := alerts.GenerateAndTrack(alertCfg)

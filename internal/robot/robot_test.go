@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -3531,6 +3532,57 @@ func TestResolvePaneTranscriptsPrefersExactBindingAndKeepsAmbiguityRule(t *testi
 	for id, want := range map[string]int{"%1": 101, "%2": 0, "%3": 999, "%4": 104, "%5": 0} {
 		if have := tokensOf(id); have != want {
 			t.Errorf("pane %s transcript tokens = %d, want %d", id, have, want)
+		}
+	}
+}
+
+// TestAlertConfigSuppliesTranscriptContextUsage: alerts.context_warning_threshold
+// had no consumer (bd-r0j1n). The alert config every surface uses must carry
+// a usage source that turns each pane's attributed transcript into a percent
+// of its context window, so the generator can warn.
+func TestAlertConfigSuppliesTranscriptContextUsage(t *testing.T) {
+	prevProcess, prevCwd, prevPath := transcriptUsageForProcess, transcriptUsageForCwd, paneCurrentPath
+	t.Cleanup(func() {
+		transcriptUsageForProcess, transcriptUsageForCwd, paneCurrentPath = prevProcess, prevCwd, prevPath
+	})
+	paneCurrentPath = func(string) (string, bool) { return "", false }
+	registryWindow := getContextLimit("claude-opus-4")
+	if registryWindow <= 0 {
+		t.Fatalf("model registry has no window for claude-opus-4")
+	}
+	bound := map[int]*ntmctx.TranscriptUsage{
+		201: {Tokens: 180000, ContextWindow: 200000},              // 90% of its own window
+		202: {Tokens: 50000, ContextWindow: 200000},               // 25%
+		203: {Tokens: 900000, ContextWindow: 200000},              // over the window: capped
+		204: {Tokens: registryWindow / 2, Model: "claude-opus-4"}, // registry window
+	}
+	transcriptUsageForProcess = func(_ string, pid int) (*ntmctx.TranscriptUsage, bool) {
+		usage, ok := bound[pid]
+		return usage, ok
+	}
+	transcriptUsageForCwd = func(string, string) (*ntmctx.TranscriptUsage, bool) { return nil, false }
+
+	cfg := config.Default()
+	cfg.Alerts.ContextWarningThreshold = 80
+	alertCfg := AlertConfigForProject(cfg, t.TempDir())
+	if alertCfg.PaneContextUsage == nil || alertCfg.ContextWarningThreshold != 80 {
+		t.Fatalf("alert config lacks the context usage source or threshold: %+v", alertCfg)
+	}
+
+	got := alertCfg.PaneContextUsage("proj", []tmux.Pane{
+		{ID: "%1", PID: 201, Type: tmux.AgentClaude, Title: "proj__cc_1"},
+		{ID: "%2", PID: 202, Type: tmux.AgentClaude, Title: "proj__cc_2"},
+		{ID: "%3", PID: 203, Type: tmux.AgentClaude, Title: "proj__cc_3"},
+		{ID: "%4", PID: 204, Type: tmux.AgentClaude, Title: "proj__cc_4"},
+		{ID: "%5", PID: 205, Type: tmux.AgentClaude, Title: "proj__cc_5"}, // no transcript
+	})
+	want := map[string]float64{"%1": 90, "%2": 25, "%3": 100, "%4": 50}
+	if len(got) != len(want) {
+		t.Fatalf("usage = %v, want %v (a pane without a transcript must be absent)", got, want)
+	}
+	for pane, pct := range want {
+		if math.Abs(got[pane]-pct) > 0.01 {
+			t.Errorf("pane %s usage = %.2f%%, want %.2f%%", pane, got[pane], pct)
 		}
 	}
 }

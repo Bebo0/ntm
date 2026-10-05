@@ -150,7 +150,7 @@ func TestAlertConfigForProject_UsesExplicitProjectDir(t *testing.T) {
 		ProjectsBase: "/tmp/wrong-base",
 	}
 
-	got := alertConfigForProject(cfg, "/tmp/right-project")
+	got := AlertConfigForProject(cfg, "/tmp/right-project")
 	if got.ProjectsDir != "/tmp/right-project" {
 		t.Fatalf("ProjectsDir = %q, want /tmp/right-project", got.ProjectsDir)
 	}
@@ -191,7 +191,7 @@ func TestAlertConfigForProject_ResolvesCurrentProjectDirWhenUnset(t *testing.T) 
 		t.Fatal(err)
 	}
 
-	got := alertConfigForProject(nil, "")
+	got := AlertConfigForProject(nil, "")
 	if got.ProjectsDir != projectDir {
 		t.Fatalf("ProjectsDir = %q, want %q", got.ProjectsDir, projectDir)
 	}

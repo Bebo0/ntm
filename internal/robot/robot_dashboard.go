@@ -140,7 +140,7 @@ func GetDashboard() (*DashboardOutput, error) {
 	}
 
 	// Alerts (best-effort)
-	alertCfg := alertConfigForProject(cfg, wd)
+	alertCfg := AlertConfigForProject(cfg, wd)
 	activeAlerts := alerts.GetActiveAlerts(alertCfg)
 	alertSummary := alerts.GetGlobalTracker().Summary()
 	for _, a := range activeAlerts {

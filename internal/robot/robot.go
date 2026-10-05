@@ -2496,7 +2496,7 @@ func buildProjectionBackedStatus(store *state.Store, cfg *config.Config, opts Pa
 		output.DegradedSources = append(output.DegradedSources, output.Sources.Degraded...)
 	}
 
-	statusApplyAlertCounts(output, alerts.GetActiveAlerts(alertConfigForProject(cfg, "")))
+	statusApplyAlertCounts(output, alerts.GetActiveAlerts(AlertConfigForProject(cfg, "")))
 	statusFinalize(output, opts)
 	return output, nil
 }
@@ -2580,7 +2580,7 @@ func buildLiveStatus(projectDir string, cfg *config.Config, opts PaginationOptio
 		output.Summary.MailUrgent = 0
 	}
 	if len(output.AlertCounts) == 0 {
-		statusApplyAlertCounts(output, alerts.GetActiveAlerts(alertConfigForProject(cfg, resolvedProjectDir)))
+		statusApplyAlertCounts(output, alerts.GetActiveAlerts(AlertConfigForProject(cfg, resolvedProjectDir)))
 	}
 
 	statusFinalize(output, opts)
@@ -4584,14 +4584,19 @@ func resolveAgentsForSession(panes []tmux.Pane, mailAgents []agentmail.Agent) ma
 	return mapping
 }
 
-func alertConfigForProject(cfg *config.Config, projectDir string) alerts.Config {
+// AlertConfigForProject is the one alert-generator configuration for every
+// surface (robot status/snapshot/alerts, markdown, dashboard): the [alerts]
+// thresholds plus the transcript-backed context usage source that turns
+// alerts.context_warning_threshold into per-pane context warnings.
+func AlertConfigForProject(cfg *config.Config, projectDir string) alerts.Config {
 	resolvedProject := strings.TrimSpace(projectDir)
 	if resolvedProject == "" {
 		resolvedProject = util.ResolveProjectDir("")
 	}
 
+	alertCfg := alerts.DefaultConfig()
 	if cfg != nil {
-		return alerts.ToConfigAlerts(
+		alertCfg = alerts.ToConfigAlerts(
 			cfg.Alerts.Enabled,
 			cfg.Alerts.AgentStuckMinutes,
 			cfg.Alerts.DiskLowThresholdGB,
@@ -4602,9 +4607,8 @@ func alertConfigForProject(cfg *config.Config, projectDir string) alerts.Config 
 			resolvedProject,
 		)
 	}
-
-	alertCfg := alerts.DefaultConfig()
 	alertCfg.ProjectsDir = resolvedProject
+	alertCfg.PaneContextUsage = paneContextUsagePercents
 	return alertCfg
 }
 
@@ -5005,22 +5009,7 @@ func GetSnapshotWithOptions(cfg *config.Config, opts PaginationOptions) (*Snapsh
 						tu, ok = paneTranscripts[pane.ID]
 					}
 					if ok {
-						limit := tu.ContextWindow
-						if limit <= 0 {
-							model := tu.Model
-							if model == "" {
-								model = detectModel(agent.Type, pane.Title)
-							}
-							limit = getContextLimit(model)
-						}
-						if limit > 0 {
-							pct := float64(tu.Tokens) / float64(limit) * 100
-							if pct > 100 {
-								// Over-100% means the registry window for
-								// this model is wrong; cap at the safe
-								// rotation-triggering ceiling.
-								pct = 100
-							}
+						if pct, limit, _ := transcriptUsagePercent(tu, detectModel(agent.Type, pane.Title)); limit > 0 {
 							agent.ContextPercent = pct
 						}
 					}
@@ -5056,7 +5045,7 @@ func GetSnapshotWithOptions(cfg *config.Config, opts PaginationOptions) (*Snapsh
 	output.Tools = GetToolsSummary(toolCtx, DisabledTools(cfg))
 
 	// Generate and add detailed alerts using the alerts package
-	alertCfg := alertConfigForProject(cfg, projectKey)
+	alertCfg := AlertConfigForProject(cfg, projectKey)
 	activeAlerts := alerts.GetActiveAlerts(alertCfg)
 
 	if len(activeAlerts) > 0 {
@@ -5183,7 +5172,7 @@ func buildProjectionBackedSnapshot(
 	defer toolCancel()
 	output.Tools = GetToolsSummary(toolCtx, DisabledTools(cfg))
 
-	alertCfg := alertConfigForProject(cfg, projectKey)
+	alertCfg := AlertConfigForProject(cfg, projectKey)
 	activeAlerts := alerts.GetActiveAlerts(alertCfg)
 	if len(activeAlerts) > 0 {
 		output.AlertsDetailed = make([]AlertInfo, len(activeAlerts))
@@ -10018,7 +10007,7 @@ func GetAlertsDetailed(includeResolved bool) (*AlertsOutput, error) {
 	if err != nil {
 		cfg = config.Default()
 	}
-	alertCfg := alertConfigForProject(cfg, wd)
+	alertCfg := AlertConfigForProject(cfg, wd)
 	tracker := alerts.GenerateAndTrack(alertCfg)
 
 	active, resolved := tracker.GetAll()
@@ -10639,6 +10628,52 @@ func ResolvePaneTranscripts(panes []tmux.Pane) map[string]*ntmctx.TranscriptUsag
 	return ntmctx.AttributePaneTranscripts(refs, nil, transcriptUsageForProcess, transcriptUsageForCwd)
 }
 
+// transcriptUsagePercent converts a transcript usage reading into a percent
+// of the context window: the window the transcript reports (Codex), else the
+// model registry's window for the transcript's model, or fallbackModel when
+// the transcript names none. limit <= 0 means no window is known and pct is
+// meaningless. Real usage cannot exceed the real window, so an over-100%
+// reading means the registry's window for this (possibly unrecognized) model
+// is wrong: it is capped at 100, the safe direction for rotation, and
+// reported through capped.
+func transcriptUsagePercent(tu *ntmctx.TranscriptUsage, fallbackModel string) (pct float64, limit int, capped bool) {
+	limit = tu.ContextWindow
+	if limit <= 0 {
+		model := tu.Model
+		if model == "" {
+			model = fallbackModel
+		}
+		limit = getContextLimit(model)
+	}
+	if limit <= 0 {
+		return 0, limit, false
+	}
+	pct = float64(tu.Tokens) / float64(limit) * 100
+	if pct > 100 {
+		return 100, limit, true
+	}
+	return pct, limit, false
+}
+
+// paneContextUsagePercents is the alert generator's context-usage source
+// (alerts.Config.PaneContextUsage): each agent pane's transcript-attributed
+// usage percent, keyed by pane ID. Panes with no attributable transcript or
+// no known window are absent, so they never raise a context warning.
+func paneContextUsagePercents(_ string, panes []tmux.Pane) map[string]float64 {
+	transcripts := ResolvePaneTranscripts(panes)
+	usage := make(map[string]float64, len(transcripts))
+	for _, pane := range panes {
+		tu, ok := transcripts[pane.ID]
+		if !ok {
+			continue
+		}
+		if pct, limit, _ := transcriptUsagePercent(tu, detectModel(paneAgentType(pane), pane.Title)); limit > 0 {
+			usage[pane.ID] = pct
+		}
+	}
+	return usage
+}
+
 // ompStatusBarUsage reads an omp pane's live context gauge (see
 // ntmctx.OmpStatusBarUsage); every other agent type reports false. The
 // reading always carries a positive ContextWindow.
@@ -10765,22 +10800,14 @@ func GetContext(session string, lines int) (*ContextOutput, error) {
 			if usage.Model != "" {
 				agentInfo.Model = usage.Model
 			}
-			limit := usage.ContextWindow
-			if limit <= 0 {
-				limit = getContextLimit(agentInfo.Model)
-			}
+			pct, limit, capped := transcriptUsagePercent(usage, agentInfo.Model)
 			agentInfo.ContextLimit = limit
 			agentInfo.UsagePercent = 100.0
 			agentInfo.Confidence = ntmctx.TranscriptConfidence(usage.UpdatedAt, time.Now())
 			if limit > 0 {
-				agentInfo.UsagePercent = float64(usage.Tokens) / float64(limit) * 100
-				if agentInfo.UsagePercent > 100 {
-					// Real usage cannot exceed the real window, so an
-					// over-100% reading means the registry's window for this
-					// (possibly unrecognized) model is wrong. Cap at 100 —
-					// the safe direction for rotation — and drop confidence
-					// so consumers know the limit, not the tokens, is suspect.
-					agentInfo.UsagePercent = 100
+				agentInfo.UsagePercent = pct
+				if capped {
+					// The limit, not the tokens, is suspect: say so.
 					agentInfo.Confidence = "low"
 				}
 			}

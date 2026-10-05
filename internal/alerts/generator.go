@@ -148,7 +148,13 @@ func (g *Generator) scanAgentSessions(
 			continue
 		}
 
+		contextUsage := g.paneContextUsage(sess.Name, panes)
+
 		for _, pane := range panes {
+			if alert := g.contextWarning(sess.Name, pane, contextUsage); alert != nil {
+				alerts = append(alerts, *alert)
+			}
+
 			// Capture pane output for analysis
 			output, err := capturePaneOutput(pane.ID, 50)
 			if err != nil {
@@ -185,6 +191,49 @@ func (g *Generator) scanAgentSessions(
 	}
 
 	return alerts, failedSources
+}
+
+// paneContextUsage asks the injected usage source about one session's panes.
+// It returns nil when context warnings are off: no source, or no positive
+// threshold.
+func (g *Generator) paneContextUsage(session string, panes []tmux.Pane) map[string]float64 {
+	if g.config.PaneContextUsage == nil || g.config.ContextWarningThreshold <= 0 {
+		return nil
+	}
+	return g.config.PaneContextUsage(session, panes)
+}
+
+// contextWarning raises a warning for an agent pane whose context usage has
+// reached alerts.context_warning_threshold. It is keyed by session and pane
+// under the session's agent source, so the tracker resolves it once usage
+// drops (after a rotation or compaction) instead of leaving it stale.
+func (g *Generator) contextWarning(session string, pane tmux.Pane, usage map[string]float64) *Alert {
+	pct, ok := usage[pane.ID]
+	threshold := g.config.ContextWarningThreshold
+	if !ok || pct < threshold {
+		return nil
+	}
+	label := strings.TrimSpace(pane.Title)
+	if label == "" {
+		label = pane.ID
+	}
+	now := time.Now()
+	return &Alert{
+		ID:       generateAlertID(AlertContextWarning, session, pane.ID),
+		Type:     AlertContextWarning,
+		Severity: SeverityWarning,
+		Source:   agentAlertSource(session),
+		Message:  fmt.Sprintf("Agent %s is at %.0f%% of its context window (warning threshold %.0f%%)", label, pct, threshold),
+		Session:  session,
+		Pane:     pane.ID,
+		Context: map[string]interface{}{
+			"context_percent":   pct,
+			"threshold_percent": threshold,
+		},
+		CreatedAt:  now,
+		LastSeenAt: now,
+		Count:      1,
+	}
 }
 
 func agentAlertSource(session string) string {

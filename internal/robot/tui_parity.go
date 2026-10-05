@@ -3200,7 +3200,7 @@ func GetAlertsTUI(cfg *config.Config, opts TUIAlertsOptions) (*TUIAlertsOutput, 
 
 	// Use the same project-aware alert config path as the rest of robot mode so
 	// disabled/custom alert settings remain authoritative here too.
-	alertCfg := alertConfigForProject(cfg, "")
+	alertCfg := AlertConfigForProject(cfg, "")
 	alertList := alerts.GetActiveAlerts(alertCfg)
 
 	now := time.Now()

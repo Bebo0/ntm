@@ -4,6 +4,8 @@ package alerts
 
 import (
 	"time"
+
+	"github.com/Dicklesworthstone/ntm/internal/tmux"
 )
 
 // AlertType identifies the category of alert
@@ -130,6 +132,12 @@ type Config struct {
 	SessionFilter string `json:"session_filter,omitempty"`
 	// ContextWarningThreshold is the context usage percentage that triggers a warning (0-100)
 	ContextWarningThreshold float64 `toml:"context_warning_threshold" json:"context_warning_threshold,omitempty"`
+	// PaneContextUsage reports the context-window usage percent (0-100) of a
+	// session's agent panes, keyed by pane ID; panes without a reading are
+	// absent. internal/robot supplies it from transcript attribution, which
+	// this package cannot import (cycle via internal/context). Without it no
+	// context warning is generated.
+	PaneContextUsage func(session string, panes []tmux.Pane) map[string]float64 `toml:"-" json:"-"`
 }
 
 // DefaultConfig returns sensible default alert thresholds
