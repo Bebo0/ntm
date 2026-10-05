@@ -20,6 +20,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Dicklesworthstone/ntm/internal/integrations/caut"
 	"github.com/Dicklesworthstone/ntm/internal/tools"
 )
 
@@ -275,6 +276,46 @@ func TestApplyLiveProviderQuotaFlagsAnExhaustedPool(t *testing.T) {
 	}
 	if !quotaInfo.HasCritical {
 		t.Error("has_critical must be set when every seat is at its cap")
+	}
+}
+
+// TestGetQuotaCheckUsesTheCAAMOverlay: the caut cache is empty in production
+// (its poller was removed), so --robot-quota-check answered "not found" for
+// every provider, even one --robot-quota-status listed from caam's live
+// windows. The check now applies the same overlay, for its provider only.
+func TestGetQuotaCheckUsesTheCAAMOverlay(t *testing.T) {
+	cache := caut.GetGlobalPoller().GetCache()
+	snapshot := cache.Snapshot()
+	t.Cleanup(func() {
+		cache.Clear()
+		if snapshot.Status != nil {
+			cache.UpdateStatus(snapshot.Status)
+		}
+		if len(snapshot.Usage) > 0 {
+			cache.UpdateAllUsage(snapshot.Usage)
+		}
+	})
+	cache.Clear()
+	var probed []string
+	stubLimits(t, func(_ context.Context, provider string) (*tools.CAAMLimitsResult, error) {
+		probed = append(probed, provider)
+		if canonicalRobotProvider(provider) != "openai" {
+			return nil, errors.New("no claude seats configured")
+		}
+		return codexPool(t), nil
+	})
+
+	out, err := GetQuotaCheck("codex")
+	if err != nil || !out.Success || out.Provider != "openai" || out.Quota.UsagePercent != 34 || out.Quota.ResetAt == "" {
+		t.Fatalf("GetQuotaCheck(codex) = %+v, %v; want the governing seat's 34%% and reset time", out, err)
+	}
+	if len(probed) != 1 || canonicalRobotProvider(probed[0]) != "openai" {
+		t.Errorf("probed %v, want only the requested provider", probed)
+	}
+
+	out, err = GetQuotaCheck("claude")
+	if err != nil || out.Success || out.ErrorCode != ErrCodeNotFound {
+		t.Fatalf("GetQuotaCheck(claude) with no seats = %+v, %v; want %s", out.RobotResponse, err, ErrCodeNotFound)
 	}
 }
 

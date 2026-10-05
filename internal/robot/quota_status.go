@@ -222,63 +222,72 @@ func applyLiveProviderQuota(ctx context.Context, quotaInfo *QuotaInfo) {
 	}
 
 	for _, provider := range quotaStatusLimitsProviders {
-		result, err := quotaStatusLimitsProbe(ctx, provider)
-		if err != nil && result == nil {
-			// Nothing readable for this provider. Silence here is correct:
-			// most hosts have no caam seats at all, and an error row per
-			// provider would make a normal install look broken.
-			// --robot-account-status carries the per-provider limits_error for
-			// operators who do use caam.
-			continue
-		}
-		if result == nil || len(result.Profiles) == 0 {
-			continue
-		}
+		applyLiveProviderQuotaFor(ctx, quotaInfo, provider)
+	}
+}
 
-		// The seat that governs new work: caam's top-ranked eligible profile,
-		// falling back to the highest utilization on record when nothing is
-		// eligible, because "every seat is at its cap" is the single most
-		// important thing this surface can report.
-		var governing *tools.CAAMRankedProfile
+// applyLiveProviderQuotaFor merges one caam-readable provider's subscription
+// windows into quotaInfo; see applyLiveProviderQuota.
+func applyLiveProviderQuotaFor(ctx context.Context, quotaInfo *QuotaInfo, provider string) {
+	if quotaInfo.Providers == nil {
+		quotaInfo.Providers = make(map[string]ProviderQuota)
+	}
+	result, err := quotaStatusLimitsProbe(ctx, provider)
+	if err != nil && result == nil {
+		// Nothing readable for this provider. Silence here is correct:
+		// most hosts have no caam seats at all, and an error row per
+		// provider would make a normal install look broken.
+		// --robot-account-status carries the per-provider limits_error for
+		// operators who do use caam.
+		return
+	}
+	if result == nil || len(result.Profiles) == 0 {
+		return
+	}
+
+	// The seat that governs new work: caam's top-ranked eligible profile,
+	// falling back to the highest utilization on record when nothing is
+	// eligible, because "every seat is at its cap" is the single most
+	// important thing this surface can report.
+	var governing *tools.CAAMRankedProfile
+	for i := range result.Profiles {
+		p := &result.Profiles[i]
+		if p.Eligible && p.Rank == 1 {
+			governing = p
+			break
+		}
+	}
+	if governing == nil {
 		for i := range result.Profiles {
 			p := &result.Profiles[i]
-			if p.Eligible && p.Rank == 1 {
+			if governing == nil || p.UsedPercent > governing.UsedPercent {
 				governing = p
-				break
 			}
 		}
-		if governing == nil {
-			for i := range result.Profiles {
-				p := &result.Profiles[i]
-				if governing == nil || p.UsedPercent > governing.UsedPercent {
-					governing = p
-				}
-			}
-		}
-		if governing == nil {
-			continue
-		}
+	}
+	if governing == nil {
+		return
+	}
 
-		key := canonicalRobotProvider(provider)
-		quota, exists := quotaInfo.Providers[key]
-		if !exists {
-			quota = ProviderQuota{}
-		}
-		// caut owns the number when it has one; a zero there means it had none.
-		if quota.UsagePercent == 0 {
-			quota.UsagePercent = float64(governing.UsedPercent)
-		}
-		if quota.ResetAt == "" && governing.ResetsAt != nil {
-			quota.ResetAt = FormatTimestamp(*governing.ResetsAt)
-		}
-		quota.Status = getQuotaStatus(quota.UsagePercent)
-		quotaInfo.Providers[key] = quota
+	key := canonicalRobotProvider(provider)
+	quota, exists := quotaInfo.Providers[key]
+	if !exists {
+		quota = ProviderQuota{}
+	}
+	// caut owns the number when it has one; a zero there means it had none.
+	if quota.UsagePercent == 0 {
+		quota.UsagePercent = float64(governing.UsedPercent)
+	}
+	if quota.ResetAt == "" && governing.ResetsAt != nil {
+		quota.ResetAt = FormatTimestamp(*governing.ResetsAt)
+	}
+	quota.Status = getQuotaStatus(quota.UsagePercent)
+	quotaInfo.Providers[key] = quota
 
-		if quota.UsagePercent >= 95.0 {
-			quotaInfo.HasCritical = true
-		} else if quota.UsagePercent >= 80.0 {
-			quotaInfo.HasWarning = true
-		}
+	if quota.UsagePercent >= 95.0 {
+		quotaInfo.HasCritical = true
+	} else if quota.UsagePercent >= 80.0 {
+		quotaInfo.HasWarning = true
 	}
 }
 
@@ -321,59 +330,52 @@ func GetQuotaCheck(provider string) (*QuotaCheckOutput, error) {
 	canonicalProvider := canonicalRobotProvider(provider)
 	lookupProvider := quotaLookupProvider(provider)
 
-	poller := caut.GetGlobalPoller()
-	cache := poller.GetCache()
-
-	// Get provider-specific usage
-	usage := cache.GetUsage(lookupProvider)
-	if usage == nil {
-		// Try to get from status providers
-		status := cache.GetStatus()
-		if status != nil {
-			for _, p := range status.Providers {
-				if quotaLookupProvider(p.Name) == lookupProvider {
-					return &QuotaCheckOutput{
-						RobotResponse: NewRobotResponse(true),
-						Provider:      canonicalProvider,
-						Quota: ProviderQuota{
-							UsagePercent: p.QuotaUsed,
-							Status:       getQuotaStatus(p.QuotaUsed),
-						},
-					}, nil
-				}
-			}
+	// caut's cache first: usage counters, then its quota percentage.
+	cache := caut.GetGlobalPoller().GetCache()
+	info := QuotaInfo{Providers: make(map[string]ProviderQuota)}
+	if usage := cache.GetUsage(lookupProvider); usage != nil {
+		info.Providers[canonicalProvider] = ProviderQuota{
+			RequestsUsed: usage.RequestCount,
+			TokensUsed:   usage.TokensIn + usage.TokensOut,
+			CostUSD:      usage.Cost,
+			Status:       "ok",
 		}
-
-		return &QuotaCheckOutput{
-			RobotResponse: NewErrorResponse(
-				nil,
-				ErrCodePaneNotFound, // Reusing as "not found"
-				"Provider '"+canonicalProvider+"' not found. Use --robot-quota-status to see available providers.",
-			),
-			Provider: canonicalProvider,
-		}, nil
 	}
-
-	// Build provider quota from usage data
-	providerQuota := ProviderQuota{
-		RequestsUsed: usage.RequestCount,
-		TokensUsed:   usage.TokensIn + usage.TokensOut,
-		CostUSD:      usage.Cost,
-		Status:       "ok",
-	}
-
-	// Check status for quota percentage
-	status := cache.GetStatus()
-	if status != nil {
+	if status := cache.GetStatus(); status != nil {
 		for _, p := range status.Providers {
 			if quotaLookupProvider(p.Name) == lookupProvider {
-				providerQuota.UsagePercent = p.QuotaUsed
-				providerQuota.Status = getQuotaStatus(p.QuotaUsed)
+				quota := info.Providers[canonicalProvider]
+				quota.UsagePercent = p.QuotaUsed
+				quota.Status = getQuotaStatus(p.QuotaUsed)
+				info.Providers[canonicalProvider] = quota
 				break
 			}
 		}
 	}
 
+	// Then the same CAAM subscription-window overlay --robot-quota-status
+	// applies (ntm#319), for this provider only: a seat that status lists
+	// must not be "not found" here.
+	for _, limitsProvider := range quotaStatusLimitsProviders {
+		if canonicalRobotProvider(limitsProvider) != canonicalProvider {
+			continue
+		}
+		limitsCtx, limitsCancel := context.WithTimeout(context.Background(), caamLimitsOverlayTimeout)
+		applyLiveProviderQuotaFor(limitsCtx, &info, limitsProvider)
+		limitsCancel()
+	}
+
+	providerQuota, found := info.Providers[canonicalProvider]
+	if !found {
+		return &QuotaCheckOutput{
+			RobotResponse: NewErrorResponse(
+				nil,
+				ErrCodeNotFound,
+				"No quota data for provider '"+canonicalProvider+"' from caut or caam. Use --robot-quota-status to see available providers.",
+			),
+			Provider: canonicalProvider,
+		}, nil
+	}
 	return &QuotaCheckOutput{
 		RobotResponse: NewRobotResponse(true),
 		Provider:      canonicalProvider,
