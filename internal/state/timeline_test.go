@@ -4,6 +4,9 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/Dicklesworthstone/ntm/internal/status"
+	"github.com/Dicklesworthstone/ntm/internal/tmux"
 )
 
 func TestNewTimelineTracker(t *testing.T) {
@@ -557,6 +560,48 @@ func TestStatsOldestNewest(t *testing.T) {
 	}
 	if !stats.NewestEvent.Equal(now) {
 		t.Errorf("expected newest=%v, got %v", now, stats.NewestEvent)
+	}
+}
+
+// RecordAgentStatus is the one pane-status-to-timeline mapping, shared by the
+// dashboard and the session's internal monitor.
+func TestRecordAgentStatusRecordsTransitionsAndMarkers(t *testing.T) {
+	tracker := NewTimelineTracker(&TimelineConfig{PruneInterval: 0})
+	defer stopTrackerForTest(tracker)
+	pane := tmux.Pane{ID: "%3", Title: "proj__cc_2", Type: tmux.AgentClaude}
+	at := time.Date(2026, 10, 5, 4, 0, 0, 0, time.UTC)
+	observe := func(s status.AgentState, offset time.Duration) bool {
+		return tracker.RecordAgentStatus("proj", pane, status.AgentStatus{PaneID: "%3", AgentType: "cc", State: s, UpdatedAt: at.Add(offset)})
+	}
+
+	if !observe(status.StateWorking, 0) || observe(status.StateWorking, time.Second) {
+		t.Fatal("first observation must record and an unchanged state must not")
+	}
+	if !observe(status.StateIdle, time.Minute) || !observe(status.StateError, 2*time.Minute) {
+		t.Fatal("state changes must record")
+	}
+	events := tracker.GetEventsForSession("proj", time.Time{})
+	if len(events) != 3 || events[0].AgentID != "cc_2" || events[0].State != TimelineWorking || events[2].State != TimelineError {
+		t.Fatalf("events = %+v, want working, idle, error for cc_2", events)
+	}
+	var kinds []MarkerType
+	for _, marker := range tracker.GetMarkersForSession("proj", time.Time{}, time.Time{}) {
+		kinds = append(kinds, marker.Type)
+	}
+	if len(kinds) != 3 || kinds[0] != MarkerStart || kinds[1] != MarkerCompletion || kinds[2] != MarkerError {
+		t.Fatalf("markers = %v, want start, completion, error", kinds)
+	}
+
+	// User and unknown panes are not agents.
+	if tracker.RecordAgentStatus("proj", tmux.Pane{ID: "%1", Type: tmux.AgentUser}, status.AgentStatus{State: status.StateWorking}) {
+		t.Fatal("a user pane was recorded")
+	}
+}
+
+func TestTimelineAgentIDUsesFinalSeparator(t *testing.T) {
+	pane := tmux.Pane{Title: "my__project__cc_2"}
+	if got := timelineAgentID(pane, "", ""); got != "cc_2" {
+		t.Fatalf("timelineAgentID() = %q, want %q", got, "cc_2")
 	}
 }
 

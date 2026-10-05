@@ -5052,66 +5052,7 @@ func (m *Model) recordTimelineStatus(pane tmux.Pane, st status.AgentStatus) bool
 	if m.timelinePanel == nil || m.session == "" {
 		return false
 	}
-
-	agentType := timelineAgentType(pane, st.AgentType)
-	if agentType == tmux.AgentUnknown || agentType == tmux.AgentUser {
-		return false
-	}
-
-	agentID := timelineAgentID(pane, st.AgentType, st.PaneID)
-	if agentID == "" {
-		return false
-	}
-
-	nextState := timelineStateFromStatus(st)
-	tracker := state.GetGlobalTimelineTracker()
-	currentState := tracker.GetCurrentState(agentID)
-	if currentState == nextState {
-		return false
-	}
-
-	event := state.AgentEvent{
-		AgentID:   agentID,
-		AgentType: state.AgentType(agentType),
-		SessionID: m.session,
-		State:     nextState,
-		Timestamp: st.UpdatedAt,
-	}
-	recorded := tracker.RecordEvent(event)
-
-	if currentState == "" {
-		tracker.AddMarker(state.TimelineMarker{
-			AgentID:   agentID,
-			SessionID: m.session,
-			Type:      state.MarkerStart,
-			Timestamp: recorded.Timestamp,
-		})
-	}
-
-	if currentState == state.TimelineWorking && nextState == state.TimelineIdle {
-		tracker.AddMarker(state.TimelineMarker{
-			AgentID:   agentID,
-			SessionID: m.session,
-			Type:      state.MarkerCompletion,
-			Timestamp: recorded.Timestamp,
-		})
-	}
-
-	if nextState == state.TimelineError {
-		errMsg := ""
-		if st.ErrorType != "" {
-			errMsg = st.ErrorType.String()
-		}
-		tracker.AddMarker(state.TimelineMarker{
-			AgentID:   agentID,
-			SessionID: m.session,
-			Type:      state.MarkerError,
-			Timestamp: recorded.Timestamp,
-			Message:   errMsg,
-		})
-	}
-
-	return true
+	return state.GetGlobalTimelineTracker().RecordAgentStatus(m.session, pane, st)
 }
 
 func (m *Model) refreshTimelinePanel() {
@@ -5128,55 +5069,6 @@ func (m *Model) refreshTimelinePanel() {
 		Stats:   tracker.Stats(),
 	}
 	m.timelinePanel.SetData(data, nil)
-}
-
-func timelineStateFromStatus(st status.AgentStatus) state.TimelineState {
-	switch st.State {
-	case status.StateWorking:
-		return state.TimelineWorking
-	case status.StateError:
-		return state.TimelineError
-	case status.StateIdle:
-		return state.TimelineIdle
-	default:
-		return state.TimelineIdle
-	}
-}
-
-func timelineAgentID(pane tmux.Pane, fallbackType, fallbackID string) string {
-	if pane.NTMIndex > 0 && pane.Type != tmux.AgentUnknown && pane.Type != tmux.AgentUser {
-		return fmt.Sprintf("%s_%d", pane.Type, pane.NTMIndex)
-	}
-
-	if pane.Title != "" {
-		if suffix := tmux.PaneTitleSuffix(pane.Title); suffix != "" {
-			return suffix
-		}
-		return pane.Title
-	}
-
-	if fallbackType == "" {
-		return fallbackID
-	}
-	suffix := strings.TrimPrefix(fallbackID, "%")
-	if suffix == "" {
-		suffix = "0"
-	}
-	return fmt.Sprintf("%s_%s", fallbackType, suffix)
-}
-
-func timelineAgentType(pane tmux.Pane, fallbackType string) tmux.AgentType {
-	if pane.Type != tmux.AgentUnknown && pane.Type != tmux.AgentUser && pane.Type != "" {
-		return pane.Type
-	}
-	if fallbackType == "" {
-		return tmux.AgentUnknown
-	}
-	t := tmux.AgentType(fallbackType)
-	if t.IsValid() && t != tmux.AgentUser {
-		return t
-	}
-	return tmux.AgentUnknown
 }
 
 func (m *Model) scheduleRefreshes(now time.Time) []tea.Cmd {

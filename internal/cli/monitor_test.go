@@ -3,6 +3,7 @@ package cli
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -14,6 +15,8 @@ import (
 	"github.com/Dicklesworthstone/ntm/internal/config"
 	"github.com/Dicklesworthstone/ntm/internal/coordinator"
 	"github.com/Dicklesworthstone/ntm/internal/resilience"
+	"github.com/Dicklesworthstone/ntm/internal/state"
+	statuspkg "github.com/Dicklesworthstone/ntm/internal/status"
 	"github.com/Dicklesworthstone/ntm/internal/tmux"
 )
 
@@ -60,6 +63,39 @@ func accountRotationMonitorFixture(t *testing.T) (*resilience.SpawnManifest, str
 // Exercise the actual hidden Cobra surface and resident ownership protocol.
 // Stop is not acknowledged while the canonical checker still has work in
 // flight, even after its context has been canceled.
+// The internal monitor is the only process that lives as long as the session,
+// so it records the timeline `ntm timeline` reads. Each observation's state
+// changes become timeline events until the monitor stops.
+func TestRecordSessionTimelineRecordsObservedTransitions(t *testing.T) {
+	session := fmt.Sprintf("tlrec_%d", time.Now().UnixNano())
+	pane := tmux.Pane{ID: "%7", Title: session + "__cod_1", Type: tmux.AgentCodex}
+	states := []statuspkg.AgentState{statuspkg.StateWorking, statuspkg.StateWorking, statuspkg.StateIdle}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	calls := 0
+	observe := func(_ context.Context, observed string) (statuspkg.SessionObservation, error) {
+		if observed != session {
+			t.Errorf("observed %q, want %q", observed, session)
+		}
+		st := states[min(calls, len(states)-1)]
+		calls++
+		if calls == len(states) {
+			cancel()
+		}
+		return statuspkg.SessionObservation{Session: session, Panes: []statuspkg.PaneObservation{{
+			Metadata: pane,
+			Current:  statuspkg.StateObservation{Status: statuspkg.AgentStatus{PaneID: "%7", AgentType: "cod", State: st, UpdatedAt: time.Now()}},
+		}}}, nil
+	}
+
+	recordSessionTimeline(ctx, session, time.Millisecond, observe)
+
+	events := state.GetGlobalTimelineTracker().GetEventsForSession(session, time.Time{})
+	if calls != len(states) || len(events) != 2 || events[0].State != state.TimelineWorking || events[1].State != state.TimelineIdle {
+		t.Fatalf("after %d observations, events = %+v; want working then idle", calls, events)
+	}
+}
+
 func TestAccountRotationMonitorStopJoinsInFlightRecovery(t *testing.T) {
 	manifest, _ := accountRotationMonitorFixture(t)
 	if err := resilience.SaveManifest(manifest); err != nil {

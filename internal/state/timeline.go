@@ -5,10 +5,13 @@ package state
 import (
 	"fmt"
 	"log"
+	"strings"
 	"sync"
 	"time"
 
 	"github.com/Dicklesworthstone/ntm/internal/audit"
+	"github.com/Dicklesworthstone/ntm/internal/status"
+	"github.com/Dicklesworthstone/ntm/internal/tmux"
 )
 
 // TimelineState represents the operational state of an agent in the timeline.
@@ -536,6 +539,99 @@ func (t *TimelineTracker) PruneMarkers() int {
 	pruned := keepFrom
 	t.markers = t.markers[keepFrom:]
 	return pruned
+}
+
+// RecordAgentStatus records an observed pane status as a timeline event when
+// the agent's state changed, with the start, completion and error markers
+// that transition implies. It is the one mapping from pane status to the
+// timeline, shared by the dashboard and the session's internal monitor (the
+// long-lived process that persists the timeline). It reports whether an
+// event was recorded.
+func (t *TimelineTracker) RecordAgentStatus(session string, pane tmux.Pane, st status.AgentStatus) bool {
+	if t == nil || session == "" {
+		return false
+	}
+	agentType := timelineAgentType(pane, st.AgentType)
+	if agentType == tmux.AgentUnknown || agentType == tmux.AgentUser {
+		return false
+	}
+	agentID := timelineAgentID(pane, st.AgentType, st.PaneID)
+	if agentID == "" {
+		return false
+	}
+
+	nextState := timelineStateFromStatus(st)
+	currentState := t.GetCurrentState(agentID)
+	if currentState == nextState {
+		return false
+	}
+	recorded := t.RecordEvent(AgentEvent{
+		AgentID:   agentID,
+		AgentType: AgentType(agentType),
+		SessionID: session,
+		State:     nextState,
+		Timestamp: st.UpdatedAt,
+	})
+
+	if currentState == "" {
+		t.AddMarker(TimelineMarker{AgentID: agentID, SessionID: session, Type: MarkerStart, Timestamp: recorded.Timestamp})
+	}
+	if currentState == TimelineWorking && nextState == TimelineIdle {
+		t.AddMarker(TimelineMarker{AgentID: agentID, SessionID: session, Type: MarkerCompletion, Timestamp: recorded.Timestamp})
+	}
+	if nextState == TimelineError {
+		errMsg := ""
+		if st.ErrorType != "" {
+			errMsg = st.ErrorType.String()
+		}
+		t.AddMarker(TimelineMarker{AgentID: agentID, SessionID: session, Type: MarkerError, Timestamp: recorded.Timestamp, Message: errMsg})
+	}
+	return true
+}
+
+func timelineStateFromStatus(st status.AgentStatus) TimelineState {
+	switch st.State {
+	case status.StateWorking:
+		return TimelineWorking
+	case status.StateError:
+		return TimelineError
+	default:
+		return TimelineIdle
+	}
+}
+
+func timelineAgentID(pane tmux.Pane, fallbackType, fallbackID string) string {
+	if pane.NTMIndex > 0 && pane.Type != tmux.AgentUnknown && pane.Type != tmux.AgentUser {
+		return fmt.Sprintf("%s_%d", pane.Type, pane.NTMIndex)
+	}
+	if pane.Title != "" {
+		if suffix := tmux.PaneTitleSuffix(pane.Title); suffix != "" {
+			return suffix
+		}
+		return pane.Title
+	}
+	if fallbackType == "" {
+		return fallbackID
+	}
+	suffix := strings.TrimPrefix(fallbackID, "%")
+	if suffix == "" {
+		suffix = "0"
+	}
+	return fmt.Sprintf("%s_%s", fallbackType, suffix)
+}
+
+func timelineAgentType(pane tmux.Pane, fallbackType string) tmux.AgentType {
+	if pane.Type != tmux.AgentUnknown && pane.Type != tmux.AgentUser && pane.Type != "" {
+		return pane.Type
+	}
+	if fallbackType == "" {
+		return tmux.AgentUnknown
+	}
+	t := tmux.AgentType(fallbackType)
+	if t.IsValid() && t != tmux.AgentUser {
+		return t
+	}
+	return tmux.AgentUnknown
 }
 
 // Global singleton TimelineTracker for session-wide event tracking.

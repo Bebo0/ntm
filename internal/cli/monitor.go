@@ -23,6 +23,8 @@ import (
 	"github.com/Dicklesworthstone/ntm/internal/events"
 	"github.com/Dicklesworthstone/ntm/internal/plugins"
 	"github.com/Dicklesworthstone/ntm/internal/resilience"
+	"github.com/Dicklesworthstone/ntm/internal/state"
+	statuspkg "github.com/Dicklesworthstone/ntm/internal/status"
 	"github.com/Dicklesworthstone/ntm/internal/summary"
 	"github.com/Dicklesworthstone/ntm/internal/supervisor"
 	"github.com/Dicklesworthstone/ntm/internal/tmux"
@@ -151,6 +153,28 @@ func runMonitorContext(parent context.Context, session string) (runErr error) {
 	}
 	monitor.Start(ctx)
 	defer monitor.Stop()
+
+	// The session's timeline lives here: this process outlives every command
+	// that touches the session, so it records each agent's state transitions
+	// and persists them (checkpoints while running, a final merge on exit).
+	// The commands that used to own it (spawn, kill) exit long before a
+	// checkpoint fires, so `ntm timeline` never had anything to show.
+	if err := state.StartSessionTimeline(session); err != nil {
+		slog.Default().Debug("timeline persistence unavailable", "session", session, "error", err)
+	} else {
+		recordCtx, stopRecording := context.WithCancel(ctx)
+		recorded := make(chan struct{})
+		observer := statuspkg.NewSessionObserver(statuspkg.NewDetector())
+		go func() {
+			defer close(recorded)
+			recordSessionTimeline(recordCtx, session, timelineObservationInterval, observer.Observe)
+		}()
+		defer func() {
+			stopRecording()
+			<-recorded
+			_ = state.EndSessionTimeline(session)
+		}()
+	}
 
 	// Only an authorized owner may start auxiliary daemons. Initialization
 	// above is read-only, so parent cancellation before authorization leaves
@@ -542,5 +566,29 @@ func generateEndSessionSummary(ctx context.Context, session string, lastOutputs 
 		fmt.Fprintf(os.Stderr, "Failed to write summary file: %v\n", err)
 	} else {
 		fmt.Printf("Session summary saved to %s\n", filename)
+	}
+}
+
+// timelineObservationInterval is how often the internal monitor samples agent
+// states for the session timeline.
+const timelineObservationInterval = 5 * time.Second
+
+// recordSessionTimeline records each agent's observed state transitions into
+// this process's timeline tracker until ctx ends.
+func recordSessionTimeline(ctx context.Context, session string, every time.Duration, observe func(context.Context, string) (statuspkg.SessionObservation, error)) {
+	tracker := state.GetGlobalTimelineTracker()
+	ticker := time.NewTicker(every)
+	defer ticker.Stop()
+	for {
+		if observation, err := observe(ctx, session); err == nil {
+			for _, pane := range observation.Panes {
+				tracker.RecordAgentStatus(session, pane.Metadata, pane.Current.Status)
+			}
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+		}
 	}
 }
