@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"flag"
 	"fmt"
 	"io"
 	"log"
@@ -843,6 +844,7 @@ Shell Integration:
 		// machine response would make the stdout stream impossible to decode.
 		if machineInvocation, _ := machineJSONInvocation(cmd); !machineInvocation {
 			PrintProfilingIfEnabled()
+			recordInteractiveUsage(cmd)
 		}
 	},
 	Run: func(cmd *cobra.Command, args []string) {
@@ -5811,6 +5813,32 @@ func pluginConfigDirForArgs(args []string) string {
 
 func pluginAgentsDirForArgs(args []string) string {
 	return filepath.Join(filepath.Dir(configPathFromArgs(args)), "agents")
+}
+
+// recordInteractiveUsage feeds `ntm level`: each successful interactive
+// command counts once, and session-creating and prompt-sending commands also
+// count as such. Cobra skips post-run hooks for failed commands. Machine
+// (robot/JSON) invocations are automation, not the operator's proficiency,
+// and test binaries must not write the developer's stats.
+func recordInteractiveUsage(cmd *cobra.Command) {
+	if cmd == nil || !cmd.HasParent() || flag.Lookup("test.v") != nil {
+		return
+	}
+	recordProficiencyUsage(strings.TrimPrefix(cmd.CommandPath(), cmd.Root().Name()+" "))
+}
+
+func recordProficiencyUsage(command string) {
+	prof, err := config.LoadProficiency()
+	if err != nil || prof == nil {
+		return
+	}
+	_ = prof.RecordCommand(command)
+	switch command {
+	case "spawn", "create", "quick":
+		_ = prof.IncrementSession()
+	case "send":
+		_ = prof.IncrementPrompt()
+	}
 }
 
 // tmuxSessionPrivacy reads the privacy settings `ntm spawn --privacy` /

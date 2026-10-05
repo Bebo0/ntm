@@ -6,6 +6,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/spf13/cobra"
+
 	"github.com/Dicklesworthstone/ntm/internal/cli/tiers"
 	"github.com/Dicklesworthstone/ntm/internal/config"
 )
@@ -30,6 +32,36 @@ func TestLevelShowDisplaysCurrentTier(t *testing.T) {
 	// Default tier should be Apprentice
 	if cfg.GetTier() != tiers.TierApprentice {
 		t.Errorf("expected Apprentice tier, got %s", cfg.GetTier())
+	}
+}
+
+// `ntm level` showed "Commands run: 0" forever: nothing in production
+// recorded usage. The post-run hook now records each successful interactive
+// command, counting spawn/create/quick as sessions and send as prompts.
+func TestRecordProficiencyUsageFeedsLevelStats(t *testing.T) {
+	setupTestProficiency(t)
+	for _, command := range []string{"spawn", "send", "send", "status", "mail send"} {
+		recordProficiencyUsage(command)
+	}
+	cfg, err := config.LoadProficiency()
+	if err != nil {
+		t.Fatal(err)
+	}
+	stats := cfg.GetUsageStats()
+	if stats.CommandsRun != 5 || stats.SessionsCreated != 1 || stats.PromptsSent != 2 {
+		t.Fatalf("stats = %+v, want 5 commands, 1 session, 2 prompts (a subcommand named send is not a prompt)", stats)
+	}
+	if cfg.GetUniqueCommandCount() != 4 {
+		t.Fatalf("unique commands = %d, want 4", cfg.GetUniqueCommandCount())
+	}
+
+	// The hook itself never writes stats from a test binary.
+	root := &cobra.Command{Use: "ntm"}
+	child := &cobra.Command{Use: "status"}
+	root.AddCommand(child)
+	recordInteractiveUsage(child)
+	if after, _ := config.LoadProficiency(); after.GetUsageStats().CommandsRun != 5 {
+		t.Fatal("recordInteractiveUsage wrote stats from a test binary")
 	}
 }
 
