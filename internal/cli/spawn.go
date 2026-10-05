@@ -4985,109 +4985,6 @@ func agentTypeToProgram(agentType string) string {
 // on the same contract as the mcp-agent-mail Rust reference implementation.
 // See agentmail.CanonicalIdentityPath / agentmail.WriteIdentity.
 
-// getMemoryContext retrieves and formats CM (CASS Memory) memories for agent spawn.
-// Returns a formatted markdown string with project-specific rules and anti-patterns
-// from past sessions. Returns empty string if CM is unavailable or disabled.
-//
-// This function implements graceful degradation - CM unavailability does not
-// cause spawn to fail, it simply returns an empty string.
-func getMemoryContext(projectName, task string) string {
-	// Check if memory integration is enabled in config
-	if cfg == nil || !cfg.SessionRecovery.IncludeCMMemories {
-		return ""
-	}
-
-	// Create CM CLI client
-	cmClient := cm.NewCLIClient()
-
-	// Check if CM is installed
-	if !cmClient.IsInstalled() {
-		return ""
-	}
-
-	// Determine the query task
-	queryTask := task
-	if queryTask == "" {
-		queryTask = projectName
-	}
-
-	// Query CM for context with limits from config
-	maxRules := cfg.SessionRecovery.MaxCMRules
-	maxSnippets := cfg.SessionRecovery.MaxCMSnippets
-	if maxRules == 0 {
-		maxRules = 10 // Fallback default
-	}
-	if maxSnippets == 0 {
-		maxSnippets = 3 // Fallback default
-	}
-
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-
-	// `getMemoryContext` is invoked from a path that doesn't carry the absolute
-	// workspace; an empty workspace falls through to CM's unscoped query, which
-	// preserves prior behavior for this surface (the workspace-scoped path is
-	// `loadRecoveryCMMemories`, which carries `workingDir`).
-	result, err := cmClient.GetRecoveryContext(ctx, queryTask, "", maxRules, maxSnippets)
-	if err != nil {
-		// Log warning but don't fail - graceful degradation
-		if !IsJSONOutput() {
-			output.PrintWarningf("CM context retrieval failed: %v", err)
-		}
-		return ""
-	}
-
-	if result == nil {
-		return ""
-	}
-
-	// Format the result as markdown with the specified structure
-	return formatMemoryContext(result)
-}
-
-// formatMemoryContext formats CM context result into the standard recovery format.
-// Output format:
-//
-//	# Project Memory from Past Sessions
-//
-//	## Key Rules for This Project
-//	- [b-8f3a2c] Always use structured logging with log/slog
-//
-//	## Anti-Patterns to Avoid
-//	- [b-7d3e8c] Don't add backwards-compatibility shims
-func formatMemoryContext(result *cm.CLIContextResponse) string {
-	if result == nil {
-		return ""
-	}
-
-	// Check if there's anything to format
-	if len(result.RelevantBullets) == 0 && len(result.AntiPatterns) == 0 {
-		return ""
-	}
-
-	var buf strings.Builder
-
-	buf.WriteString("# Project Memory from Past Sessions\n\n")
-
-	if len(result.RelevantBullets) > 0 {
-		buf.WriteString("## Key Rules for This Project\n")
-		for _, rule := range result.RelevantBullets {
-			buf.WriteString(fmt.Sprintf("- [%s] %s\n", rule.ID, rule.Content))
-		}
-		buf.WriteString("\n")
-	}
-
-	if len(result.AntiPatterns) > 0 {
-		buf.WriteString("## Anti-Patterns to Avoid\n")
-		for _, pattern := range result.AntiPatterns {
-			buf.WriteString(fmt.Sprintf("- [%s] %s\n", pattern.ID, pattern.Content))
-		}
-		buf.WriteString("\n")
-	}
-
-	return buf.String()
-}
-
 func recoveryContextTermination(err error) error {
 	switch {
 	case errors.Is(err, context.Canceled):
@@ -5197,7 +5094,7 @@ func buildRecoveryContext(ctx context.Context, sessionName, workingDir string, r
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			memories, err := loadRecoveryCMMemories(ctx, workingDir)
+			memories, err := loadRecoveryCMMemories(ctx, workingDir, recoveryCfg.MaxCMRules, recoveryCfg.MaxCMSnippets)
 			if recordSourceError("cm memories", err) {
 				return
 			}
@@ -5677,21 +5574,27 @@ func attemptReservationTransfer(ctx context.Context, client *agentmail.Client, s
 // share recovery memories — the basename-derived projectName alone would
 // produce identical task text and silently bleed context across unrelated
 // projects (#132).
-func loadRecoveryCMMemories(ctx context.Context, workingDir string) (*RecoveryCMMemories, error) {
+func loadRecoveryCMMemories(ctx context.Context, workingDir string, maxRules, maxSnippets int) (*RecoveryCMMemories, error) {
 	client := cm.NewCLIClient()
 	if !client.IsInstalled() {
 		return nil, nil // Graceful degradation
 	}
 
-	// Get recovery context with reasonable limits. Use the absolute working
-	// directory as the workspace scope so basename collisions across repos
-	// are kept distinct.
+	// [recovery] max_cm_rules / max_cm_snippets; zero means the defaults.
+	if maxRules <= 0 {
+		maxRules = 10
+	}
+	if maxSnippets <= 0 {
+		maxSnippets = 3
+	}
+	// Use the absolute working directory as the workspace scope so basename
+	// collisions across repos are kept distinct.
 	projectName := filepath.Base(workingDir)
 	absWorkspace := workingDir
 	if abs, err := filepath.Abs(workingDir); err == nil {
 		absWorkspace = abs
 	}
-	result, err := client.GetRecoveryContext(ctx, projectName, absWorkspace, 10, 3)
+	result, err := client.GetRecoveryContext(ctx, projectName, absWorkspace, maxRules, maxSnippets)
 	if err != nil {
 		return nil, fmt.Errorf("get recovery context: %w", err)
 	}

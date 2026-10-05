@@ -63,12 +63,12 @@ func init() {
 		"recovery.include_agent_mail",
 		"recovery.include_cm_memories",
 		"recovery.max_recovery_tokens",
+		"recovery.max_cm_rules",
+		"recovery.max_cm_snippets",
 	} {
 		config.RegisterReader(key, buildRecoveryContext)
 	}
 	config.RegisterReader("recovery.auto_inject_on_spawn", spawnSessionLogicContextWithOutput)
-	config.RegisterReader("recovery.max_cm_rules", getMemoryContext)
-	config.RegisterReader("recovery.max_cm_snippets", getMemoryContext)
 
 	// Coordinator runtime config bridge (coordinator.go).
 	for _, key := range []string{

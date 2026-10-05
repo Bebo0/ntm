@@ -1310,6 +1310,32 @@ func TestRecoveryBead_Structure(t *testing.T) {
 		bead.ID, bead.Title, bead.Assignee)
 }
 
+// [recovery] max_cm_rules / max_cm_snippets reach the live recovery path. It
+// hard-coded 10 and 3, while the only reader of the keys was a dead duplicate
+// that kept the config-liveness gate green.
+func TestLoadRecoveryCMMemoriesHonorsConfiguredLimits(t *testing.T) {
+	bin := t.TempDir()
+	var rules []string
+	for i := 1; i <= 5; i++ {
+		rules = append(rules, fmt.Sprintf(`{"id":"b-%d","content":"rule %d"}`, i, i))
+	}
+	payload := `{"success":true,"data":{"relevantBullets":[` + strings.Join(rules, ",") + `],"antiPatterns":[` + strings.Join(rules, ",") + `]}}`
+	script := "#!/bin/sh\ncat <<'JSON'\n" + payload + "\nJSON\n"
+	if err := os.WriteFile(filepath.Join(bin, "cm"), []byte(script), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	memories, err := loadRecoveryCMMemories(context.Background(), t.TempDir(), 2, 1)
+	if err != nil || memories == nil || len(memories.Rules) != 2 || len(memories.AntiPatterns) != 2 {
+		t.Fatalf("configured limit 2 = %+v, %v; want 2 rules and 2 anti-patterns", memories, err)
+	}
+	memories, err = loadRecoveryCMMemories(context.Background(), t.TempDir(), 0, 0)
+	if err != nil || memories == nil || len(memories.Rules) != 5 {
+		t.Fatalf("unset limit = %+v, %v; want the default (10) to keep all 5 rules", memories, err)
+	}
+}
+
 // TestRecoveryCMRule_Structure tests the CM rule structure
 func TestRecoveryCMRule_Structure(t *testing.T) {
 	t.Log("RECOVERY_TEST: TestRecoveryCMRule_Structure | Testing CM rule data structure")
