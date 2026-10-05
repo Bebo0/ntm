@@ -770,7 +770,7 @@ ntm --robot-status
 ntm --robot-snapshot
 ntm --robot-plan
 ntm --robot-dashboard
-ntm --robot-markdown --md-compact
+ntm --robot-markdown --compact
 ntm --robot-terse
 ```
 
@@ -778,7 +778,7 @@ Common task-specific surfaces:
 
 ```bash
 ntm --robot-send=payments --msg="Summarize current blockers." --type=claude
-ntm --robot-ack=payments --ack-timeout=30s
+ntm --robot-ack=payments --timeout=30s
 ntm --robot-tail=payments --lines=50
 ntm --robot-mail-check --mail-project=payments --urgent-only
 ntm --robot-cass-search="authentication error"

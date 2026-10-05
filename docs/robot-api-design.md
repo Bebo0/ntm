@@ -262,7 +262,7 @@ Example: dispatch a prompt and require bounded downstream evidence rather than
 assuming that an accepted keypress was consumed.
 
 ```bash
-ntm --robot-send=payments --msg='Run focused tests and report the result.' --track --ack-timeout=30s
+ntm --robot-send=payments --msg='Run focused tests and report the result.' --track --timeout=30s
 ntm --robot-send=payments --msg='Run focused tests and report the result.' --verify-render
 ntm --robot-tail=payments --fresh --panes=1,2
 ```
