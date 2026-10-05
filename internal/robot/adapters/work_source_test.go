@@ -191,3 +191,105 @@ func TestWorkProjectionCancellationAndDependencyErrorsAreNotSourceMismatches(t *
 		t.Fatalf("cancelled collector ran: %v calls=%d", err, calls)
 	}
 }
+
+func TestWorkProjectionRejectionPreservesReceipt(t *testing.T) {
+	verifiedReady := 3
+	source := &worksource.Identity{ProjectDir: t.TempDir(), JSONLSHA256: "observed-digest"}
+	publication := &workSnapshotPublication{readOnly: true}
+	reservations := &WorkReservationVerification{State: "unavailable", Reason: "Agent Mail timeout"}
+	work := &WorkSection{
+		Available: true,
+		Ready:     []WorkItem{{ID: "ready"}},
+		Summary:   &WorkSummary{Ready: verifiedReady},
+		Triage:    &WorkTriage{ReadyCount: verifiedReady, TopRecommendation: &WorkRecommendation{ID: "ready"}},
+		Verification: &WorkVerification{
+			ProjectDir: source.ProjectDir, Source: source, Dirty: true,
+			FromCache: true, CacheCollectedAt: "2026-10-05T01:00:00Z", CacheExpiresAt: "2026-10-05T01:00:45Z",
+			CountScope: "verified_candidates", ReportedReady: 17, CandidatesObserved: 4,
+			VerifiedReady: &verifiedReady, PreviewLimit: 1, PreviewTruncated: true,
+			Excluded:     []worksource.Exclusion{{ID: "blocked", Reasons: []string{"blocked"}, BlockedBy: []string{"builder"}}},
+			Reservations: reservations, snapshot: publication,
+		},
+	}
+	cause := &worksource.StaleError{Reason: "tracker changed after collection"}
+	out := rejectWorkSource(work, cause)
+	v := out.Verification
+	if out.Available || len(out.Ready) != 0 || out.Summary.Ready != 0 || out.Triage.ReadyCount != 0 || out.Triage.TopRecommendation != nil {
+		t.Fatalf("rejection advertised ready work: %+v", out)
+	}
+	if v.CountScope != "unverified" || v.VerifiedReady != nil || v.ReasonCode != worksource.StaleCode || v.Mismatch != cause {
+		t.Fatalf("rejection retained verification authority or lost the failure: %+v", v)
+	}
+	if !reflect.DeepEqual(v.Source, source) || v.ProjectDir != source.ProjectDir || !v.Dirty || !v.FromCache ||
+		v.CacheCollectedAt != "2026-10-05T01:00:00Z" || v.CacheExpiresAt != "2026-10-05T01:00:45Z" || v.snapshot != publication {
+		t.Fatalf("rejection lost the original source/cache receipt: %+v", v)
+	}
+	if v.ReportedReady != 17 || v.CandidatesObserved != 4 || v.PreviewLimit != 1 || !v.PreviewTruncated || !reflect.DeepEqual(v.Reservations, reservations) {
+		t.Fatalf("rejection lost collection/reservation diagnostics: %+v", v)
+	}
+	wantExcluded := []worksource.Exclusion{
+		{ID: "blocked", Reasons: []string{"blocked"}, BlockedBy: []string{"builder"}},
+		{ID: "ready", Reasons: []string{"source_unverified"}},
+	}
+	if !reflect.DeepEqual(v.Excluded, wantExcluded) {
+		t.Fatalf("exclusions = %+v, want %+v", v.Excluded, wantExcluded)
+	}
+	if !work.Available || len(work.Ready) != 1 || work.Summary.Ready != verifiedReady || work.Triage.TopRecommendation == nil ||
+		work.Verification.CountScope != "verified_candidates" || work.Verification.VerifiedReady == nil || *work.Verification.VerifiedReady != verifiedReady {
+		t.Fatal("rejection mutated the original observation")
+	}
+	// Returned exclusions must not share mutable reason/blocker slices with
+	// the saved observation that another reader may still be inspecting.
+	v.Excluded[0].Reasons[0] = "changed"
+	v.Excluded[0].BlockedBy[0] = "changed"
+	if !reflect.DeepEqual(work.Verification.Excluded, wantExcluded[:1]) {
+		t.Fatal("rejected exclusions alias the original observation")
+	}
+}
+
+func TestWorkProjectionRepeatedRejectionPreservesEvidence(t *testing.T) {
+	originalMismatch := &worksource.StaleError{Reason: "original source mismatch"}
+	work := &WorkSection{
+		Available: true,
+		Ready:     []WorkItem{{ID: "ready"}},
+		Summary:   &WorkSummary{Ready: 1},
+		Verification: &WorkVerification{
+			ReportedReady: 2,
+			Excluded:      []worksource.Exclusion{{ID: "blocked", Reasons: []string{"blocked"}}},
+		},
+	}
+	first := rejectWorkSource(work, originalMismatch)
+	for _, tc := range []struct {
+		name     string
+		cause    error
+		mismatch *worksource.StaleError
+	}{
+		{name: "later cancellation", cause: context.Canceled, mismatch: originalMismatch},
+		{name: "later timeout", cause: context.DeadlineExceeded, mismatch: originalMismatch},
+		{name: "no additional error", mismatch: originalMismatch},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			out := rejectWorkSource(first, tc.cause)
+			if out.Available || len(out.Ready) != 0 || out.Summary.Ready != 0 || out.Verification.VerifiedReady != nil || out.Verification.CountScope != "unverified" {
+				t.Fatalf("repeated rejection restored readiness: %+v", out)
+			}
+			if len(out.Verification.Excluded) != 2 || !reflect.DeepEqual(out.Verification.Excluded, first.Verification.Excluded) || out.Verification.Mismatch != tc.mismatch || out.Verification.ReportedReady != 2 {
+				t.Fatalf("repeated rejection lost or duplicated evidence: %+v", out.Verification)
+			}
+		})
+	}
+	newMismatch := &worksource.StaleError{Reason: "new source mismatch"}
+	if out := rejectWorkSource(first, newMismatch); out.Verification.Mismatch != newMismatch || first.Verification.Mismatch != originalMismatch {
+		t.Fatal("new mismatch did not replace the old diagnostic without mutation")
+	}
+}
+
+func TestWorkProjectionRejectionWithoutReceipt(t *testing.T) {
+	for _, work := range []*WorkSection{nil, {Available: true, Ready: []WorkItem{{ID: "unchecked"}}}} {
+		out := rejectWorkSource(work, context.Canceled)
+		if out.Available || len(out.Ready) != 0 || out.Verification == nil || out.Verification.Source != nil ||
+			out.Verification.VerifiedReady != nil || out.Verification.CountScope != "unverified" || out.Verification.Mismatch != nil {
+			t.Fatalf("missing observation acquired verification authority: %+v", out)
+		}
+	}
+}

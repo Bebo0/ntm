@@ -284,9 +284,27 @@ func rejectWorkSource(work *WorkSection, err error) *WorkSection {
 	// Refusal must not erase the private read-only/publication identity. A
 	// cache error is still a cache read, not a fresh failed observation.
 	if work != nil && work.Verification != nil {
-		out.Verification.ProjectDir = work.Verification.ProjectDir
-		out.Verification.FromCache = work.Verification.FromCache
-		out.Verification.snapshot = work.Verification.snapshot
+		previous := work.Verification
+		out.Verification.ProjectDir = previous.ProjectDir
+		out.Verification.FromCache = previous.FromCache
+		out.Verification.snapshot = previous.snapshot
+		// Retain the rejected observation as diagnostics, not verification
+		// authority: CountScope remains unverified and VerifiedReady stays nil.
+		// In particular, a failed cache read must not acquire new timestamps.
+		out.Verification.CacheCollectedAt = previous.CacheCollectedAt
+		out.Verification.CacheExpiresAt = previous.CacheExpiresAt
+		out.Verification.Source = previous.Source
+		out.Verification.Dirty = previous.Dirty
+		out.Verification.CandidatesObserved = previous.CandidatesObserved
+		out.Verification.PreviewLimit = previous.PreviewLimit
+		out.Verification.PreviewTruncated = previous.PreviewTruncated
+		out.Verification.Reservations = previous.Reservations
+		out.Verification.Mismatch = previous.Mismatch
+		for _, exclusion := range previous.Excluded {
+			exclusion.Reasons = append([]string(nil), exclusion.Reasons...)
+			exclusion.BlockedBy = append([]string(nil), exclusion.BlockedBy...)
+			out.Verification.Excluded = append(out.Verification.Excluded, exclusion)
+		}
 	}
 	if isStaleWorkSourceError(err) {
 		out.Verification.ReasonCode = worksource.StaleCode
