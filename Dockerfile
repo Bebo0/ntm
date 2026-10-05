@@ -7,11 +7,16 @@ FROM golang:1.26.8-alpine3.24@sha256:8ac98ca534ac3f51e1f420a1dd2c15e74c75cfa0f23
 
 WORKDIR /app
 
-# Install build dependencies
+# Install build dependencies. The base images are digest-pinned; packages come
+# from that Alpine branch unpinned, because the branch keeps only its newest
+# build of each package. Exact pins (and even `~3.6` minor pins) stopped
+# resolving within weeks as tmux, ca-certificates and tzdata moved on, which
+# broke every build.
+# hadolint ignore=DL3018
 RUN apk add --no-cache \
-    git=2.54.0-r0 \
-    ca-certificates=20260611-r0 \
-    tzdata=2026b-r0
+    git \
+    ca-certificates \
+    tzdata
 
 # Copy module metadata first for better caching.
 # This repo uses a local replace for Bubble Tea, so its module files must be
@@ -43,13 +48,14 @@ RUN CGO_ENABLED=0 GOOS=linux go build \
 # Runtime stage
 FROM alpine:3.24.1@sha256:28bd5fe8b56d1bd048e5babf5b10710ebe0bae67db86916198a6eec434943f8b
 
-# Install runtime dependencies
+# Install runtime dependencies (unpinned from the pinned branch; see above).
+# hadolint ignore=DL3018
 RUN apk add --no-cache \
-    tmux=3.6b-r0 \
-    ca-certificates=20260611-r0 \
-    tzdata=2026b-r0 \
-    bash=5.3.9-r1 \
-    zsh=5.9-r7
+    tmux \
+    ca-certificates \
+    tzdata \
+    bash \
+    zsh
 
 # Create non-root user
 RUN adduser -D -g '' ntm
