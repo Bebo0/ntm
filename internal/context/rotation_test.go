@@ -569,8 +569,6 @@ func TestNewRotator(t *testing.T) {
 	}
 }
 
-
-
 func TestRotateAgentFailureEmitsRotationAlert(t *testing.T) {
 	tracker := alerts.GetGlobalTracker()
 	clearAlertTracker(tracker)
@@ -726,11 +724,6 @@ func TestManualRotate_HandoffFailurePreservesOriginalAgent(t *testing.T) {
 		})
 	}
 }
-
-// GH#251 phase 2: grok relaunch/prompt delivery is first-class, so a mixed
-// claude+grok batch now passes rotation preflight and both agents are
-// scheduled — the grok member no longer vetoes the batch.
-
 
 func TestGetHistory(t *testing.T) {
 	t.Parallel()

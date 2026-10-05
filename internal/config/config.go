@@ -722,17 +722,17 @@ func ValidateGeminiSetupConfig(cfg *GeminiSetupConfig) error {
 
 // AgentConfig defines the commands for each agent type
 type AgentConfig struct {
-	Claude      string            `toml:"claude"`
-	Codex       string            `toml:"codex"`
-	Gemini      string            `toml:"gemini"`
-	Antigravity string            `toml:"antigravity"` // Antigravity (agy) launch command — successor to the Gemini CLI
-	Grok        string            `toml:"grok"`        // Official xAI Grok Build launch command
-	Ollama      string            `toml:"ollama"`
-	Cursor      string            `toml:"cursor"`
-	Windsurf    string            `toml:"windsurf"`
-	Aider       string            `toml:"aider"`
-	Opencode    string            `toml:"oc"`      // Opencode (https://opencode.ai) launch command — see ntm#116
-	Omp         string            `toml:"omp"`     // Oh My Pi (omp) launch command; empty uses DefaultOmpCommand
+	Claude      string `toml:"claude"`
+	Codex       string `toml:"codex"`
+	Gemini      string `toml:"gemini"`
+	Antigravity string `toml:"antigravity"` // Antigravity (agy) launch command — successor to the Gemini CLI
+	Grok        string `toml:"grok"`        // Official xAI Grok Build launch command
+	Ollama      string `toml:"ollama"`
+	Cursor      string `toml:"cursor"`
+	Windsurf    string `toml:"windsurf"`
+	Aider       string `toml:"aider"`
+	Opencode    string `toml:"oc"`  // Opencode (https://opencode.ai) launch command — see ntm#116
+	Omp         string `toml:"omp"` // Oh My Pi (omp) launch command; empty uses DefaultOmpCommand
 
 	// ClaudeIsolateCredentials opts Claude panes into per-pane
 	// CLAUDE_CONFIG_DIR isolation at spawn (GH#237). Claude Code rewrites the
