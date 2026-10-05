@@ -14,7 +14,9 @@ import (
 
 	"github.com/Dicklesworthstone/ntm/internal/config"
 	"github.com/Dicklesworthstone/ntm/internal/coordinator"
+	"github.com/Dicklesworthstone/ntm/internal/events"
 	"github.com/Dicklesworthstone/ntm/internal/resilience"
+	"github.com/Dicklesworthstone/ntm/internal/robot"
 	"github.com/Dicklesworthstone/ntm/internal/state"
 	statuspkg "github.com/Dicklesworthstone/ntm/internal/status"
 	"github.com/Dicklesworthstone/ntm/internal/tmux"
@@ -309,5 +311,55 @@ func TestMonitorRemoteInvocationDoesNotCreateOwnership(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(resilience.ManifestDir(), "monitors")); !os.IsNotExist(err) {
 		t.Fatalf("remote monitor invocation touched local ownership files: %v", err)
+	}
+}
+
+// TestOpenDurableAttentionFeedPersistsBusAndActuationEvents: the internal
+// monitor publishes agent lifecycle events on its process bus, and `ntm
+// coordinator run` publishes actuation records on the global feed. Both used
+// to stay in that process (webhooks only / an in-memory feed). Through the
+// durable feed they reach the store that --robot-attention reads (bd-viwo4).
+func TestOpenDurableAttentionFeedPersistsBusAndActuationEvents(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("NTM_CONFIG", filepath.Join(dir, "config.toml"))
+	previous := robot.GetAttentionFeed()
+	t.Cleanup(func() { robot.SetAttentionFeed(previous) })
+
+	closeAttention, err := openDurableAttentionFeed()
+	if err != nil {
+		t.Fatalf("openDurableAttentionFeed: %v", err)
+	}
+	events.DefaultBus.PublishSync(events.NewWebhookEvent(events.WebhookAgentCrashed, "durable-attention", "2", "claude", "agent crashed", nil))
+	robot.GetAttentionFeed().PublishActuation(robot.ActuationRecord{
+		Session: "durable-attention",
+		Action:  "rotate",
+		Stage:   robot.ActuationStageRequest,
+		Summary: "context rotation enqueued for durable-attention__cc_2",
+	})
+	closeAttention()
+
+	store, err := state.Open(filepath.Join(dir, "state.db"))
+	if err != nil {
+		t.Fatalf("reopen state store: %v", err)
+	}
+	t.Cleanup(func() { store.Close() })
+	stored, err := store.GetAttentionEventsSince(0, 100)
+	if err != nil {
+		t.Fatalf("read attention events: %v", err)
+	}
+	var crash, actuation bool
+	for _, event := range stored {
+		if event.SessionName != "durable-attention" {
+			continue
+		}
+		switch {
+		case strings.Contains(event.Summary, "rotation enqueued"):
+			actuation = true
+		case event.Source == "event_bus.webhook" && event.Pane == "2" && event.Actionability == "action_required":
+			crash = true // the normalizer files a crash as an agent error that needs action
+		}
+	}
+	if !crash || !actuation {
+		t.Fatalf("durable store events (crash=%v actuation=%v): %+v", crash, actuation, stored)
 	}
 }

@@ -124,6 +124,14 @@ func runMonitorContext(parent context.Context, session string) (runErr error) {
 		}
 	}
 
+	// Agent crashed/restarted/rate-limited and session-ended events from this
+	// process reach the durable attention feed, not only webhooks (bd-viwo4).
+	if closeAttention, err := openDurableAttentionFeed(); err != nil {
+		slog.Default().Debug("durable attention feed unavailable", "session", session, "error", err)
+	} else {
+		defer closeAttention()
+	}
+
 	// Initialize resilience monitor
 	monitor := resilience.NewMonitor(session, manifest.ProjectDir, cfg, manifest.AutoRestart)
 

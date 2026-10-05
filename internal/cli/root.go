@@ -3528,6 +3528,33 @@ func collectStateGarbageOccasionally(store *state.Store, stamp string, interval 
 	return true
 }
 
+// openDurableAttentionFeed gives a long-lived process (the internal session
+// monitor, `ntm coordinator run`) the store-backed attention feed that robot
+// commands get in initializeRobotPersistence, and forwards this process's
+// event-bus traffic into it (bd-viwo4). Without it, actuation records
+// published here went to an in-memory feed nobody else could read, and agent
+// crashed/restarted/rate-limited and session-ended events reached webhooks
+// only, never --robot-attention or --robot-snapshot --since. The returned
+// func unsubscribes, stops the feed and closes the store.
+func openDurableAttentionFeed() (func(), error) {
+	store, err := state.Open("")
+	if err != nil {
+		return nil, fmt.Errorf("open state store for the attention feed: %w", err)
+	}
+	if err := store.Migrate(); err != nil {
+		store.Close()
+		return nil, fmt.Errorf("migrate state store for the attention feed: %w", err)
+	}
+	feed := robot.NewAttentionFeed(robot.DefaultAttentionFeedConfig(), robot.WithAttentionStore(store))
+	robot.SetAttentionFeed(feed)
+	unsubscribe := feed.SubscribeEventBus(events.DefaultBus)
+	return func() {
+		unsubscribe()
+		robot.SetAttentionFeed(nil)
+		store.Close()
+	}, nil
+}
+
 func closeRobotPersistence() {
 	if robotStateStore == nil {
 		return

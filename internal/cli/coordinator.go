@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"slices"
@@ -443,6 +444,14 @@ func runCoordinatorRun(cmd *cobra.Command, args []string, once bool) error {
 	coord := coordinator.New(session, projectKey, mailClient, coordName).
 		WithConfig(runtimeConfig).
 		WithNTMConfig(ntmConfig)
+	// The coordinator's actuation records (rotation enqueued, mail nudges,
+	// account failover) must land in the durable attention feed that other
+	// processes read, not this process's in-memory default (bd-viwo4).
+	if closeAttention, err := openDurableAttentionFeed(); err != nil {
+		slog.Default().Debug("durable attention feed unavailable", "session", session, "error", err)
+	} else {
+		defer closeAttention()
+	}
 	if once {
 		assignments, cycleErr := coord.RunCycle(cmd.Context())
 		runErr := coordinatorRunFailure(assignments, cycleErr)

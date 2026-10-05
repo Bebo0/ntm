@@ -183,6 +183,10 @@ func runServe(opts serveOptions) error {
 		robot.WithAttentionStore(stateStore),
 	))
 	feed := robot.GetAttentionFeed()
+	// Lifecycle events published in this process (agent and session events,
+	// assignment changes) reach the durable feed as well (bd-viwo4).
+	unsubscribeBus := feed.SubscribeEventBus(events.DefaultBus)
+	defer unsubscribeBus()
 
 	ptCfg := config.DefaultProcessTriageConfig()
 	if cfg != nil {
