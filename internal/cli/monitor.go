@@ -570,8 +570,9 @@ func generateEndSessionSummary(ctx context.Context, session string, lastOutputs 
 }
 
 // timelineObservationInterval is how often the internal monitor samples agent
-// states for the session timeline.
-const timelineObservationInterval = 5 * time.Second
+// states for the session timeline: the default resilience health-check
+// cadence, so the timeline adds one pane observation per agent per check.
+const timelineObservationInterval = 10 * time.Second
 
 // recordSessionTimeline records each agent's observed state transitions into
 // this process's timeline tracker until ctx ends.
