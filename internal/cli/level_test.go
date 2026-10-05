@@ -58,10 +58,18 @@ func TestRecordProficiencyUsageFeedsLevelStats(t *testing.T) {
 	// The hook itself never writes stats from a test binary.
 	root := &cobra.Command{Use: "ntm"}
 	child := &cobra.Command{Use: "status"}
-	root.AddCommand(child)
+	hidden := &cobra.Command{Use: "internal-monitor", Hidden: true}
+	completion := &cobra.Command{Use: "__complete"}
+	root.AddCommand(child, hidden, completion)
 	recordInteractiveUsage(child)
 	if after, _ := config.LoadProficiency(); after.GetUsageStats().CommandsRun != 5 {
 		t.Fatal("recordInteractiveUsage wrote stats from a test binary")
+	}
+
+	// Shell completion runs __complete on every TAB press; neither it nor
+	// hidden internal commands are the operator's usage.
+	if !isInteractiveUsage(child) || isInteractiveUsage(root) || isInteractiveUsage(hidden) || isInteractiveUsage(completion) {
+		t.Fatal("only visible subcommands count as interactive usage")
 	}
 }
 

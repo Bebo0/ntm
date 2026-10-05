@@ -5818,13 +5818,20 @@ func pluginAgentsDirForArgs(args []string) string {
 // recordInteractiveUsage feeds `ntm level`: each successful interactive
 // command counts once, and session-creating and prompt-sending commands also
 // count as such. Cobra skips post-run hooks for failed commands. Machine
-// (robot/JSON) invocations are automation, not the operator's proficiency,
-// and test binaries must not write the developer's stats.
+// (robot/JSON) invocations are automation, not the operator's proficiency;
+// hidden commands (shell completion's __complete runs on every TAB, plus
+// internal ones like internal-monitor) are not usage either; and test
+// binaries must not write the developer's stats.
 func recordInteractiveUsage(cmd *cobra.Command) {
-	if cmd == nil || !cmd.HasParent() || flag.Lookup("test.v") != nil {
+	if !isInteractiveUsage(cmd) || flag.Lookup("test.v") != nil {
 		return
 	}
 	recordProficiencyUsage(strings.TrimPrefix(cmd.CommandPath(), cmd.Root().Name()+" "))
+}
+
+// isInteractiveUsage reports whether cmd is a user-facing subcommand.
+func isInteractiveUsage(cmd *cobra.Command) bool {
+	return cmd != nil && cmd.HasParent() && !cmd.Hidden && !strings.HasPrefix(cmd.Name(), "__")
 }
 
 func recordProficiencyUsage(command string) {
