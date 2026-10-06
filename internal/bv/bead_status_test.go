@@ -258,6 +258,24 @@ func TestParseBeadClaimOutput(t *testing.T) {
 	}
 }
 
+// Under a workflow capacity soft limit br wraps update --json rows as
+// {"updated":[...],"warnings":[...]} (UpdateWithCapacityWarnings in br's
+// update.rs); the claim succeeded and must not be reported as failed.
+func TestParseBeadClaimOutputAcceptsCapacityWarningEnvelope(t *testing.T) {
+	t.Parallel()
+
+	claim, err := parseBeadClaimOutput(`{"updated":[{"id":"ntm-123","title":"Atomic assignment","status":"in_progress"}],"warnings":[{"kind":"in_progress_soft_limit","limit":3,"count":3}]}`)
+	if err != nil || claim.ID != "ntm-123" || claim.Status != "in_progress" {
+		t.Fatalf("parseBeadClaimOutput(envelope) = %+v, %v", claim, err)
+	}
+	if _, err := parseBeadClaimOutput(`{"updated":[{"id":"ntm-123","status":"open"}],"warnings":[]}`); err == nil {
+		t.Fatal("an enveloped row that is not in_progress must still fail")
+	}
+	if _, err := parseBeadClaimOutput(`{"warnings":[]}`); err == nil {
+		t.Fatal("an object without updated rows must fail")
+	}
+}
+
 func TestParseBeadClaimOutputRejectsNonClaimedState(t *testing.T) {
 	t.Parallel()
 
