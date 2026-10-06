@@ -362,12 +362,12 @@ func TestCheckpoint_Verify_RejectsSymlinkArtifactReference(t *testing.T) {
 		t.Fatalf("Symlink() failed: %v", err)
 	}
 
-	result := cp.Verify(storage)
+	result := VerifyStoredCheckpoint(storage, sessionName, checkpointID)
 	if result.FilesPresent {
 		t.Fatalf("FilesPresent = true, want false; errors: %v", result.Errors)
 	}
 	if len(result.Errors) == 0 || !strings.Contains(strings.Join(result.Errors, "\n"), "must not be a symlink") {
-		t.Fatalf("Verify() errors = %v, want symlink rejection", result.Errors)
+		t.Fatalf("VerifyStoredCheckpoint() errors = %v, want symlink rejection", result.Errors)
 	}
 }
 
@@ -394,12 +394,12 @@ func TestCheckpoint_Verify_RejectsSymlinkCheckpointDir(t *testing.T) {
 		t.Skipf("cannot create symlink: %v", err)
 	}
 
-	result := cp.Verify(storage)
+	result := VerifyStoredCheckpoint(storage, cp.SessionName, cp.ID)
 	if result.FilesPresent {
 		t.Fatalf("FilesPresent = true, want false; errors: %v", result.Errors)
 	}
 	if len(result.Errors) == 0 || !strings.Contains(strings.Join(result.Errors, "\n"), "checkpoint path must not be a symlink") {
-		t.Fatalf("Verify() errors = %v, want checkpoint symlink rejection", result.Errors)
+		t.Fatalf("VerifyStoredCheckpoint() errors = %v, want checkpoint symlink rejection", result.Errors)
 	}
 }
 
@@ -479,7 +479,7 @@ func TestCheckpoint_FullVerify(t *testing.T) {
 		t.Fatalf("Failed to save checkpoint: %v", err)
 	}
 
-	result := cp.Verify(storage)
+	result := VerifyStoredCheckpoint(storage, sessionName, checkpointID)
 
 	if !result.Valid {
 		t.Errorf("Valid = false, want true; errors: %v", result.Errors)
@@ -495,537 +495,53 @@ func TestCheckpoint_FullVerify(t *testing.T) {
 	}
 }
 
-func TestCheckpoint_GenerateManifest(t *testing.T) {
-	tmpDir, err := os.MkdirTemp("", "ntm-manifest-test")
-	if err != nil {
-		t.Fatalf("Failed to create temp dir: %v", err)
-	}
-	defer os.RemoveAll(tmpDir)
-
-	storage := NewStorageWithDir(tmpDir)
-
-	sessionName := "test-session"
-	checkpointID := "20251210-143052-manifest"
-
-	cp := &Checkpoint{
-		Version:     CurrentVersion,
-		ID:          checkpointID,
-		SessionName: sessionName,
-		CreatedAt:   time.Now(),
-		Session: SessionState{
-			Panes: []PaneState{
-				{ID: "%0", Index: 0},
-			},
-		},
-		PaneCount: 1,
-	}
-
-	// Save the checkpoint
-	if err := storage.Save(cp); err != nil {
-		t.Fatalf("Failed to save checkpoint: %v", err)
-	}
-
-	manifest, err := cp.GenerateManifest(storage)
-	if err != nil {
-		t.Fatalf("GenerateManifest failed: %v", err)
-	}
-
-	// Should have at least metadata.json and session.json
-	if len(manifest.Files) < 2 {
-		t.Errorf("Expected at least 2 files in manifest, got %d", len(manifest.Files))
-	}
-
-	if _, ok := manifest.Files[MetadataFile]; !ok {
-		t.Error("Missing metadata.json in manifest")
-	}
-	if _, ok := manifest.Files[SessionFile]; !ok {
-		t.Error("Missing session.json in manifest")
-	}
-	if manifest.CreatedAt == "" {
-		t.Fatal("CreatedAt is empty, want generation timestamp")
-	}
-	if _, err := time.Parse(time.RFC3339Nano, manifest.CreatedAt); err != nil {
-		t.Fatalf("CreatedAt = %q, want RFC3339 timestamp: %v", manifest.CreatedAt, err)
-	}
-
-	// Verify the hashes are valid hex strings
-	for path, hash := range manifest.Files {
-		if len(hash) != 64 { // SHA256 = 32 bytes = 64 hex chars
-			t.Errorf("Invalid hash length for %s: %d", path, len(hash))
-		}
-	}
-}
-
-func TestCheckpoint_GenerateManifest_WithScrollbackAndPatch(t *testing.T) {
-	tmpDir, err := os.MkdirTemp("", "ntm-manifest-full-test")
-	if err != nil {
-		t.Fatalf("Failed to create temp dir: %v", err)
-	}
-	defer os.RemoveAll(tmpDir)
-
-	storage := NewStorageWithDir(tmpDir)
-
-	sessionName := "test-session"
-	checkpointID := "20251210-143052-manifest-full"
-
-	cp := &Checkpoint{
-		Version:     CurrentVersion,
-		ID:          checkpointID,
-		SessionName: sessionName,
-		CreatedAt:   time.Now(),
-		Session: SessionState{
-			Panes: []PaneState{
-				{ID: "%0", Index: 0},
-				{ID: "%1", Index: 1},
-			},
-		},
-		PaneCount: 2,
-	}
-
-	// Save the checkpoint
-	if err := storage.Save(cp); err != nil {
-		t.Fatalf("Failed to save checkpoint: %v", err)
-	}
-
-	dir := storage.CheckpointDir(sessionName, checkpointID)
-
-	// Create scrollback files
-	panesDir := filepath.Join(dir, "panes")
-	if err := os.MkdirAll(panesDir, 0755); err != nil {
-		t.Fatalf("Failed to create panes dir: %v", err)
-	}
-	if err := os.WriteFile(filepath.Join(dir, "panes/pane__0.txt"), []byte("scrollback 0"), 0644); err != nil {
-		t.Fatalf("Failed to write scrollback 0: %v", err)
-	}
-	if err := os.WriteFile(filepath.Join(dir, "panes/pane__1.txt"), []byte("scrollback 1"), 0644); err != nil {
-		t.Fatalf("Failed to write scrollback 1: %v", err)
-	}
-
-	// Create git patch file
-	if err := os.WriteFile(filepath.Join(dir, "changes.patch"), []byte("diff --git a/foo"), 0644); err != nil {
-		t.Fatalf("Failed to write patch: %v", err)
-	}
-	if err := os.WriteFile(filepath.Join(dir, GitStatusFile), []byte("On branch main\nnothing to commit"), 0644); err != nil {
-		t.Fatalf("Failed to write git status: %v", err)
-	}
-	cp.Session.Panes[0].ScrollbackFile = "panes/pane__0.txt"
-	cp.Session.Panes[1].ScrollbackFile = "panes/pane__1.txt"
-	cp.Git.PatchFile = "changes.patch"
-	cp.Git.StatusFile = GitStatusFile
-	if err := storage.Save(cp); err != nil {
-		t.Fatalf("Failed to save checkpoint with artifact references: %v", err)
-	}
-
-	manifest, err := cp.GenerateManifest(storage)
-	if err != nil {
-		t.Fatalf("GenerateManifest failed: %v", err)
-	}
-
-	// Should have metadata.json, session.json, 2 scrollback files, 1 patch, 1 git status
-	if len(manifest.Files) < 6 {
-		t.Errorf("Expected at least 6 files in manifest, got %d: %v", len(manifest.Files), manifest.Files)
-	}
-
-	if _, ok := manifest.Files["panes/pane__0.txt"]; !ok {
-		t.Error("Missing panes/pane__0.txt in manifest")
-	}
-	if _, ok := manifest.Files["panes/pane__1.txt"]; !ok {
-		t.Error("Missing panes/pane__1.txt in manifest")
-	}
-	if _, ok := manifest.Files["changes.patch"]; !ok {
-		t.Error("Missing changes.patch in manifest")
-	}
-	if _, ok := manifest.Files[GitStatusFile]; !ok {
-		t.Errorf("Missing %s in manifest", GitStatusFile)
-	}
-}
-
-func TestCheckpoint_GenerateManifest_NoPanes(t *testing.T) {
-	tmpDir, err := os.MkdirTemp("", "ntm-manifest-nopanes-test")
-	if err != nil {
-		t.Fatalf("Failed to create temp dir: %v", err)
-	}
-	defer os.RemoveAll(tmpDir)
-
-	storage := NewStorageWithDir(tmpDir)
-
-	sessionName := "test-session"
-	checkpointID := "20251210-143052-manifest-nopanes"
-
-	cp := &Checkpoint{
-		Version:     CurrentVersion,
-		ID:          checkpointID,
-		SessionName: sessionName,
-		CreatedAt:   time.Now(),
-		Session:     SessionState{Panes: []PaneState{}},
-	}
-
-	if err := storage.Save(cp); err != nil {
-		t.Fatalf("Failed to save checkpoint: %v", err)
-	}
-
-	manifest, err := cp.GenerateManifest(storage)
-	if err != nil {
-		t.Fatalf("GenerateManifest failed: %v", err)
-	}
-
-	// Should only have metadata and session files
-	if len(manifest.Files) > 2 {
-		t.Errorf("Expected at most 2 files in manifest for no panes, got %d", len(manifest.Files))
-	}
-}
-
-func TestCheckpoint_GenerateManifest_EmptyScrollbackFile(t *testing.T) {
-	tmpDir, err := os.MkdirTemp("", "ntm-manifest-empty-scroll")
-	if err != nil {
-		t.Fatalf("Failed to create temp dir: %v", err)
-	}
-	defer os.RemoveAll(tmpDir)
-
-	storage := NewStorageWithDir(tmpDir)
-
-	sessionName := "test-session"
-	checkpointID := "20251210-143052-manifest-empty"
-
-	// Pane with empty ScrollbackFile string - should be skipped
-	cp := &Checkpoint{
-		Version:     CurrentVersion,
-		ID:          checkpointID,
-		SessionName: sessionName,
-		CreatedAt:   time.Now(),
-		Session: SessionState{
-			Panes: []PaneState{
-				{ID: "%0", Index: 0, ScrollbackFile: ""}, // empty
-			},
-		},
-		PaneCount: 1,
-	}
-
-	if err := storage.Save(cp); err != nil {
-		t.Fatalf("Failed to save checkpoint: %v", err)
-	}
-
-	manifest, err := cp.GenerateManifest(storage)
-	if err != nil {
-		t.Fatalf("GenerateManifest failed: %v", err)
-	}
-
-	// Should only have metadata and session
-	if len(manifest.Files) > 2 {
-		t.Errorf("Expected at most 2 files for empty scrollback, got %d", len(manifest.Files))
-	}
-}
-
-func TestCheckpoint_GenerateManifest_RejectsSymlinkCanonicalFiles(t *testing.T) {
+// The verify path refuses symlinked canonical files: a checkpoint must not
+// read metadata or session state from outside its own directory.
+func TestVerifyStoredCheckpoint_RejectsSymlinkCanonicalFiles(t *testing.T) {
 	storage := NewStorageWithDir(t.TempDir())
 	sessionName := "test-session"
 
-	baseCheckpoint := &Checkpoint{
-		Version:     CurrentVersion,
-		ID:          "20251210-143052-manifest-symlink",
-		SessionName: sessionName,
-		CreatedAt:   time.Now(),
-		Session: SessionState{
-			Panes: []PaneState{{ID: "%0", Index: 0}},
-		},
-		PaneCount: 1,
+	for _, symlinked := range []string{MetadataFile, SessionFile} {
+		t.Run(symlinked, func(t *testing.T) {
+			checkpointID := "20251210-143052-verify-symlink-" + strings.TrimSuffix(symlinked, ".json")
+			cp := &Checkpoint{
+				Version:     CurrentVersion,
+				ID:          checkpointID,
+				SessionName: sessionName,
+				CreatedAt:   time.Now(),
+			}
+			cpDir := storage.CheckpointDir(sessionName, checkpointID)
+			if err := os.MkdirAll(cpDir, 0755); err != nil {
+				t.Fatalf("MkdirAll() failed: %v", err)
+			}
+			outsidePath := filepath.Join(t.TempDir(), "outside-"+symlinked)
+			var outside any = cp
+			if symlinked == SessionFile {
+				outside = cp.Session
+			}
+			if err := writeJSON(outsidePath, outside); err != nil {
+				t.Fatalf("writeJSON(outside) failed: %v", err)
+			}
+			if symlinked == MetadataFile {
+				if err := writeJSON(filepath.Join(cpDir, SessionFile), cp.Session); err != nil {
+					t.Fatalf("writeJSON(session) failed: %v", err)
+				}
+			} else if err := writeJSON(filepath.Join(cpDir, MetadataFile), cp); err != nil {
+				t.Fatalf("writeJSON(metadata) failed: %v", err)
+			}
+			if err := os.Symlink(outsidePath, filepath.Join(cpDir, symlinked)); err != nil {
+				t.Fatalf("Symlink() failed: %v", err)
+			}
+
+			result := VerifyStoredCheckpoint(storage, sessionName, checkpointID)
+			if result.Valid || result.FilesPresent {
+				t.Fatalf("valid=%v files_present=%v, want a symlinked %s refused", result.Valid, result.FilesPresent, symlinked)
+			}
+			if !strings.Contains(strings.Join(result.Errors, "\n"), "must not be a symlink") {
+				t.Fatalf("errors = %v, want symlink rejection", result.Errors)
+			}
+		})
 	}
-
-	t.Run("metadata", func(t *testing.T) {
-		checkpointID := "20251210-143052-manifest-symlink-metadata"
-		cp := *baseCheckpoint
-		cp.ID = checkpointID
-
-		cpDir := storage.CheckpointDir(sessionName, checkpointID)
-		if err := os.MkdirAll(cpDir, 0755); err != nil {
-			t.Fatalf("MkdirAll() failed: %v", err)
-		}
-		outsidePath := filepath.Join(t.TempDir(), "outside-metadata.json")
-		if err := writeJSON(outsidePath, &cp); err != nil {
-			t.Fatalf("writeJSON(outside metadata) failed: %v", err)
-		}
-		if err := os.Symlink(outsidePath, filepath.Join(cpDir, MetadataFile)); err != nil {
-			t.Fatalf("Symlink() failed: %v", err)
-		}
-		if err := writeJSON(filepath.Join(cpDir, SessionFile), cp.Session); err != nil {
-			t.Fatalf("writeJSON(session) failed: %v", err)
-		}
-
-		_, err := cp.GenerateManifest(storage)
-		if err == nil {
-			t.Fatal("GenerateManifest() error = nil, want symlink rejection")
-		}
-		if !strings.Contains(err.Error(), "must not be a symlink") {
-			t.Fatalf("GenerateManifest() error = %v, want symlink rejection", err)
-		}
-	})
-
-	t.Run("session", func(t *testing.T) {
-		checkpointID := "20251210-143052-manifest-symlink-session"
-		cp := *baseCheckpoint
-		cp.ID = checkpointID
-
-		cpDir := storage.CheckpointDir(sessionName, checkpointID)
-		if err := os.MkdirAll(cpDir, 0755); err != nil {
-			t.Fatalf("MkdirAll() failed: %v", err)
-		}
-		outsidePath := filepath.Join(t.TempDir(), "outside-session.json")
-		if err := writeJSON(outsidePath, cp.Session); err != nil {
-			t.Fatalf("writeJSON(outside session) failed: %v", err)
-		}
-		if err := writeJSON(filepath.Join(cpDir, MetadataFile), &cp); err != nil {
-			t.Fatalf("writeJSON(metadata) failed: %v", err)
-		}
-		if err := os.Symlink(outsidePath, filepath.Join(cpDir, SessionFile)); err != nil {
-			t.Fatalf("Symlink() failed: %v", err)
-		}
-
-		_, err := cp.GenerateManifest(storage)
-		if err == nil {
-			t.Fatal("GenerateManifest() error = nil, want symlink rejection")
-		}
-		if !strings.Contains(err.Error(), "must not be a symlink") {
-			t.Fatalf("GenerateManifest() error = %v, want symlink rejection", err)
-		}
-	})
-}
-
-func TestCheckpoint_VerifyManifest(t *testing.T) {
-	tmpDir, err := os.MkdirTemp("", "ntm-verify-manifest-test")
-	if err != nil {
-		t.Fatalf("Failed to create temp dir: %v", err)
-	}
-	defer os.RemoveAll(tmpDir)
-
-	storage := NewStorageWithDir(tmpDir)
-
-	sessionName := "test-session"
-	checkpointID := "20251210-143052-verify-manifest"
-
-	cp := &Checkpoint{
-		Version:     CurrentVersion,
-		ID:          checkpointID,
-		SessionName: sessionName,
-		CreatedAt:   time.Now(),
-		Session: SessionState{
-			Panes: []PaneState{{ID: "%0", Index: 0}},
-		},
-		PaneCount: 1,
-	}
-
-	// Save the checkpoint
-	if err := storage.Save(cp); err != nil {
-		t.Fatalf("Failed to save checkpoint: %v", err)
-	}
-
-	// Generate manifest
-	manifest, err := cp.GenerateManifest(storage)
-	if err != nil {
-		t.Fatalf("GenerateManifest failed: %v", err)
-	}
-
-	t.Run("valid manifest", func(t *testing.T) {
-		result := cp.VerifyManifest(storage, manifest)
-		if !result.Valid {
-			t.Errorf("Valid = false, want true; errors: %v", result.Errors)
-		}
-		if !result.ChecksumsValid {
-			t.Error("ChecksumsValid = false, want true")
-		}
-		if !result.SchemaValid || !result.FilesPresent || !result.ConsistencyValid {
-			t.Fatalf("valid manifest returned inconsistent flags: schema=%v files=%v consistency=%v", result.SchemaValid, result.FilesPresent, result.ConsistencyValid)
-		}
-	})
-
-	t.Run("tampered file", func(t *testing.T) {
-		// Modify a file after generating manifest
-		metaPath := filepath.Join(storage.CheckpointDir(sessionName, checkpointID), MetadataFile)
-		if err := os.WriteFile(metaPath, []byte("tampered content"), 0644); err != nil {
-			t.Fatalf("Failed to tamper file: %v", err)
-		}
-
-		result := cp.VerifyManifest(storage, manifest)
-		if result.Valid {
-			t.Error("Valid = true, want false for tampered file")
-		}
-		if result.ChecksumsValid {
-			t.Error("ChecksumsValid = true, want false for tampered file")
-		}
-	})
-}
-
-func TestCheckpoint_VerifyManifest_RejectsSymlinkCanonicalFiles(t *testing.T) {
-	storage := NewStorageWithDir(t.TempDir())
-	sessionName := "test-session"
-	checkpointID := "20251210-143052-verify-symlink"
-
-	cp := &Checkpoint{
-		Version:     CurrentVersion,
-		ID:          checkpointID,
-		SessionName: sessionName,
-		CreatedAt:   time.Now(),
-		Session: SessionState{
-			Panes: []PaneState{{ID: "%0", Index: 0}},
-		},
-		PaneCount: 1,
-	}
-
-	cpDir := storage.CheckpointDir(sessionName, checkpointID)
-	if err := os.MkdirAll(cpDir, 0755); err != nil {
-		t.Fatalf("MkdirAll() failed: %v", err)
-	}
-	outsidePath := filepath.Join(t.TempDir(), "outside-metadata.json")
-	if err := writeJSON(outsidePath, &cp); err != nil {
-		t.Fatalf("writeJSON(outside metadata) failed: %v", err)
-	}
-	if err := os.Symlink(outsidePath, filepath.Join(cpDir, MetadataFile)); err != nil {
-		t.Fatalf("Symlink() failed: %v", err)
-	}
-	sessionPath := filepath.Join(cpDir, SessionFile)
-	if err := writeJSON(sessionPath, cp.Session); err != nil {
-		t.Fatalf("writeJSON(session) failed: %v", err)
-	}
-
-	sessionHash, err := hashFile(sessionPath)
-	if err != nil {
-		t.Fatalf("hashFile(session) failed: %v", err)
-	}
-	outsideHash, err := hashFile(outsidePath)
-	if err != nil {
-		t.Fatalf("hashFile(outside metadata) failed: %v", err)
-	}
-	manifest := &FileManifest{
-		Files: map[string]string{
-			MetadataFile: outsideHash,
-			SessionFile:  sessionHash,
-		},
-	}
-
-	result := cp.VerifyManifest(storage, manifest)
-	if result.Valid {
-		t.Fatalf("VerifyManifest() unexpectedly reported valid")
-	}
-	if result.FilesPresent {
-		t.Fatal("VerifyManifest() reported symlinked manifest file as present")
-	}
-	if len(result.Errors) == 0 || !strings.Contains(strings.Join(result.Errors, "\n"), "must not be a symlink") {
-		t.Fatalf("VerifyManifest() errors = %v, want symlink rejection", result.Errors)
-	}
-}
-
-func TestCheckpoint_QuickCheck(t *testing.T) {
-	tmpDir, err := os.MkdirTemp("", "ntm-quickcheck-test")
-	if err != nil {
-		t.Fatalf("Failed to create temp dir: %v", err)
-	}
-	defer os.RemoveAll(tmpDir)
-
-	storage := NewStorageWithDir(tmpDir)
-
-	sessionName := "test-session"
-	checkpointID := "20251210-143052-quickcheck"
-
-	cp := &Checkpoint{
-		Version:     CurrentVersion,
-		ID:          checkpointID,
-		SessionName: sessionName,
-		CreatedAt:   time.Now(),
-	}
-
-	// Save the checkpoint
-	if err := storage.Save(cp); err != nil {
-		t.Fatalf("Failed to save checkpoint: %v", err)
-	}
-
-	// QuickCheck should pass
-	if err := cp.QuickCheck(storage); err != nil {
-		t.Errorf("QuickCheck failed: %v", err)
-	}
-
-	// QuickCheck should fail if the canonical session state file is missing.
-	sessionPath := filepath.Join(storage.CheckpointDir(sessionName, checkpointID), SessionFile)
-	if err := os.Remove(sessionPath); err != nil {
-		t.Fatalf("Failed to remove session file: %v", err)
-	}
-	if err := cp.QuickCheck(storage); err == nil {
-		t.Error("QuickCheck should fail when session.json is missing")
-	}
-
-	// QuickCheck with invalid version
-	cp.Version = 0
-	if err := cp.QuickCheck(storage); err == nil {
-		t.Error("QuickCheck should fail with version 0")
-	}
-}
-
-func TestCheckpoint_QuickCheck_RejectsSymlinkCanonicalFiles(t *testing.T) {
-	storage := NewStorageWithDir(t.TempDir())
-	sessionName := "test-session"
-
-	baseCheckpoint := &Checkpoint{
-		Version:     CurrentVersion,
-		ID:          "20251210-143052-quickcheck-symlink",
-		SessionName: sessionName,
-		CreatedAt:   time.Now(),
-	}
-
-	t.Run("metadata", func(t *testing.T) {
-		checkpointID := "20251210-143052-quickcheck-symlink-metadata"
-		cp := *baseCheckpoint
-		cp.ID = checkpointID
-
-		cpDir := storage.CheckpointDir(sessionName, checkpointID)
-		if err := os.MkdirAll(cpDir, 0755); err != nil {
-			t.Fatalf("MkdirAll() failed: %v", err)
-		}
-		outsidePath := filepath.Join(t.TempDir(), "outside-metadata.json")
-		if err := writeJSON(outsidePath, &cp); err != nil {
-			t.Fatalf("writeJSON(outside metadata) failed: %v", err)
-		}
-		if err := os.Symlink(outsidePath, filepath.Join(cpDir, MetadataFile)); err != nil {
-			t.Fatalf("Symlink() failed: %v", err)
-		}
-		if err := writeJSON(filepath.Join(cpDir, SessionFile), cp.Session); err != nil {
-			t.Fatalf("writeJSON(session) failed: %v", err)
-		}
-
-		err := cp.QuickCheck(storage)
-		if err == nil {
-			t.Fatal("QuickCheck() error = nil, want symlink rejection")
-		}
-		if !strings.Contains(err.Error(), "invalid metadata.json") || !strings.Contains(err.Error(), "must not be a symlink") {
-			t.Fatalf("QuickCheck() error = %v, want invalid metadata symlink error", err)
-		}
-	})
-
-	t.Run("session", func(t *testing.T) {
-		checkpointID := "20251210-143052-quickcheck-symlink-session"
-		cp := *baseCheckpoint
-		cp.ID = checkpointID
-
-		cpDir := storage.CheckpointDir(sessionName, checkpointID)
-		if err := os.MkdirAll(cpDir, 0755); err != nil {
-			t.Fatalf("MkdirAll() failed: %v", err)
-		}
-		outsidePath := filepath.Join(t.TempDir(), "outside-session.json")
-		if err := writeJSON(outsidePath, cp.Session); err != nil {
-			t.Fatalf("writeJSON(outside session) failed: %v", err)
-		}
-		if err := writeJSON(filepath.Join(cpDir, MetadataFile), &cp); err != nil {
-			t.Fatalf("writeJSON(metadata) failed: %v", err)
-		}
-		if err := os.Symlink(outsidePath, filepath.Join(cpDir, SessionFile)); err != nil {
-			t.Fatalf("Symlink() failed: %v", err)
-		}
-
-		err := cp.QuickCheck(storage)
-		if err == nil {
-			t.Fatal("QuickCheck() error = nil, want symlink rejection")
-		}
-		if !strings.Contains(err.Error(), "invalid session.json") || !strings.Contains(err.Error(), "must not be a symlink") {
-			t.Fatalf("QuickCheck() error = %v, want invalid session symlink error", err)
-		}
-	})
 }
 
 func TestVerifyAll(t *testing.T) {

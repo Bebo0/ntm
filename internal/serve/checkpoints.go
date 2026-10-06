@@ -96,7 +96,6 @@ type VerifyCheckpointResponse struct {
 	Valid            bool              `json:"valid"`
 	SchemaValid      bool              `json:"schema_valid"`
 	FilesPresent     bool              `json:"files_present"`
-	ChecksumsValid   bool              `json:"checksums_valid"`
 	ConsistencyValid bool              `json:"consistency_valid"`
 	Errors           []string          `json:"errors,omitempty"`
 	Warnings         []string          `json:"warnings,omitempty"`
@@ -513,7 +512,6 @@ func (s *Server) handleVerifyCheckpoint(w http.ResponseWriter, r *http.Request) 
 		"valid":             result.Valid,
 		"schema_valid":      result.SchemaValid,
 		"files_present":     result.FilesPresent,
-		"checksums_valid":   result.ChecksumsValid,
 		"consistency_valid": result.ConsistencyValid,
 		"errors":            result.Errors,
 		"warnings":          result.Warnings,

@@ -296,7 +296,7 @@ func TestIntegrity_ReportsGitSkipReason(t *testing.T) {
 	if err := storage.Save(cp); err != nil {
 		t.Fatalf("Save: %v", err)
 	}
-	result := cp.Verify(storage)
+	result := VerifyStoredCheckpoint(storage, cp.SessionName, cp.ID)
 	if result.Details["has_git_state"] != "false" {
 		t.Fatalf("has_git_state = %q, want false", result.Details["has_git_state"])
 	}
@@ -320,7 +320,10 @@ func TestIntegrity_ReportsGitSkipReason(t *testing.T) {
 	cp.Git = GitState{SkipReason: GitSkipDisabled}
 	cp.WorkingDirError = ""
 	cp.WorkingDir = t.TempDir()
-	result = cp.Verify(storage)
+	if err := storage.Save(cp); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+	result = VerifyStoredCheckpoint(storage, cp.SessionName, cp.ID)
 	if result.Details["git_skip_reason"] != GitSkipDisabled {
 		t.Fatalf("git_skip_reason = %q, want %q", result.Details["git_skip_reason"], GitSkipDisabled)
 	}

@@ -63,12 +63,6 @@ internal/caut/models.go:ProviderPayload.GetAccountEmail	bd-ld4j2	reachable only 
 internal/caut/models.go:ProviderPayload.GetWindowMinutes	bd-ld4j2	reachable only through RTA's reflection rule at the 2026-10-05 baseline; wire it (surface + behavioral test) or delete it
 internal/caut/models.go:ProviderPayload.HasUsageData	bd-ld4j2	reachable only through RTA's reflection rule at the 2026-10-05 baseline; wire it (surface + behavioral test) or delete it
 internal/caut/models.go:ProviderPayload.IsRateLimited	bd-ld4j2	reachable only through RTA's reflection rule at the 2026-10-05 baseline; wire it (surface + behavioral test) or delete it
-internal/checkpoint/integrity.go:Checkpoint.GenerateManifest	bd-ld4j2	reachable only through RTA's reflection rule at the 2026-10-05 baseline; wire it (surface + behavioral test) or delete it
-internal/checkpoint/integrity.go:Checkpoint.QuickCheck	bd-ld4j2	reachable only through RTA's reflection rule at the 2026-10-05 baseline; wire it (surface + behavioral test) or delete it
-internal/checkpoint/integrity.go:Checkpoint.Verify	bd-ld4j2	reachable only through RTA's reflection rule at the 2026-10-05 baseline; wire it (surface + behavioral test) or delete it
-internal/checkpoint/integrity.go:Checkpoint.VerifyManifest	bd-ld4j2	reachable only through RTA's reflection rule at the 2026-10-05 baseline; wire it (surface + behavioral test) or delete it
-internal/checkpoint/integrity.go:hashDisplayPrefix	bd-ld4j2	reachable only through RTA's reflection rule at the 2026-10-05 baseline; wire it (surface + behavioral test) or delete it
-internal/checkpoint/integrity.go:hashFile	bd-ld4j2	reachable only through RTA's reflection rule at the 2026-10-05 baseline; wire it (surface + behavioral test) or delete it
 internal/checkpoint/storage.go:Storage.CheckpointDir	bd-ld4j2	reachable only through RTA's reflection rule at the 2026-10-05 baseline; wire it (surface + behavioral test) or delete it
 internal/checkpoint/storage.go:Storage.Exists	bd-ld4j2	reachable only through RTA's reflection rule at the 2026-10-05 baseline; wire it (surface + behavioral test) or delete it
 internal/checkpoint/storage.go:Storage.GitPatchPath	bd-ld4j2	reachable only through RTA's reflection rule at the 2026-10-05 baseline; wire it (surface + behavioral test) or delete it
