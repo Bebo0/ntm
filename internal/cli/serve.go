@@ -187,7 +187,10 @@ func runServe(opts serveOptions) error {
 	// assignment changes) reach the durable feed as well (bd-viwo4).
 	unsubscribeBus := feed.SubscribeEventBus(events.DefaultBus)
 	busEventsPersistedLive.Store(true)
-	defer unsubscribeBus()
+	defer func() {
+		drainEvents()
+		unsubscribeBus()
+	}()
 
 	ptCfg := config.DefaultProcessTriageConfig()
 	if cfg != nil {

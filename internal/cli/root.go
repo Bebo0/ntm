@@ -3546,9 +3546,19 @@ func openDurableAttentionFeed() (func(), error) {
 	unsubscribe := feed.SubscribeEventBus(events.DefaultBus)
 	busEventsPersistedLive.Store(true)
 	return func() {
+		drainEvents()
 		unsubscribe()
 		closeFeed()
 	}, nil
+}
+
+// drainEvents waits, bounded, until the events this process emitted are on the
+// bus and the handlers they started have returned. A process unsubscribing its
+// durable feed calls it first: the monitor's session-ended event is emitted
+// right before it returns, and would otherwise be lost in the async emitter.
+func drainEvents() {
+	events.DefaultEmitter().Flush(emittedEventsFlushTimeout)
+	events.DefaultBus.WaitHandlers(emittedEventsFlushTimeout)
 }
 
 // openStoreAttentionFeed installs a store-backed attention feed as the global

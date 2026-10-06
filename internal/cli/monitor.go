@@ -186,8 +186,9 @@ func runMonitorContext(parent context.Context, session string) (runErr error) {
 	}
 
 	// Context pressure: the producer behind --robot-wait
-	// --condition=context_hot (bd-13qsw). It stops before the feed closes.
-	if durableAttention && cfg != nil && cfg.Alerts.ContextWarningThreshold > 0 {
+	// --condition=context_hot (bd-13qsw). It honors [alerts] like the context
+	// warning alert does, and stops before the feed closes.
+	if durableAttention && cfg != nil && cfg.Alerts.Enabled && cfg.Alerts.ContextWarningThreshold > 0 {
 		watchCtx, stopWatching := context.WithCancel(ctx)
 		watched := make(chan struct{})
 		go func() {

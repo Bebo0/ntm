@@ -64,7 +64,9 @@ func main() {
 
 	// RTA's call graph has an edge for every static, dynamic and interface
 	// call it resolved; what it reaches only by its reflection rule has none.
+	// A generic function is live when any of its instantiations is called.
 	called := make(map[*ssa.Function]bool)
+	calledGeneric := make(map[*ssa.Function]bool) // origins with a called instantiation
 	queue := append([]*ssa.Function(nil), roots...)
 	for len(queue) > 0 {
 		fn := queue[len(queue)-1]
@@ -73,6 +75,9 @@ func main() {
 			continue
 		}
 		called[fn] = true
+		if origin := fn.Origin(); origin != nil {
+			calledGeneric[origin] = true
+		}
 		if node := res.CallGraph.Nodes[fn]; node != nil {
 			for _, edge := range node.Out {
 				queue = append(queue, edge.Callee.Func)
@@ -93,7 +98,7 @@ func main() {
 		if fn.Origin() != nil {
 			origin = fn.Origin()
 		}
-		if called[origin] || origin.Synthetic != "" || origin.Pkg == nil {
+		if called[origin] || calledGeneric[origin] || origin.Synthetic != "" || origin.Pkg == nil {
 			continue
 		}
 		if !strings.HasPrefix(origin.Pkg.Pkg.Path(), *filter) {

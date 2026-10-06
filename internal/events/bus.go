@@ -41,6 +41,7 @@ type EventBus struct {
 	historySize int
 	historyMu   sync.RWMutex
 	handlerSem  chan struct{} // semaphore to limit asynchronously spawned handlers
+	inflight    atomic.Int64  // handlers Publish started on goroutines, not yet returned
 }
 
 // NewEventBus creates a new event bus with the specified history size
@@ -128,14 +129,31 @@ func (b *EventBus) Publish(event BusEvent) {
 		}
 
 		// The acquired slot bounds event-bus-owned handler goroutines.
+		b.inflight.Add(1)
 		go func(h EventHandler) {
 			defer func() {
 				// Release semaphore slot
 				<-b.handlerSem
+				b.inflight.Add(-1)
 			}()
 			invokeEventHandler(h, event, "handler")
 		}(entry.handler)
 	}
+}
+
+// WaitHandlers waits until the handlers Publish started on goroutines have
+// returned, or timeout passes, and reports whether they all did. A process
+// about to unsubscribe a consumer (a webhook bridge, a durable attention feed)
+// calls it so events already published still reach that consumer.
+func (b *EventBus) WaitHandlers(timeout time.Duration) bool {
+	deadline := time.Now().Add(timeout)
+	for b.inflight.Load() > 0 {
+		if time.Now().After(deadline) {
+			return false
+		}
+		time.Sleep(time.Millisecond)
+	}
+	return true
 }
 
 // PublishSync sends an event and waits for all handlers to complete

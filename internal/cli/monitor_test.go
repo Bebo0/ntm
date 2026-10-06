@@ -369,6 +369,40 @@ func TestOpenDurableAttentionFeedPersistsBusAndActuationEvents(t *testing.T) {
 	}
 }
 
+// The monitor emits its session-ended event through the async emitter right
+// before it returns; closing the durable feed must not drop it.
+func TestDurableAttentionFeedCloseDeliversEventsEmittedJustBefore(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("NTM_CONFIG", filepath.Join(dir, "config.toml"))
+	previous := robot.GetAttentionFeed()
+	t.Cleanup(func() { robot.SetAttentionFeed(previous) })
+	wasLive := busEventsPersistedLive.Load()
+	t.Cleanup(func() { busEventsPersistedLive.Store(wasLive) })
+
+	closeAttention, err := openDurableAttentionFeed()
+	if err != nil {
+		t.Fatalf("openDurableAttentionFeed: %v", err)
+	}
+	events.DefaultEmitter().Emit(events.NewWebhookEvent(events.WebhookSessionEnded, "close-drain", "", "", "Session close-drain ended", nil))
+	closeAttention()
+
+	store, err := state.Open(filepath.Join(dir, "state.db"))
+	if err != nil {
+		t.Fatalf("reopen state store: %v", err)
+	}
+	t.Cleanup(func() { store.Close() })
+	stored, err := store.GetAttentionEventsSince(0, 100)
+	if err != nil {
+		t.Fatalf("read attention events: %v", err)
+	}
+	for _, event := range stored {
+		if event.SessionName == "close-drain" && strings.Contains(event.Summary, "session ended") {
+			return
+		}
+	}
+	t.Fatalf("session-ended event emitted just before close was not stored: %+v", stored)
+}
+
 // A short-lived command's webhook events reach the durable feed at exit: the
 // emitter publishes asynchronously, and the process used to exit with them
 // (bd-viwo4). A process whose feed subscribed live skips the replay, so nothing

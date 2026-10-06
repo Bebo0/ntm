@@ -1857,9 +1857,15 @@ func (f *AttentionFeed) PublishContextPressure(session string, panes []tmux.Pane
 
 // NewContextPressureAttentionEvent describes one agent pane at or above the
 // context warning threshold. Usage at or above
-// attentionContextHotActionThreshold makes it action_required.
+// attentionContextHotActionThreshold makes it action_required. The dedup key
+// carries that band, so a pane escalating from warning to action_required
+// surfaces at once instead of being suppressed for the dedup window.
 func NewContextPressureAttentionEvent(session string, pane tmux.Pane, usagePercent, threshold float64) AttentionEvent {
 	paneRef := strconv.Itoa(pane.Index)
+	band := "warning"
+	if usagePercent >= attentionContextHotActionThreshold {
+		band = "action"
+	}
 	return annotateAttentionSignal(AttentionEvent{
 		Ts:            time.Now().UTC().Format(time.RFC3339Nano),
 		Session:       session,
@@ -1876,7 +1882,7 @@ func NewContextPressureAttentionEvent(session string, pane tmux.Pane, usagePerce
 			"pane_id":           pane.ID,
 			"agent_type":        paneAgentType(pane),
 		},
-		DedupKey: "context_hot:" + session + ":" + pane.ID,
+		DedupKey: "context_hot:" + session + ":" + pane.ID + ":" + band,
 	})
 }
 

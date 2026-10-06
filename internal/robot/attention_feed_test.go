@@ -2759,6 +2759,32 @@ func TestAttentionSignal_ContextHotThresholdBoundary(t *testing.T) {
 	}
 }
 
+// The monitor publishes context pressure every minute with a ten-minute dedup
+// window. A repeat in the same band is suppressed, but crossing into the
+// action band must surface at once, not wait out the window.
+func TestPublishContextPressureSurfacesEscalationDespiteDedup(t *testing.T) {
+	feed := newTestAttentionFeed(t)
+	usage := 80.0
+	oldUsage := contextPressureUsage
+	contextPressureUsage = func(string, []tmux.Pane) map[string]float64 {
+		return map[string]float64{"%1": usage}
+	}
+	t.Cleanup(func() { contextPressureUsage = oldUsage })
+	panes := []tmux.Pane{{ID: "%1", Index: 1, Title: "proj__cc_1"}}
+
+	if got := feed.PublishContextPressure("proj", panes, 75); len(got) != 1 || got[0].Actionability != ActionabilityInteresting {
+		t.Fatalf("first warning = %+v, want one interesting event", got)
+	}
+	if got := feed.PublishContextPressure("proj", panes, 75); len(got) != 0 {
+		t.Fatalf("repeat in the warning band = %+v, want it deduplicated", got)
+	}
+	usage = 95
+	got := feed.PublishContextPressure("proj", panes, 75)
+	if len(got) != 1 || got[0].Actionability != ActionabilityActionRequired {
+		t.Fatalf("escalation to %.0f%% = %+v, want one action_required event now", usage, got)
+	}
+}
+
 func TestAttentionSignal_DoesNotPromotePaneOutput(t *testing.T) {
 	event := annotateAttentionSignal(AttentionEvent{
 		Session:       "proj",

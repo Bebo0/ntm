@@ -18,8 +18,13 @@ import (
 type BusBridge struct {
 	session     string
 	manager     *WebhookManager
+	bus         *events.EventBus
 	unsubscribe events.UnsubscribeFunc
 }
+
+// bridgeDrainTimeout bounds how long Close waits for events already emitted to
+// reach the bridge.
+const bridgeDrainTimeout = 2 * time.Second
 
 // StartBridgeFromProjectConfig loads .ntm.yaml/.ntm.yml webhooks from projectDir,
 // starts a WebhookManager, and subscribes it to the provided event bus.
@@ -83,6 +88,7 @@ func StartBridgeFromProjectConfig(projectDir, session string, bus *events.EventB
 	return &BusBridge{
 		session:     session,
 		manager:     mgr,
+		bus:         bus,
 		unsubscribe: unsub,
 	}, nil
 }
@@ -304,10 +310,21 @@ func trimStrings(in []string) []string {
 	return out
 }
 
-// Close unsubscribes from the event bus and stops the underlying webhook manager.
+// Close unsubscribes from the event bus and stops the underlying webhook
+// manager, which delivers what was already dispatched. Commands emit their
+// lifecycle events through the asynchronous default emitter and then return
+// (kill does so last thing), so those events can still be queued or in a bus
+// handler goroutine here; they are drained first, or the bridge unsubscribes
+// before they arrive and the webhook never fires.
 func (b *BusBridge) Close() error {
 	if b == nil {
 		return nil
+	}
+	if b.bus == events.DefaultBus {
+		events.DefaultEmitter().Flush(bridgeDrainTimeout)
+	}
+	if b.bus != nil {
+		b.bus.WaitHandlers(bridgeDrainTimeout)
 	}
 	if b.unsubscribe != nil {
 		b.unsubscribe()

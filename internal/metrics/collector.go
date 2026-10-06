@@ -53,8 +53,9 @@ func NewCollector(store *state.Store, sessionID string) *Collector {
 	return c
 }
 
-// RecordBlockedCommand records a blocked command event. Its producer is the
-// dcg check on the send path (cli recordBlockedCommandMetric); the event-bus
+// RecordBlockedCommand records a blocked command event. Its producers are the
+// dcg check on the send path (cli recordBlockedCommandMetric) and refusals by
+// the installed safety hooks (cli recordHookRefusal); the event-bus
 // subscription that used to feed it listened for an event nothing published,
 // so destructive_cmd_incidents stayed at zero for every session.
 func (c *Collector) RecordBlockedCommand(agentID, command, reason string) {

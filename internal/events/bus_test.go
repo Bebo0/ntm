@@ -100,6 +100,33 @@ func TestEventBus_Publish(t *testing.T) {
 	}
 }
 
+// WaitHandlers reports false while a handler Publish started is still running
+// and true once it returns, so a consumer is unsubscribed only after the events
+// already published have reached it.
+func TestEventBus_WaitHandlersWaitsForAsyncHandlers(t *testing.T) {
+	t.Parallel()
+
+	bus := NewEventBus(10)
+	release := make(chan struct{})
+	var handled atomic.Int32
+	bus.SubscribeAll(func(BusEvent) {
+		<-release
+		handled.Add(1)
+	})
+
+	bus.Publish(BaseEvent{Type: "wait_handlers_test", Timestamp: time.Now()})
+	if bus.WaitHandlers(20 * time.Millisecond) {
+		t.Fatal("WaitHandlers returned true while the handler was blocked")
+	}
+	close(release)
+	if !bus.WaitHandlers(2 * time.Second) {
+		t.Fatal("WaitHandlers timed out after the handler was released")
+	}
+	if got := handled.Load(); got != 1 {
+		t.Fatalf("handler ran %d times, want 1 before WaitHandlers returned", got)
+	}
+}
+
 func TestEventBus_PublishSync(t *testing.T) {
 	t.Parallel()
 

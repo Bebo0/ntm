@@ -76,6 +76,55 @@ webhooks:
 	}
 }
 
+// Commands emit lifecycle events through the async default emitter and then
+// close their bridge (kill does it last thing). Close must deliver an event
+// emitted just before it rather than unsubscribe ahead of it.
+func TestBusBridge_CloseDeliversEventsEmittedJustBefore(t *testing.T) {
+	recv := make(chan map[string]any, 4)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		defer r.Body.Close()
+		var payload map[string]any
+		_ = json.NewDecoder(r.Body).Decode(&payload)
+		select {
+		case recv <- payload:
+		default:
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	t.Cleanup(srv.Close)
+
+	projectDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(projectDir, ".ntm.yaml"), []byte(`
+webhooks:
+  - name: test
+    url: `+srv.URL+`
+    events: ["session.killed"]
+    formatter: json
+`), 0o644); err != nil {
+		t.Fatalf("write .ntm.yaml: %v", err)
+	}
+
+	const session = "bridge-close-drain"
+	bridge, err := StartBridgeFromProjectConfig(projectDir, session, events.DefaultBus, &redaction.Config{Mode: redaction.ModeOff})
+	if err != nil || bridge == nil {
+		t.Fatalf("StartBridgeFromProjectConfig: bridge=%v err=%v", bridge, err)
+	}
+
+	events.DefaultEmitter().Emit(events.NewWebhookEvent(events.WebhookSessionKilled, session, "", "", "Killed session", nil))
+	if err := bridge.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	select {
+	case payload := <-recv:
+		if payload["type"] != "session.killed" || payload["session"] != session {
+			t.Fatalf("payload = %v, want the session.killed event for %s", payload, session)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("the event emitted just before Close was never delivered")
+	}
+}
+
 // =============================================================================
 // toWebhookEvent — all branches (bd-1ced7)
 // =============================================================================
