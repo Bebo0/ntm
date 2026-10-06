@@ -56,32 +56,6 @@ import (
 	"github.com/Dicklesworthstone/ntm/internal/workflow"
 )
 
-// compactionRecoveryConfigToRuntime converts the `[context_rotation.recovery]`
-// TOML surface into the runtime `status.RecoveryConfig` that the recovery
-// engine consumes. Zero / empty fields fall through to the engine's hardcoded
-// defaults, so a partial TOML override behaves the same as a full default
-// config except for the fields the user actually set. The `Enabled` flag is
-// honoured by skipping recovery entirely when false; that semantic lives in
-// the dashboard call site rather than the engine because the engine has no
-// notion of "configured but disabled".
-func compactionRecoveryConfigToRuntime(cfg *config.CompactionRecoveryConfig) status.RecoveryConfig {
-	rc := status.DefaultRecoveryConfig()
-	if cfg == nil {
-		return rc
-	}
-	if cfg.CooldownSeconds > 0 {
-		rc.Cooldown = time.Duration(cfg.CooldownSeconds) * time.Second
-	}
-	if cfg.MaxRecoveriesPerPane > 0 {
-		rc.MaxRecoveries = cfg.MaxRecoveriesPerPane
-	}
-	if cfg.Prompt != "" {
-		rc.Prompt = cfg.Prompt
-	}
-	rc.IncludeBeadContext = cfg.IncludeBeadContext
-	return rc
-}
-
 func (m *Model) handleWindowSize(msg tea.WindowSizeMsg) (tea.Model, tea.Cmd) {
 	prevWidth := m.width
 	prevTier := m.tier
@@ -212,17 +186,6 @@ func (m *Model) applyConfig(cfg *config.Config) {
 	if cfg.Integrations.Rano.PollIntervalMs > 0 {
 		m.ranoNetworkRefreshInterval = time.Duration(cfg.Integrations.Rano.PollIntervalMs) * time.Millisecond
 	}
-
-	// Issue #113: rebuild the compaction-recovery integration from
-	// `[context_rotation.recovery]` so user TOML actually reaches
-	// the runtime. Until this wired up, the dashboard would silently
-	// use NewCompactionRecoveryIntegrationDefault() regardless of
-	// what the config file said. Defaults still kick in when fields
-	// are zero — see compactionRecoveryConfigToRuntime — so this is
-	// a pure additive bridge.
-	m.compaction = status.NewCompactionRecoveryIntegration(
-		compactionRecoveryConfigToRuntime(&cfg.ContextRotation.Recovery),
-	)
 
 	// Re-initialize an existing renderer with the new theme colors. Before
 	// the deferred startup init has produced one there is nothing to
@@ -2789,22 +2752,20 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					}
 				}
 
-				// Compaction check — gated by [context_rotation.recovery] enabled
-				// per issue #113. Pre-config-load (m.cfg == nil) we run with
-				// defaults (recovery enabled). Once the first ConfigReloadMsg
-				// lands, m.cfg.ContextRotation.Recovery.Enabled is the source
-				// of truth; users who set it to false get neither compaction
-				// detection nor recovery prompts on this pane.
+				// Compaction display — gated by [context_rotation.recovery]
+				// enabled per issue #113 (m.cfg == nil before the first
+				// ConfigReloadMsg runs with the default, enabled). The
+				// dashboard only shows the banner; the session monitor owns
+				// the recovery prompt (bd-xa7ry), so any number of open
+				// dashboards never adds a sender.
 				var event *status.CompactionEvent
-				var recoverySent bool
 				if data.Observation.Current.Freshness == status.FreshnessFresh && (m.cfg == nil || m.cfg.ContextRotation.Recovery.Enabled) {
-					event, recoverySent, _ = m.compaction.CheckAndRecover(data.Output, statusAgentType, m.session, data.PaneIndex)
+					event = m.compaction.Check(data.Output, statusAgentType, paneKey)
 				}
 
 				if event != nil {
 					now := time.Now()
 					ps.LastCompaction = &now
-					ps.RecoverySent = recoverySent
 					ps.State = "compacted"
 				}
 
@@ -4463,11 +4424,7 @@ func (m Model) renderPaneGrid() string {
 		// Compaction indicator
 		if hasPaneStatus && ps.LastCompaction != nil {
 			cardContent.WriteString("\n")
-			indicator := "⚠ compacted"
-			if ps.RecoverySent {
-				indicator = "↻ recovering"
-			}
-			cardContent.WriteString(cachedStyledText(indicator, t.Warning, true, false))
+			cardContent.WriteString(cachedStyledText("⚠ compacted", t.Warning, true, false))
 		}
 
 		// Create card box
@@ -6056,9 +6013,6 @@ func (m Model) renderPaneDetail(width int) string {
 		lines = append(lines, "")
 		warnStyle := lipgloss.NewStyle().Foreground(t.Peach).Bold(true)
 		lines = append(lines, warnStyle.Render("  ⚠ Context compaction detected"))
-		if ps.RecoverySent {
-			lines = append(lines, lipgloss.NewStyle().Foreground(t.Green).Render("    ↻ Recovery prompt sent"))
-		}
 	}
 
 	// Command (if running)

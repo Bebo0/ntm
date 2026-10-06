@@ -174,25 +174,12 @@ func TestDefaultRecoveryConfig(t *testing.T) {
 	}
 }
 func TestCompactionRecoveryIntegration(t *testing.T) {
-	cri := NewCompactionRecoveryIntegrationDefault()
+	cri := NewCompactionRecoveryIntegration(DefaultRecoveryConfig())
 	if cri.Detector() == nil {
 		t.Error("detector should not be nil")
 	}
 	if cri.Recovery() == nil {
 		t.Error("recovery should not be nil")
-	}
-}
-func TestCompactionRecoveryIntegration_CheckAndRecover_NoCompaction(t *testing.T) {
-	cri := NewCompactionRecoveryIntegrationDefault()
-	event, sent, err := cri.CheckAndRecover("normal output", "claude", "test", 0)
-	if event != nil {
-		t.Error("should not detect compaction in normal output")
-	}
-	if sent {
-		t.Error("should not send recovery")
-	}
-	if err != nil {
-		t.Errorf("should not error: %v", err)
 	}
 }
 func TestMakePaneID(t *testing.T) {
@@ -361,34 +348,18 @@ func TestRecoveryManagerExportedPromptDeliversToGrok(t *testing.T) {
 	}
 }
 
-func TestCompactionRecoveryIntegration_CheckAndRecover_WithCompaction(t *testing.T) {
-	cri := NewCompactionRecoveryIntegrationDefault()
-	calls := 0
-	cri.Recovery().sendPrompt = func(string, string, bool) error { calls++; return nil }
-	cri.CheckAndRecover("progress anchor", "cc", "testsession", 0)
-	event, sent, err := cri.CheckAndRecover("progress anchor\nConversation compacted", "cc", "testsession", 0)
-	if event == nil || sent || err != nil || calls != 0 {
-		t.Fatalf("dashboard must observe without sending: %+v, %t, %v, calls=%d", event, sent, err, calls)
+// Generic summary prose is not a compaction banner, so it never reaches the
+// monitor's recovery. Explicit Grok delivery is covered by the recovery-manager
+// tests above.
+func TestCompactionDetectorIgnoresGenericSummaryProse(t *testing.T) {
+	detector := NewCompactionDetector(5 * time.Minute)
+	paneID := makePaneID("grok-session", 3)
+	detector.Check("progress anchor", "Grok-Build", paneID)
+	if event := detector.Check("progress anchor\nContinuing from summary", "Grok-Build", paneID); event != nil {
+		t.Fatalf("generic prose detected as compaction: %+v", event)
 	}
-}
-
-// Generic summary prose never authorizes automatic Grok recovery. Explicit
-// Grok delivery is still covered by both recovery-manager tests above.
-func TestCompactionRecoveryIntegrationDetectsAndRecoversGrok(t *testing.T) {
-	cri := NewCompactionRecoveryIntegrationDefault()
-	cri.Recovery().includeBeadContext = false
-	calls := 0
-	cri.Recovery().sendPrompt = func(string, string, bool) error { calls++; return nil }
-	cri.CheckAndRecover("progress anchor", "Grok-Build", "grok-session", 3)
-	event, sent, err := cri.CheckAndRecover("progress anchor\nContinuing from summary", "Grok-Build", "grok-session", 3)
-	if event != nil || sent || err != nil || calls != 0 {
-		t.Fatalf("generic prose caused recovery: %+v, %t, %v", event, sent, err)
-	}
-	if len(cri.Detector().EventsForPane(makePaneID("grok-session", 3))) != 0 || cri.Recovery().GetRecoveryCount(makePaneID("grok-session", 3)) != 0 {
-		t.Fatal("unverified prose consumed recovery state")
-	}
-	if _, ok := cri.Recovery().GetLastRecoveryTime(makePaneID("grok-session", 3)); ok {
-		t.Fatal("unverified prose recorded a recovery time")
+	if events := detector.EventsForPane(paneID); len(events) != 0 {
+		t.Fatalf("generic prose recorded compaction events: %+v", events)
 	}
 }
 

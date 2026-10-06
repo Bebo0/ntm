@@ -17,15 +17,4 @@ func init() {
 	// Rano network stats polling (dashboard.go).
 	config.RegisterReader("integrations.rano.enabled", (*Model).fetchRanoNetworkStats)
 	config.RegisterReader("integrations.rano.poll_interval_ms", (*Model).fetchRanoNetworkStats)
-
-	// Compaction recovery wiring (dashboard.go).
-	for _, key := range []string{
-		"context_rotation.recovery.enabled",
-		"context_rotation.recovery.cooldown_seconds",
-		"context_rotation.recovery.max_recoveries_per_pane",
-		"context_rotation.recovery.prompt",
-		"context_rotation.recovery.include_bead_context",
-	} {
-		config.RegisterReader(key, compactionRecoveryConfigToRuntime)
-	}
 }

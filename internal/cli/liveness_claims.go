@@ -28,6 +28,18 @@ func init() {
 	config.RegisterReader("agent_mail.pane_badges", paneBadgesEnabled)
 	config.RegisterReader("agent_mail.pane_badge_format", paneBadgeTemplate)
 
+	// Compaction recovery: the session monitor owns the prompt (monitor.go,
+	// bd-xa7ry); the dashboard only displays detected compactions.
+	for _, key := range []string{
+		"context_rotation.recovery.enabled",
+		"context_rotation.recovery.cooldown_seconds",
+		"context_rotation.recovery.max_recoveries_per_pane",
+		"context_rotation.recovery.prompt",
+		"context_rotation.recovery.include_bead_context",
+	} {
+		config.RegisterReader(key, monitorCompactionRecovery)
+	}
+
 	// Account rotation flows (rotate.go, coordinator.go).
 	config.RegisterReader("rotation.auto_open_browser", rotateAllLimited)
 	config.RegisterReader("rotation.continuation_prompt", executeReauthRotation)

@@ -149,8 +149,8 @@ type Model struct {
 	theme theme.Theme
 	icons icons.IconSet
 
-	// Compaction detection and recovery
-	compaction *status.CompactionRecoveryIntegration
+	// Compaction detection for display; recovery belongs to the session monitor
+	compaction *status.CompactionDetector
 
 	// Per-pane status tracking, keyed by tmux's stable physical pane identity.
 	// Pane.Index is window-local and therefore cannot distinguish 0.0 from 1.0.
@@ -468,7 +468,6 @@ type PostQuitAction struct {
 // PaneStatus tracks the status of a pane including compaction state.
 type PaneStatus struct {
 	LastCompaction *time.Time // When compaction was last detected
-	RecoverySent   bool       // Whether recovery prompt was sent
 	State          string     // "working", "idle", "error", "compacted"
 
 	// Context usage tracking
@@ -562,7 +561,7 @@ func New(session, projectDir string) Model {
 		tier:                       layout.TierForWidth(80),
 		theme:                      t,
 		icons:                      ic,
-		compaction:                 status.NewCompactionRecoveryIntegrationDefault(),
+		compaction:                 status.NewCompactionDetector(5 * time.Minute),
 		paneStatus:                 make(map[string]PaneStatus),
 		observer:                   status.NewSessionObserver(detector),
 		agentStatuses:              make(map[string]status.AgentStatus),

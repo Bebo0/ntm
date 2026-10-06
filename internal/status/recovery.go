@@ -430,16 +430,6 @@ func NewCompactionRecoveryIntegration(config RecoveryConfig) *CompactionRecovery
 	return &CompactionRecoveryIntegration{detector: NewCompactionDetector(5 * time.Minute), recovery: NewRecoveryManager(config),
 		gate: make(chan struct{}, 1), pending: make(map[string]CompactionEvent), panes: make(map[string]recoveryPaneLifetime)}
 }
-func NewCompactionRecoveryIntegrationDefault() *CompactionRecoveryIntegration {
-	return NewCompactionRecoveryIntegration(DefaultRecoveryConfig())
-}
-
-// CheckAndRecover is the dashboard's observation surface. It deliberately does
-// not send: opening another dashboard must never create another recovery owner.
-// The session monitor calls RecoverObserved with fresh canonical observations.
-func (cri *CompactionRecoveryIntegration) CheckAndRecover(output, agentType, session string, paneIndex int) (*CompactionEvent, bool, error) {
-	return cri.detector.Check(output, agentType, makePaneID(session, paneIndex)), false, nil
-}
 
 // RecoveryAttempt is an outcome of one monitored recovery. An error may include
 // partial delivery; it is reported, never converted into an automatic retry.
