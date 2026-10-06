@@ -19,7 +19,6 @@ import (
 	"github.com/Dicklesworthstone/ntm/internal/robot/adapters"
 	"github.com/Dicklesworthstone/ntm/internal/state"
 	"github.com/Dicklesworthstone/ntm/internal/tmux"
-	"github.com/Dicklesworthstone/ntm/internal/tracker"
 )
 
 // AttentionStore defines the interface for durable attention event storage.
@@ -1773,47 +1772,6 @@ func attentionDigestLeadSummary(digest *AttentionDigest) string {
 	return ""
 }
 
-// PublishTrackerChange normalizes a state tracker change and appends it to the feed.
-func (f *AttentionFeed) PublishTrackerChange(change tracker.StateChange) AttentionEvent {
-	return f.Append(NewTrackerEvent(change))
-}
-
-// PublishTrackerChanges normalizes and appends tracker changes in order.
-func (f *AttentionFeed) PublishTrackerChanges(changes []tracker.StateChange) []AttentionEvent {
-	if len(changes) == 0 {
-		return nil
-	}
-	published := make([]AttentionEvent, 0, len(changes))
-	for _, change := range changes {
-		published = append(published, f.PublishTrackerChange(change))
-	}
-	return published
-}
-
-// PublishLoggedEvent normalizes a logged analytics event and appends it to the feed.
-// Suppressed logged events return ok=false and are not appended.
-func (f *AttentionFeed) PublishLoggedEvent(event ntmevents.Event) (published AttentionEvent, ok bool) {
-	normalized, ok := NewLoggedAttentionEvent(event)
-	if !ok {
-		return AttentionEvent{}, false
-	}
-	return f.Append(normalized), true
-}
-
-// PublishLoggedEvents normalizes and appends logged events in order, skipping suppressed entries.
-func (f *AttentionFeed) PublishLoggedEvents(events []ntmevents.Event) []AttentionEvent {
-	if len(events) == 0 {
-		return nil
-	}
-	published := make([]AttentionEvent, 0, len(events))
-	for _, event := range events {
-		if normalized, ok := f.PublishLoggedEvent(event); ok {
-			published = append(published, normalized)
-		}
-	}
-	return published
-}
-
 // PublishBusEvent normalizes an event-bus event and appends it to the feed.
 // Unsupported bus events return ok=false and are not appended.
 func (f *AttentionFeed) PublishBusEvent(event ntmevents.BusEvent) (published AttentionEvent, ok bool) {
@@ -2440,12 +2398,6 @@ var supportedAttentionActionNames = map[string]struct{}{
 	"robot-watch-bead":           {},
 }
 
-var suppressedLoggedAttentionReasons = map[ntmevents.EventType]string{
-	ntmevents.EventPromptSend:      "prompt send events are high-volume control traffic; inspect pane output or token reports instead",
-	ntmevents.EventPromptBroadcast: "prompt broadcast events are high-volume control traffic; inspect pane output or token reports instead",
-	ntmevents.EventTemplateUse:     "template selection is configuration metadata and does not belong in the high-level operator feed",
-}
-
 const (
 	attentionSignalSessionChanged      = "session_changed"
 	attentionSignalPaneChanged         = "pane_changed"
@@ -2459,223 +2411,6 @@ const (
 
 	attentionContextHotActionThreshold = 90.0
 )
-
-// NewTrackerEvent converts a legacy state tracker change into a normalized
-// attention event so existing tracker-based flows can feed the cursored journal.
-func NewTrackerEvent(change tracker.StateChange) AttentionEvent {
-	ts := change.Timestamp.UTC()
-	if ts.IsZero() {
-		ts = time.Now().UTC()
-	}
-
-	details := cloneAnyMap(change.Details)
-	if details == nil {
-		details = map[string]any{}
-	}
-	if change.Pane != "" {
-		details["pane_ref"] = change.Pane
-	}
-
-	paneIdx := attentionPaneIndex(change.Pane)
-	event := AttentionEvent{
-		Ts:            ts.Format(time.RFC3339Nano),
-		Session:       change.Session,
-		Pane:          paneIdx,
-		Source:        "state_tracker",
-		Actionability: ActionabilityBackground,
-		Severity:      SeverityInfo,
-		Details:       details,
-		Summary:       fmt.Sprintf("%s changed", change.Type),
-	}
-
-	switch change.Type {
-	case tracker.ChangeAgentOutput:
-		event.Category = EventCategoryPane
-		event.Type = EventTypePaneOutput
-		event.Actionability = ActionabilityInteresting
-		event.Summary = attentionSummary(change.Session, change.Pane, "agent output detected")
-		if change.Session != "" && change.Pane != "" {
-			event.NextActions = []NextAction{{
-				Action: "robot-tail",
-				Args:   fmt.Sprintf("--robot-tail=%s --panes=%s --lines=50", change.Session, change.Pane),
-				Reason: "Inspect the new pane output",
-			}}
-		}
-	case tracker.ChangeAgentState:
-		event.Category = EventCategoryAgent
-		event.Type = EventTypeAgentStateChange
-		if state, _ := details["state"].(string); state == "error" {
-			event.Severity = SeverityError
-			event.Actionability = ActionabilityActionRequired
-			event.Summary = attentionSummary(change.Session, change.Pane, "agent entered error state")
-		} else {
-			event.Actionability = ActionabilityInteresting
-			event.Summary = attentionSummary(change.Session, change.Pane, "agent state changed")
-		}
-	case tracker.ChangeBeadUpdate:
-		event.Category = EventCategoryBead
-		event.Type = EventTypeBeadUpdated
-		event.Actionability = ActionabilityInteresting
-		event.Summary = attentionSummary(change.Session, change.Pane, "bead updated")
-	case tracker.ChangeMailReceived:
-		event.Category = EventCategoryMail
-		event.Type = EventTypeMailReceived
-		event.Actionability = ActionabilityInteresting
-		event.Summary = attentionSummary(change.Session, change.Pane, "mail received")
-	case tracker.ChangeAlert:
-		event.Category = EventCategoryAlert
-		event.Type = EventTypeAlertWarning
-		event.Actionability = ActionabilityActionRequired
-		event.Severity = SeverityWarning
-		event.Summary = attentionSummary(change.Session, change.Pane, "alert raised")
-	case tracker.ChangePaneCreated:
-		event.Category = EventCategoryPane
-		event.Type = EventTypePaneCreated
-		event.Summary = attentionSummary(change.Session, change.Pane, "pane created")
-	case tracker.ChangePaneRemoved:
-		event.Category = EventCategoryPane
-		event.Type = EventTypePaneDestroyed
-		event.Actionability = ActionabilityInteresting
-		event.Summary = attentionSummary(change.Session, change.Pane, "pane removed")
-	case tracker.ChangeSessionCreated:
-		event.Category = EventCategorySession
-		event.Type = EventTypeSessionCreated
-		event.Summary = attentionSummary(change.Session, "", "session created")
-	case tracker.ChangeSessionRemoved:
-		event.Category = EventCategorySession
-		event.Type = EventTypeSessionDestroyed
-		event.Actionability = ActionabilityInteresting
-		event.Summary = attentionSummary(change.Session, "", "session removed")
-	case tracker.ChangeFileChange:
-		event.Category = EventCategoryFile
-		event.Type = EventTypeFileChanged
-		event.Actionability = ActionabilityInteresting
-		event.Summary = attentionSummary(change.Session, change.Pane, "file changed")
-	default:
-		event.Category = EventCategorySystem
-		event.Type = EventTypeSystemHealthChange
-		event.Summary = attentionSummary(change.Session, change.Pane, fmt.Sprintf("%s observed", change.Type))
-	}
-
-	return annotateAttentionSignal(event)
-}
-
-// SuppressedLoggedAttentionReason documents which legacy analytics events are
-// intentionally omitted from the attention feed and why.
-func SuppressedLoggedAttentionReason(eventType ntmevents.EventType) string {
-	return suppressedLoggedAttentionReasons[eventType]
-}
-
-// NewLoggedAttentionEvent converts a legacy analytics/logged event into the
-// normalized attention envelope. It returns false when the source event is
-// intentionally suppressed from the high-level operator feed.
-func NewLoggedAttentionEvent(event ntmevents.Event) (AttentionEvent, bool) {
-	if SuppressedLoggedAttentionReason(event.Type) != "" {
-		return AttentionEvent{}, false
-	}
-
-	ts := event.Timestamp.UTC()
-	if ts.IsZero() {
-		ts = time.Now().UTC()
-	}
-
-	details := cloneAnyMap(event.Data)
-	if details == nil {
-		details = map[string]any{}
-	}
-	if event.AgentName != "" {
-		details["agent_name"] = event.AgentName
-	}
-	if event.CorrelationID != "" {
-		details["correlation_id"] = event.CorrelationID
-	}
-
-	pane := attentionPaneFromDetails(details)
-	result := AttentionEvent{
-		Ts:            ts.Format(time.RFC3339Nano),
-		Session:       event.Session,
-		Pane:          pane,
-		Source:        "event_log",
-		Actionability: ActionabilityBackground,
-		Severity:      SeverityInfo,
-		Details:       details,
-		Summary:       attentionSummary(event.Session, "", fmt.Sprintf("%s recorded", attentionHumanize(string(event.Type)))),
-	}
-
-	switch event.Type {
-	case ntmevents.EventSessionCreate:
-		result.Category = EventCategorySession
-		result.Type = EventTypeSessionCreated
-		result.Actionability = ActionabilityInteresting
-		result.Summary = attentionSummary(event.Session, "", "session created")
-		result.NextActions = []NextAction{attentionStatusNextAction("Inspect active sessions and panes")}
-	case ntmevents.EventSessionKill:
-		result.Category = EventCategorySession
-		result.Type = EventTypeSessionDestroyed
-		result.Actionability = ActionabilityInteresting
-		result.Severity = SeverityWarning
-		result.Summary = attentionSummary(event.Session, "", "session ended")
-	case ntmevents.EventSessionAttach:
-		result.Category = EventCategorySession
-		result.Type = EventTypeSessionAttached
-		result.Summary = attentionSummary(event.Session, "", "session attached")
-	case ntmevents.EventAgentSpawn, ntmevents.EventAgentAdd:
-		result.Category = EventCategoryAgent
-		result.Type = EventTypeAgentStarted
-		result.Actionability = ActionabilityInteresting
-		result.Summary = attentionSummary(event.Session, attentionPaneRef(details), attentionAgentSummary("agent started", event.AgentName, details))
-	case ntmevents.EventAgentCrash:
-		result.Category = EventCategoryAgent
-		result.Type = EventTypeAgentError
-		result.Actionability = ActionabilityActionRequired
-		result.Severity = SeverityError
-		result.Summary = attentionSummary(event.Session, attentionPaneRef(details), attentionAgentSummary("agent crashed", event.AgentName, details))
-		result.NextActions = attentionTailOrStatusActions(event.Session, attentionEventPaneRef(result), "Inspect the rate-limited agent output")
-	case ntmevents.EventAgentRestart:
-		result.Category = EventCategoryAgent
-		result.Type = EventTypeAgentRecovered
-		result.Actionability = ActionabilityInteresting
-		result.Summary = attentionSummary(event.Session, attentionPaneRef(details), attentionAgentSummary("agent restarted", event.AgentName, details))
-	case ntmevents.EventInterrupt:
-		result.Category = EventCategoryAgent
-		result.Type = EventTypeAgentStateChange
-		result.Actionability = ActionabilityInteresting
-		result.Summary = attentionSummary(event.Session, attentionPaneRef(details), attentionAgentSummary("agent interrupted", event.AgentName, details))
-	case ntmevents.EventCheckpointCreate:
-		result.Category = EventCategorySystem
-		result.Type = EventTypeSystemHealthChange
-		result.Actionability = ActionabilityInteresting
-		result.Summary = attentionSummary(event.Session, "", "checkpoint created")
-	case ntmevents.EventCheckpointRestore:
-		result.Category = EventCategorySystem
-		result.Type = EventTypeSystemHealthChange
-		result.Actionability = ActionabilityInteresting
-		result.Summary = attentionSummary(event.Session, "", "checkpoint restored")
-		result.NextActions = []NextAction{attentionStatusNextAction("Verify restored session state")}
-	case ntmevents.EventSessionSave:
-		result.Category = EventCategorySystem
-		result.Type = EventTypeSystemHealthChange
-		result.Summary = attentionSummary(event.Session, "", "session saved")
-	case ntmevents.EventSessionRestore:
-		result.Category = EventCategorySystem
-		result.Type = EventTypeSystemHealthChange
-		result.Actionability = ActionabilityInteresting
-		result.Summary = attentionSummary(event.Session, "", "session restored")
-		result.NextActions = []NextAction{attentionStatusNextAction("Inspect restored session state")}
-	case ntmevents.EventError:
-		result.Category = EventCategoryAlert
-		result.Type = EventTypeAlertWarning
-		result.Actionability = ActionabilityActionRequired
-		result.Severity = SeverityError
-		result.Summary = attentionSummary(event.Session, "", attentionMessageSummary("error recorded", details))
-		result.NextActions = []NextAction{attentionStatusNextAction("Inspect the current robot state")}
-	default:
-		result.Category = EventCategorySystem
-		result.Type = EventTypeSystemHealthChange
-	}
-
-	return annotateAttentionSignal(result), true
-}
 
 // NewBusAttentionEvent converts an event-bus event into the normalized
 // attention envelope. It returns false when the source event is intentionally
@@ -2957,39 +2692,6 @@ func attentionHumanize(raw string) string {
 	return strings.ReplaceAll(strings.ReplaceAll(raw, "_", " "), ".", " ")
 }
 
-func attentionPaneFromDetails(details map[string]any) int {
-	if details == nil {
-		return 0
-	}
-	for _, key := range []string{"pane_ref", "pane", "pane_index"} {
-		value, ok := details[key]
-		if !ok {
-			continue
-		}
-		switch v := value.(type) {
-		case string:
-			return attentionPaneIndex(v)
-		case int:
-			if v > 0 {
-				return v
-			}
-		case int32:
-			if v > 0 {
-				return int(v)
-			}
-		case int64:
-			if v > 0 {
-				return int(v)
-			}
-		case float64:
-			if v > 0 {
-				return int(v)
-			}
-		}
-	}
-	return 0
-}
-
 func attentionPaneRef(details map[string]any) string {
 	if details == nil {
 		return ""
@@ -3025,17 +2727,6 @@ func attentionAgentSummary(prefix, fallback string, details map[string]any) stri
 	}
 	if label := strings.TrimSpace(fallback); label != "" {
 		return fmt.Sprintf("%s for %s", prefix, label)
-	}
-	return prefix
-}
-
-func attentionMessageSummary(prefix string, details map[string]any) string {
-	for _, key := range []string{"message", "error_type", "name"} {
-		if value, ok := details[key]; ok {
-			if label := strings.TrimSpace(fmt.Sprint(value)); label != "" && label != "<nil>" {
-				return fmt.Sprintf("%s: %s", prefix, label)
-			}
-		}
 	}
 	return prefix
 }

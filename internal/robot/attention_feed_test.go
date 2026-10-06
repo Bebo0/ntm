@@ -14,7 +14,6 @@ import (
 	"github.com/Dicklesworthstone/ntm/internal/robot/adapters"
 	"github.com/Dicklesworthstone/ntm/internal/state"
 	"github.com/Dicklesworthstone/ntm/internal/tmux"
-	"github.com/Dicklesworthstone/ntm/internal/tracker"
 )
 
 func newTestAttentionFeed(t *testing.T) *AttentionFeed {
@@ -27,16 +26,6 @@ func newTestAttentionFeed(t *testing.T) *AttentionFeed {
 	})
 	t.Cleanup(feed.Stop)
 	return feed
-}
-
-func mustLoggedAttentionEvent(t *testing.T, event ntmevents.Event) AttentionEvent {
-	t.Helper()
-
-	normalized, ok := NewLoggedAttentionEvent(event)
-	if !ok {
-		t.Fatalf("expected logged event %q to normalize", event.Type)
-	}
-	return normalized
 }
 
 func digestTestEvent(cursor int64, category EventCategory, eventType EventType, actionability Actionability, severity Severity, summary string) AttentionEvent {
@@ -837,68 +826,6 @@ func TestAttentionFeed_QueuedFollowOnEventUsesStableSnapshot(t *testing.T) {
 	}
 	if got := events[1].Details["status"]; got != "original" {
 		t.Fatalf("replayed status = %v, want %q", got, "original")
-	}
-}
-
-func TestAttentionFeed_PublishTrackerChange(t *testing.T) {
-	feed := newTestAttentionFeed(t)
-
-	change := tracker.StateChange{
-		Timestamp: time.Date(2026, 3, 21, 3, 5, 0, 0, time.UTC),
-		Type:      tracker.ChangeAgentOutput,
-		Session:   "proj",
-		Pane:      "2",
-		Details: map[string]interface{}{
-			"line_count": 3,
-		},
-	}
-
-	published := feed.PublishTrackerChange(change)
-	t.Logf("published tracker event cursor=%d type=%s summary=%q", published.Cursor, published.Type, published.Summary)
-
-	if published.Cursor == 0 {
-		t.Fatal("tracker change was not assigned a cursor")
-	}
-	if published.Type != EventTypePaneOutput {
-		t.Fatalf("tracker change type = %q, want %q", published.Type, EventTypePaneOutput)
-	}
-	if published.Pane != 2 {
-		t.Fatalf("tracker change pane = %d, want 2", published.Pane)
-	}
-	if published.Details["pane_ref"] != "2" {
-		t.Fatalf("tracker change pane_ref = %#v, want %q", published.Details["pane_ref"], "2")
-	}
-
-	replayed, _, err := feed.Replay(0, 10)
-	if err != nil {
-		t.Fatalf("Replay error: %v", err)
-	}
-	if len(replayed) != 1 {
-		t.Fatalf("replayed %d tracker events, want 1", len(replayed))
-	}
-	if replayed[0].Summary != published.Summary {
-		t.Fatalf("replayed summary = %q, want %q", replayed[0].Summary, published.Summary)
-	}
-}
-
-func TestAttentionFeed_PublishLoggedEvent_Suppressed(t *testing.T) {
-	feed := newTestAttentionFeed(t)
-
-	published, ok := feed.PublishLoggedEvent(ntmevents.Event{
-		Timestamp: time.Date(2026, 3, 21, 3, 6, 0, 0, time.UTC),
-		Type:      ntmevents.EventPromptSend,
-		Session:   "proj",
-		Data: map[string]interface{}{
-			"pane_index": 1,
-		},
-	})
-	t.Logf("suppressed logged event ok=%v published=%+v", ok, published)
-
-	if ok {
-		t.Fatal("prompt_send should be suppressed from the attention feed")
-	}
-	if stats := feed.Stats(); stats.TotalAppended != 0 {
-		t.Fatalf("TotalAppended = %d, want 0 for suppressed logged event", stats.TotalAppended)
 	}
 }
 
@@ -2796,49 +2723,6 @@ func (s *stubAttentionStore) GCExpiredEvents() (int64, error) {
 // Event Builder Tests
 // =============================================================================
 
-func TestNewTrackerEvent_MailReceived(t *testing.T) {
-	change := tracker.StateChange{
-		Timestamp: time.Date(2026, 3, 21, 3, 9, 0, 0, time.UTC),
-		Type:      tracker.ChangeMailReceived,
-		Session:   "proj",
-		Pane:      "1",
-		Details: map[string]interface{}{
-			"subject": "Need ack",
-		},
-	}
-
-	event := NewTrackerEvent(change)
-	if event.Category != EventCategoryMail {
-		t.Fatalf("tracker mail category = %q, want %q", event.Category, EventCategoryMail)
-	}
-	if event.Type != EventTypeMailReceived {
-		t.Fatalf("tracker mail type = %q, want %q", event.Type, EventTypeMailReceived)
-	}
-	if event.Pane != 1 {
-		t.Fatalf("tracker mail pane = %d, want 1", event.Pane)
-	}
-}
-
-func TestNewLoggedAttentionEvent_SessionCreate(t *testing.T) {
-	event, ok := NewLoggedAttentionEvent(ntmevents.Event{
-		Timestamp: time.Date(2026, 3, 21, 3, 10, 0, 0, time.UTC),
-		Type:      ntmevents.EventSessionCreate,
-		Session:   "proj",
-	})
-	if !ok {
-		t.Fatal("session_create should map into the attention feed")
-	}
-	if event.Category != EventCategorySession {
-		t.Fatalf("logged event category = %q, want %q", event.Category, EventCategorySession)
-	}
-	if event.Type != EventTypeSessionCreated {
-		t.Fatalf("logged event type = %q, want %q", event.Type, EventTypeSessionCreated)
-	}
-	if len(event.NextActions) != 1 || event.NextActions[0].Action != "robot-status" {
-		t.Fatalf("logged event next actions = %+v, want robot-status follow-up", event.NextActions)
-	}
-}
-
 func TestAttentionSignal_ContextHotThresholdBoundary(t *testing.T) {
 	tests := []struct {
 		name              string
@@ -2876,14 +2760,15 @@ func TestAttentionSignal_ContextHotThresholdBoundary(t *testing.T) {
 }
 
 func TestAttentionSignal_DoesNotPromotePaneOutput(t *testing.T) {
-	event := NewTrackerEvent(tracker.StateChange{
-		Timestamp: time.Date(2026, 3, 21, 3, 21, 0, 0, time.UTC),
-		Type:      tracker.ChangeAgentOutput,
-		Session:   "proj",
-		Pane:      "5",
-		Details: map[string]interface{}{
-			"line_count": 12,
-		},
+	event := annotateAttentionSignal(AttentionEvent{
+		Session:       "proj",
+		Pane:          5,
+		Category:      EventCategoryPane,
+		Type:          EventTypePaneOutput,
+		Actionability: ActionabilityInteresting,
+		Severity:      SeverityInfo,
+		Summary:       "agent output detected in proj pane 5",
+		Details:       map[string]any{"line_count": 12},
 	})
 	t.Logf("pane output summary=%q actionability=%q details=%v", event.Summary, event.Actionability, event.Details)
 
@@ -2895,23 +2780,21 @@ func TestAttentionSignal_DoesNotPromotePaneOutput(t *testing.T) {
 	}
 }
 
-func TestAttentionSignal_RateLimitedFromLoggedError(t *testing.T) {
-	event := mustLoggedAttentionEvent(t, ntmevents.Event{
-		Timestamp: time.Date(2026, 3, 21, 3, 22, 0, 0, time.UTC),
-		Type:      ntmevents.EventError,
-		Session:   "proj",
-		Data: map[string]interface{}{
-			"error_type": "rate_limit",
-			"message":    "429 Too Many Requests",
-		},
-	})
-	t.Logf("logged error signal=%v details=%v", event.Details["signal"], event.Details)
+// The resilience monitor's rate-limit webhook event is the live rate-limit
+// producer; it must carry the rate_limited signal.
+func TestAttentionSignal_RateLimitedFromMonitorWebhook(t *testing.T) {
+	event, ok := NewBusAttentionEvent(ntmevents.NewWebhookEvent(ntmevents.WebhookAgentRateLimit, "proj", "%2", "codex",
+		"Agent codex rate limited", map[string]string{"wait_seconds": "60"}))
+	if !ok {
+		t.Fatal("rate-limit webhook event did not normalize")
+	}
+	t.Logf("rate limit signal=%v details=%v", event.Details["signal"], event.Details)
 
 	if event.Details["signal"] != attentionSignalRateLimited {
-		t.Fatalf("logged error signal = %#v, want %q", event.Details["signal"], attentionSignalRateLimited)
+		t.Fatalf("rate limit signal = %#v, want %q", event.Details["signal"], attentionSignalRateLimited)
 	}
 	if event.Actionability != ActionabilityActionRequired {
-		t.Fatalf("logged error actionability = %q, want %q", event.Actionability, ActionabilityActionRequired)
+		t.Fatalf("rate limit actionability = %q, want %q", event.Actionability, ActionabilityActionRequired)
 	}
 }
 
