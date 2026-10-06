@@ -60,7 +60,6 @@ internal/cass/types.go:Capabilities.HasFeature	bd-ld4j2	reachable only through R
 internal/cass/types.go:DBInfo.SizeMB	bd-ld4j2	reachable only through RTA's reflection rule at the 2026-10-05 baseline; wire it (surface + behavioral test) or delete it
 internal/cass/types.go:SearchResponse.HasResults	bd-ld4j2	reachable only through RTA's reflection rule at the 2026-10-05 baseline; wire it (surface + behavioral test) or delete it
 internal/caut/models.go:ProviderPayload.GetAccountEmail	bd-ld4j2	reachable only through RTA's reflection rule at the 2026-10-05 baseline; wire it (surface + behavioral test) or delete it
-internal/caut/models.go:ProviderPayload.GetPlanName	bd-ld4j2	reachable only through RTA's reflection rule at the 2026-10-05 baseline; wire it (surface + behavioral test) or delete it
 internal/caut/models.go:ProviderPayload.GetWindowMinutes	bd-ld4j2	reachable only through RTA's reflection rule at the 2026-10-05 baseline; wire it (surface + behavioral test) or delete it
 internal/caut/models.go:ProviderPayload.HasUsageData	bd-ld4j2	reachable only through RTA's reflection rule at the 2026-10-05 baseline; wire it (surface + behavioral test) or delete it
 internal/caut/models.go:ProviderPayload.IsRateLimited	bd-ld4j2	reachable only through RTA's reflection rule at the 2026-10-05 baseline; wire it (surface + behavioral test) or delete it
@@ -184,13 +183,9 @@ internal/handoff/validate.go:Handoff.ValidateAndSetDefaults	bd-ld4j2	reachable o
 internal/handoff/validate.go:Handoff.ValidateMinimal	bd-ld4j2	reachable only through RTA's reflection rule at the 2026-10-05 baseline; wire it (surface + behavioral test) or delete it
 internal/handoff/validate.go:truncate	bd-ld4j2	reachable only through RTA's reflection rule at the 2026-10-05 baseline; wire it (surface + behavioral test) or delete it
 internal/integrations/caut/cache.go:UsageCache.Clear	bd-ld4j2	reachable only through RTA's reflection rule at the 2026-10-05 baseline; wire it (surface + behavioral test) or delete it
-internal/integrations/caut/cache.go:UsageCache.ClearError	bd-ld4j2	reachable only through RTA's reflection rule at the 2026-10-05 baseline; wire it (surface + behavioral test) or delete it
 internal/integrations/caut/cache.go:UsageCache.GetUpdateCount	bd-ld4j2	reachable only through RTA's reflection rule at the 2026-10-05 baseline; wire it (surface + behavioral test) or delete it
-internal/integrations/caut/cache.go:UsageCache.IsStale	bd-ld4j2	reachable only through RTA's reflection rule at the 2026-10-05 baseline; wire it (surface + behavioral test) or delete it
-internal/integrations/caut/cache.go:UsageCache.SetError	bd-ld4j2	reachable only through RTA's reflection rule at the 2026-10-05 baseline; wire it (surface + behavioral test) or delete it
 internal/integrations/caut/cache.go:UsageCache.Snapshot	bd-ld4j2	reachable only through RTA's reflection rule at the 2026-10-05 baseline; wire it (surface + behavioral test) or delete it
 internal/integrations/caut/cache.go:UsageCache.UpdateAllUsage	bd-ld4j2	reachable only through RTA's reflection rule at the 2026-10-05 baseline; wire it (surface + behavioral test) or delete it
-internal/integrations/caut/cache.go:UsageCache.UpdateStatus	bd-ld4j2	reachable only through RTA's reflection rule at the 2026-10-05 baseline; wire it (surface + behavioral test) or delete it
 internal/integrations/caut/cache.go:UsageCache.UpdateUsage	bd-ld4j2	reachable only through RTA's reflection rule at the 2026-10-05 baseline; wire it (surface + behavioral test) or delete it
 internal/metrics/collector.go:MetricsReport.ExportCSV	bd-ld4j2	reachable only through RTA's reflection rule at the 2026-10-05 baseline; wire it (surface + behavioral test) or delete it
 internal/metrics/collector.go:MetricsReport.ExportJSON	bd-ld4j2	reachable only through RTA's reflection rule at the 2026-10-05 baseline; wire it (surface + behavioral test) or delete it
@@ -456,11 +451,7 @@ internal/tools/caam.go:CAAMAdapter.InvalidateCache	bd-ld4j2	reachable only throu
 internal/tools/caam.go:CAAMAdapter.IsAvailable	bd-ld4j2	reachable only through RTA's reflection rule at the 2026-10-05 baseline; wire it (surface + behavioral test) or delete it
 internal/tools/cass.go:CASSAdapter.GetCapabilities	bd-ld4j2	reachable only through RTA's reflection rule at the 2026-10-05 baseline; wire it (surface + behavioral test) or delete it
 internal/tools/cass.go:CASSAdapter.HasCapability	bd-ld4j2	reachable only through RTA's reflection rule at the 2026-10-05 baseline; wire it (surface + behavioral test) or delete it
-internal/tools/caut.go:CautAdapter.GetAllUsage	bd-ld4j2	reachable only through RTA's reflection rule at the 2026-10-05 baseline; wire it (surface + behavioral test) or delete it
-internal/tools/caut.go:CautAdapter.GetQuotaStatus	bd-ld4j2	reachable only through RTA's reflection rule at the 2026-10-05 baseline; wire it (surface + behavioral test) or delete it
-internal/tools/caut.go:CautAdapter.GetUsage	bd-ld4j2	reachable only through RTA's reflection rule at the 2026-10-05 baseline; wire it (surface + behavioral test) or delete it
 internal/tools/caut.go:CautAdapter.HasCapability	bd-ld4j2	reachable only through RTA's reflection rule at the 2026-10-05 baseline; wire it (surface + behavioral test) or delete it
-internal/tools/caut.go:CautAdapter.HasUsageData	bd-ld4j2	reachable only through RTA's reflection rule at the 2026-10-05 baseline; wire it (surface + behavioral test) or delete it
 internal/tools/caut.go:CautAdapter.InvalidateAvailabilityCache	bd-ld4j2	reachable only through RTA's reflection rule at the 2026-10-05 baseline; wire it (surface + behavioral test) or delete it
 internal/tools/cm.go:CMAdapter.Connect	bd-ld4j2	reachable only through RTA's reflection rule at the 2026-10-05 baseline; wire it (surface + behavioral test) or delete it
 internal/tools/cm.go:CMAdapter.HasCapability	bd-ld4j2	reachable only through RTA's reflection rule at the 2026-10-05 baseline; wire it (surface + behavioral test) or delete it

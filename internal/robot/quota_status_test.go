@@ -2,6 +2,8 @@ package robot
 
 import (
 	"errors"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -301,6 +303,71 @@ func TestGetQuotaStatus_CanonicalizesProviderNames(t *testing.T) {
 	}
 	if _, exists := output.Quota.Providers["gemini"]; !exists {
 		t.Fatalf("providers missing gemini key: %+v", output.Quota.Providers)
+	}
+}
+
+// --robot-quota-status read caut's usage cache, which nothing had filled since
+// its background poller was removed: with caut installed it reported
+// caut_available and no caut usage at all. A stale cache is now refilled from
+// caut itself, here a stand-in answering in caut's v1 contract.
+func TestGetQuotaStatusReadsCautUsage(t *testing.T) {
+	cache := caut.GetGlobalPoller().GetCache()
+	cache.Clear()
+	t.Cleanup(cache.Clear)
+
+	binDir := t.TempDir()
+	argsLog := filepath.Join(binDir, "args")
+	script := `#!/bin/sh
+if [ "$1" = "--version" ]; then echo "caut 0.6.0"; exit 0; fi
+echo "$*" >> "` + argsLog + `"
+provider=
+while [ $# -gt 0 ]; do
+  case "$1" in --provider) provider=$2; shift 2 ;; *) shift ;; esac
+done
+case "$provider" in
+  claude) pct=82.5 ;;
+  codex) pct=30 ;;
+  *) printf '{"schemaVersion":"caut.v1","generatedAt":"2026-10-06T00:00:00Z","command":"usage","data":[],"errors":["%s: not configured"],"meta":{"format":"json","flags":[],"runtime":"cli"}}\n' "$provider"; exit 0 ;;
+esac
+printf '{"schemaVersion":"caut.v1","generatedAt":"2026-10-06T00:00:00Z","command":"usage","data":[{"provider":"%s","source":"cli","usage":{"primary":{"usedPercent":%s,"windowMinutes":300},"updatedAt":"2026-10-06T00:00:00Z"}}],"errors":[],"meta":{"format":"json","flags":[],"runtime":"cli"}}\n' "$provider" "$pct"
+`
+	if err := os.WriteFile(filepath.Join(binDir, "caut"), []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	adapter := tools.NewCautAdapter()
+	adapter.InvalidateAvailabilityCache()
+	t.Cleanup(adapter.InvalidateAvailabilityCache)
+
+	output, err := GetQuotaStatus()
+	if err != nil || !output.Success {
+		t.Fatalf("GetQuotaStatus() = %+v, %v", output, err)
+	}
+	quota := output.Quota
+	if !quota.CautAvailable || quota.LastUpdated == "" {
+		t.Fatalf("caut_available=%v last_updated=%q, want a caut read", quota.CautAvailable, quota.LastUpdated)
+	}
+	if claude := quota.Providers["claude"]; claude.UsagePercent != 82.5 || claude.Status != "warning" {
+		t.Fatalf("claude quota = %+v, want caut's 82.5%% as a warning", claude)
+	}
+	if codex := quota.Providers["openai"]; codex.UsagePercent != 30 || codex.Status != "ok" {
+		t.Fatalf("openai quota = %+v, want caut's codex 30%%", codex)
+	}
+	if !quota.HasWarning || quota.HasCritical {
+		t.Fatalf("has_warning=%v has_critical=%v, want the 82.5%% warning only", quota.HasWarning, quota.HasCritical)
+	}
+
+	check, err := GetQuotaCheck("codex")
+	if err != nil || !check.Success || check.Quota.UsagePercent != 30 {
+		t.Fatalf("GetQuotaCheck(codex) = %+v, %v; want caut's 30%%", check, err)
+	}
+
+	logged, err := os.ReadFile(argsLog)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(logged), "usage --format json --provider claude") {
+		t.Fatalf("caut was called as %q, want usage --format json --provider <name>", logged)
 	}
 }
 

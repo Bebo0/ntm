@@ -68,8 +68,8 @@ func TestConvertProviderUsage_WithStatus(t *testing.T) {
 		Provider: "claude",
 		Source:   "api",
 		Status: &caut.StatusInfo{
-			Operational: false,
-			Message:     &msg,
+			Indicator:   "major",
+			Description: &msg,
 		},
 	}
 
@@ -94,7 +94,7 @@ func TestConvertProviderUsage_StatusNoMessage(t *testing.T) {
 		Provider: "claude",
 		Source:   "web",
 		Status: &caut.StatusInfo{
-			Operational: true,
+			Indicator: "none",
 		},
 	}
 
@@ -127,8 +127,8 @@ func TestConvertProviderUsage_FullPayload(t *testing.T) {
 		Account:  &acct,
 		Source:   "web",
 		Status: &caut.StatusInfo{
-			Operational: true,
-			Message:     &statusMsg,
+			Indicator:   "none",
+			Description: &statusMsg,
 		},
 		Usage: caut.UsageSnapshot{
 			PrimaryRateWindow: &caut.RateWindow{

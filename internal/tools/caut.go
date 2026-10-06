@@ -3,7 +3,6 @@ package tools
 import (
 	"bytes"
 	"context"
-	"encoding/json"
 	"fmt"
 	"log/slog"
 	"os/exec"
@@ -139,15 +138,14 @@ func (a *CautAdapter) Info(ctx context.Context) (*ToolInfo, error) {
 type CautAvailability struct {
 	Available   bool      `json:"available"`
 	Compatible  bool      `json:"compatible"`
-	HasData     bool      `json:"has_data"` // Has been initialized with usage data
 	Version     Version   `json:"version,omitempty"`
 	Path        string    `json:"path,omitempty"`
-	Providers   []string  `json:"providers,omitempty"` // Configured providers
 	LastChecked time.Time `json:"last_checked"`
 	Error       string    `json:"error,omitempty"`
 }
 
-// CautProvider represents a cloud API provider configuration
+// CautProvider is one provider's quota reading in the usage cache that the
+// dashboard and robot quota status read (filled from caut's usage windows).
 type CautProvider struct {
 	Name      string  `json:"name"`
 	Enabled   bool    `json:"enabled"`
@@ -234,15 +232,6 @@ func (a *CautAdapter) IsAvailable(ctx context.Context) bool {
 	return availability.Available && availability.Compatible
 }
 
-// HasUsageData returns true if caut has been configured with usage data.
-func (a *CautAdapter) HasUsageData(ctx context.Context) bool {
-	availability, err := a.GetAvailability(ctx)
-	if err != nil || availability == nil {
-		return false
-	}
-	return availability.HasData
-}
-
 func (a *CautAdapter) fetchAvailability(ctx context.Context) *CautAvailability {
 	availability := &CautAvailability{
 		LastChecked: time.Now(),
@@ -272,141 +261,9 @@ func (a *CautAdapter) fetchAvailability(ctx context.Context) *CautAvailability {
 	}
 
 	availability.Compatible = true
-
-	// Check if caut has any data
-	status, err := a.GetStatus(ctx)
-	if err == nil && status != nil {
-		availability.HasData = status.ProviderCount > 0
-		availability.Providers = make([]string, 0, len(status.Providers))
-		for _, p := range status.Providers {
-			if p.Enabled {
-				availability.Providers = append(availability.Providers, p.Name)
-			}
-		}
-	}
-
 	return availability
 }
 
 func cautCompatible(version Version) bool {
 	return version.AtLeast(cautMinVersion)
-}
-
-// GetStatus returns the current caut status
-func (a *CautAdapter) GetStatus(ctx context.Context) (*CautStatus, error) {
-	ctx, cancel := context.WithTimeout(ctx, a.Timeout())
-	defer cancel()
-
-	cmd := exec.CommandContext(ctx, a.BinaryName(), "status", "--json")
-	cmd.WaitDelay = time.Second
-	stdout := NewLimitedBuffer(10 * 1024 * 1024)
-	var stderr bytes.Buffer
-	cmd.Stdout = stdout
-	cmd.Stderr = &stderr
-
-	if err := cmd.Run(); err != nil {
-		if ctx.Err() == context.DeadlineExceeded {
-			return nil, ErrTimeout
-		}
-		// caut might not have data yet
-		return &CautStatus{Running: false, Tracking: false}, nil
-	}
-
-	output := stdout.Bytes()
-	if !json.Valid(output) {
-		return &CautStatus{Running: true, Tracking: false}, nil
-	}
-
-	var status CautStatus
-	if err := json.Unmarshal(output, &status); err != nil {
-		return nil, fmt.Errorf("failed to parse caut status: %w", err)
-	}
-
-	return &status, nil
-}
-
-// GetUsage returns usage data for a specific provider and time period
-func (a *CautAdapter) GetUsage(ctx context.Context, provider, period string) (*CautUsage, error) {
-	ctx, cancel := context.WithTimeout(ctx, a.Timeout())
-	defer cancel()
-
-	args := []string{"usage", "--json"}
-	if provider != "" {
-		args = append(args, "--provider", provider)
-	}
-	if period != "" {
-		args = append(args, "--period", period)
-	}
-
-	cmd := exec.CommandContext(ctx, a.BinaryName(), args...)
-	cmd.WaitDelay = time.Second
-	stdout := NewLimitedBuffer(10 * 1024 * 1024)
-	var stderr bytes.Buffer
-	cmd.Stdout = stdout
-	cmd.Stderr = &stderr
-
-	if err := cmd.Run(); err != nil {
-		if ctx.Err() == context.DeadlineExceeded {
-			return nil, ErrTimeout
-		}
-		return nil, fmt.Errorf("caut usage failed: %w: %s", err, stderr.String())
-	}
-
-	output := stdout.Bytes()
-	if !json.Valid(output) {
-		return nil, fmt.Errorf("invalid JSON output from caut usage")
-	}
-
-	var usage CautUsage
-	if err := json.Unmarshal(output, &usage); err != nil {
-		return nil, fmt.Errorf("failed to parse caut usage: %w", err)
-	}
-
-	return &usage, nil
-}
-
-// GetAllUsage returns usage data for all configured providers
-func (a *CautAdapter) GetAllUsage(ctx context.Context, period string) ([]CautUsage, error) {
-	ctx, cancel := context.WithTimeout(ctx, a.Timeout())
-	defer cancel()
-
-	args := []string{"usage", "--all", "--json"}
-	if period != "" {
-		args = append(args, "--period", period)
-	}
-
-	cmd := exec.CommandContext(ctx, a.BinaryName(), args...)
-	cmd.WaitDelay = time.Second
-	stdout := NewLimitedBuffer(10 * 1024 * 1024)
-	var stderr bytes.Buffer
-	cmd.Stdout = stdout
-	cmd.Stderr = &stderr
-
-	if err := cmd.Run(); err != nil {
-		if ctx.Err() == context.DeadlineExceeded {
-			return nil, ErrTimeout
-		}
-		return nil, fmt.Errorf("caut usage failed: %w: %s", err, stderr.String())
-	}
-
-	output := stdout.Bytes()
-	if !json.Valid(output) {
-		return nil, fmt.Errorf("invalid JSON output from caut usage")
-	}
-
-	var usages []CautUsage
-	if err := json.Unmarshal(output, &usages); err != nil {
-		return nil, fmt.Errorf("failed to parse caut usage: %w", err)
-	}
-
-	return usages, nil
-}
-
-// GetQuotaStatus returns the current quota status for all providers
-func (a *CautAdapter) GetQuotaStatus(ctx context.Context) ([]CautProvider, error) {
-	status, err := a.GetStatus(ctx)
-	if err != nil {
-		return nil, err
-	}
-	return status.Providers, nil
 }

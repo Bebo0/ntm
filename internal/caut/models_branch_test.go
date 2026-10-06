@@ -95,48 +95,24 @@ func TestGetAccountEmail_NilIdentity(t *testing.T) {
 	}
 }
 
-// TestGetPlanName_IdentityNonNil_PlanNil tests Identity present but plan nil.
-func TestGetPlanName_IdentityNonNil_PlanNil(t *testing.T) {
-	t.Parallel()
-
-	p := &ProviderPayload{
-		Usage: UsageSnapshot{
-			Identity: &Identity{},
-		},
-	}
-	if got := p.GetPlanName(); got != "" {
-		t.Errorf("GetPlanName() = %q, want empty", got)
-	}
-}
-
-// TestGetPlanName_NilIdentity verifies nil Identity path.
-func TestGetPlanName_NilIdentity(t *testing.T) {
-	t.Parallel()
-
-	p := &ProviderPayload{Usage: UsageSnapshot{}}
-	if got := p.GetPlanName(); got != "" {
-		t.Errorf("GetPlanName() = %q, want empty", got)
-	}
-}
-
 // TestIsOperational_NonNilStatus tests the non-nil Status branch.
 func TestIsOperational_NonNilStatus(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
-		name        string
-		operational bool
-		want        bool
+		name      string
+		indicator string
+		want      bool
 	}{
-		{"operational true", true, true},
-		{"operational false", false, false},
+		{"no incident", "none", true},
+		{"major outage", "major", false},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 			p := &ProviderPayload{
-				Status: &StatusInfo{Operational: tt.operational},
+				Status: &StatusInfo{Indicator: tt.indicator},
 			}
 			if got := p.IsOperational(); got != tt.want {
 				t.Errorf("IsOperational() = %v, want %v", got, tt.want)
@@ -145,7 +121,8 @@ func TestIsOperational_NonNilStatus(t *testing.T) {
 	}
 }
 
-// TestAgentTypeToProvider_AllCases covers all switch cases including cursor/windsurf/aider.
+// TestAgentTypeToProvider_AllCases covers all switch cases; windsurf and aider
+// have no caut provider.
 func TestAgentTypeToProvider_AllCases(t *testing.T) {
 	t.Parallel()
 
@@ -168,9 +145,9 @@ func TestAgentTypeToProvider_AllCases(t *testing.T) {
 		{"google", "gemini"},
 		{"google-gemini", "gemini"},
 		{"cursor", "cursor"},
-		{"ws", "windsurf"},
-		{"windsurf", "windsurf"},
-		{"aider", "aider"},
+		{"ws", ""},
+		{"windsurf", ""},
+		{"aider", ""},
 		{"unknown", ""},
 		{"", ""},
 	}

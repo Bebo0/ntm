@@ -102,15 +102,16 @@ func (c *Client) IsInstalled() bool {
 	return true // Assume custom executor is working
 }
 
-// FetchUsage queries caut for provider usage
-func (c *Client) FetchUsage(ctx context.Context, providers []string) (*UsageResult, error) {
+// FetchUsage queries caut for one provider's usage (caut's --provider takes a
+// single name; empty asks for its default primary providers).
+func (c *Client) FetchUsage(ctx context.Context, provider string) (*UsageResult, error) {
 	if !c.IsInstalled() {
 		return nil, ErrNotInstalled
 	}
 
 	args := []string{"usage", "--format", "json"}
-	for _, p := range providers {
-		args = append(args, "--provider", p)
+	if provider != "" {
+		args = append(args, "--provider", provider)
 	}
 
 	ctx, cancel := context.WithTimeout(ctx, c.timeout)
@@ -128,7 +129,7 @@ func (c *Client) FetchUsage(ctx context.Context, providers []string) (*UsageResu
 
 	return &UsageResult{
 		SchemaVersion: resp.SchemaVersion,
-		Payloads:      resp.Data.Payloads,
+		Payloads:      resp.Data,
 		Errors:        resp.Errors,
 		FetchedAt:     time.Now(),
 	}, nil
@@ -136,7 +137,7 @@ func (c *Client) FetchUsage(ctx context.Context, providers []string) (*UsageResu
 
 // GetProviderUsage fetches usage for a single provider
 func (c *Client) GetProviderUsage(ctx context.Context, provider string) (*ProviderPayload, error) {
-	result, err := c.FetchUsage(ctx, []string{provider})
+	result, err := c.FetchUsage(ctx, provider)
 	if err != nil {
 		return nil, err
 	}

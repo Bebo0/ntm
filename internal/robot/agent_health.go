@@ -494,10 +494,10 @@ func convertProviderUsage(payload *caut.ProviderPayload) *ProviderUsageInfo {
 	// Convert status
 	if payload.Status != nil {
 		info.Status = &ProviderStatusInfo{
-			Operational: payload.Status.Operational,
+			Operational: payload.Status.Operational(),
 		}
-		if payload.Status.Message != nil {
-			info.Status.Message = *payload.Status.Message
+		if payload.Status.Description != nil {
+			info.Status.Message = *payload.Status.Description
 		}
 	}
 

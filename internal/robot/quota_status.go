@@ -80,10 +80,22 @@ func quotaLookupProvider(provider string) string {
 	}
 }
 
+// cautQuotaRefreshTimeout bounds the caut read a quota query may trigger.
+const cautQuotaRefreshTimeout = 25 * time.Second
+
+// refreshCautQuotaCache refills caut's usage cache when it is stale, so quota
+// queries report what caut measures instead of an empty cache.
+func refreshCautQuotaCache(poller *caut.UsagePoller) {
+	ctx, cancel := context.WithTimeout(context.Background(), cautQuotaRefreshTimeout)
+	defer cancel()
+	poller.RefreshIfStale(ctx, caut.MaxAge)
+}
+
 // GetQuotaStatus returns quota status information.
 // This function returns the data struct directly, enabling CLI/REST parity.
 func GetQuotaStatus() (*QuotaStatusOutput, error) {
 	poller := caut.GetGlobalPoller()
+	refreshCautQuotaCache(poller)
 	cache := poller.GetCache()
 
 	// Check if caut is available
@@ -331,7 +343,9 @@ func GetQuotaCheck(provider string) (*QuotaCheckOutput, error) {
 	lookupProvider := quotaLookupProvider(provider)
 
 	// caut's cache first: usage counters, then its quota percentage.
-	cache := caut.GetGlobalPoller().GetCache()
+	poller := caut.GetGlobalPoller()
+	refreshCautQuotaCache(poller)
+	cache := poller.GetCache()
 	info := QuotaInfo{Providers: make(map[string]ProviderQuota)}
 	if usage := cache.GetUsage(lookupProvider); usage != nil {
 		info.Providers[canonicalProvider] = ProviderQuota{

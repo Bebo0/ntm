@@ -47,10 +47,8 @@ func TestCautAvailabilityStruct(t *testing.T) {
 	availability := CautAvailability{
 		Available:   true,
 		Compatible:  true,
-		HasData:     true,
 		Version:     Version{Major: 1, Minor: 0, Patch: 0},
 		Path:        "/usr/local/bin/caut",
-		Providers:   []string{"anthropic", "openai"},
 		LastChecked: time.Now(),
 	}
 
@@ -60,14 +58,6 @@ func TestCautAvailabilityStruct(t *testing.T) {
 
 	if !availability.Compatible {
 		t.Error("Expected Compatible to be true")
-	}
-
-	if !availability.HasData {
-		t.Error("Expected HasData to be true")
-	}
-
-	if len(availability.Providers) != 2 {
-		t.Errorf("Expected 2 providers, got %d", len(availability.Providers))
 	}
 }
 
@@ -207,22 +197,6 @@ func TestCautAdapterIsAvailable(t *testing.T) {
 	}
 }
 
-func TestCautAdapterHasUsageData(t *testing.T) {
-	adapter := NewCautAdapter()
-
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-
-	// HasUsageData should not panic
-	hasData := adapter.HasUsageData(ctx)
-
-	// If caut is not installed, should return false
-	_, installed := adapter.Detect()
-	if !installed && hasData {
-		t.Error("HasUsageData returned true but caut is not installed")
-	}
-}
-
 func TestCautAdapterGetAvailability(t *testing.T) {
 	adapter := NewCautAdapter()
 
@@ -330,25 +304,6 @@ func TestCautMinVersionCompatibility(t *testing.T) {
 				t.Errorf("cautCompatible(%v) = %v, want %v", tt.version, result, tt.expected)
 			}
 		})
-	}
-}
-
-func TestCautAdapterGetStatus(t *testing.T) {
-	adapter := NewCautAdapter()
-
-	// If caut is not installed, GetStatus should handle gracefully
-	_, installed := adapter.Detect()
-	if installed {
-		t.Skip("caut is installed, skipping not-installed test")
-	}
-
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-
-	_, err := adapter.GetStatus(ctx)
-	// Should return an error when not installed
-	if err == nil {
-		t.Log("GetStatus returned no error - caut may be in PATH but not working")
 	}
 }
 

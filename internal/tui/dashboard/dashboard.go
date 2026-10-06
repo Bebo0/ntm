@@ -1387,8 +1387,16 @@ func (m Model) fetchWorkflowState() tea.Cmd {
 // Package-level indirection follows the dashboardRunAddAgents pattern so tests
 // can substitute deterministic fixtures without touching tmux/caut/caam.
 
+// dashboardQuotaRefreshTimeout bounds the caut read a quota-panel refresh may
+// trigger; the fetch runs off the UI loop.
+const dashboardQuotaRefreshTimeout = 25 * time.Second
+
 var dashboardFetchQuotaData = func() panels.QuotaData {
-	cache := caut.GetGlobalPoller().GetCache()
+	poller := caut.GetGlobalPoller()
+	ctx, cancel := context.WithTimeout(context.Background(), dashboardQuotaRefreshTimeout)
+	defer cancel()
+	poller.RefreshIfStale(ctx, caut.MaxAge)
+	cache := poller.GetCache()
 	if cache == nil {
 		return panels.QuotaData{Available: false}
 	}
