@@ -335,6 +335,9 @@ type CheckDCGVerdict struct {
 	Error     string `json:"error,omitempty"`
 }
 
+// hookSessionLookupTimeout bounds the tmux query recordHookRefusal makes.
+const hookSessionLookupTimeout = 2 * time.Second
+
 // recordHookRefusal files a command an installed safety hook refused: an entry
 // in the blocked-command log (`ntm safety blocked`) naming the tmux session and
 // pane it ran in, and a row in that session's blocked_commands, which `ntm
@@ -342,7 +345,11 @@ type CheckDCGVerdict struct {
 // in shell with no usable session ("unknown"), and the metric never counted
 // these refusals (bd-cl6me).
 func recordHookRefusal(resp CheckResponse) {
-	session := tmux.GetCurrentSession()
+	// This runs inside an agent's tool-call hook: a stuck tmux server must not
+	// hang the agent, so the session lookup is bounded.
+	lookupCtx, cancel := context.WithTimeout(context.Background(), hookSessionLookupTimeout)
+	session, _ := tmux.GetCurrentSessionContext(lookupCtx)
+	cancel()
 	pane := strings.TrimSpace(os.Getenv("TMUX_PANE"))
 	entry := policy.BlockedEntry{
 		Timestamp: time.Now().UTC(),

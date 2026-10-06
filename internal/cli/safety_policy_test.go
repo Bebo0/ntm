@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/Dicklesworthstone/ntm/internal/policy"
 )
@@ -220,6 +221,32 @@ exit 0
 	}
 	if _, err := os.Stat(filepath.Join(dir, ".ntm", "logs", "blocked.jsonl")); !os.IsNotExist(err) {
 		t.Fatalf("hook script wrote its own blocked log (stat err %v)", err)
+	}
+}
+
+// recordHookRefusal runs inside an agent's tool-call hook, so a tmux server
+// that does not answer must not hang it: the refusal is still logged, without
+// a session.
+func TestRecordHookRefusalDoesNotHangOnStuckTmux(t *testing.T) {
+	root := t.TempDir()
+	t.Setenv("HOME", root)
+	t.Setenv("NTM_CONFIG", filepath.Join(root, "cfg", "config.toml"))
+	fakeTmux := filepath.Join(root, "tmux")
+	if err := os.WriteFile(fakeTmux, []byte("#!/bin/sh\nexec sleep 10\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("NTM_TMUX_BINARY", fakeTmux)
+	t.Setenv("TMUX", "/tmp/fake-tmux-socket,1,0")
+	t.Setenv("TMUX_PANE", "%7")
+
+	start := time.Now()
+	recordHookRefusal(CheckResponse{Command: "rm -rf build", Action: "block", Reason: "recursive delete"})
+	if elapsed := time.Since(start); elapsed > 5*time.Second {
+		t.Fatalf("recordHookRefusal took %v with an unresponsive tmux", elapsed)
+	}
+	entries, err := policy.ReadBlockedLog(filepath.Join(root, ".ntm", "logs", "blocked.jsonl"))
+	if err != nil || len(entries) != 1 || entries[0].Session != "" || entries[0].Command != "rm -rf build" {
+		t.Fatalf("blocked log entries = %+v (err %v), want the refusal logged without a session", entries, err)
 	}
 }
 
