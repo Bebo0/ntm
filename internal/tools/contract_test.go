@@ -3,6 +3,7 @@ package tools
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -372,17 +373,16 @@ func TestJFPAdapterMethods(t *testing.T) {
 		t.Error("Suggest() returned invalid JSON")
 	}
 
-	// Test Install
-	result, err = adapter.Install(ctx, []string{"test-prompt"}, "")
-	if err != nil {
-		t.Fatalf("Install() error: %v", err)
+	// Skill management moved from jfp to jsm; jfp answers with deprecated_command.
+	if _, err = adapter.Install(ctx, []string{"test-prompt"}, ""); !errors.Is(err, ErrJFPCommandMoved) {
+		t.Fatalf("Install() error = %v, want ErrJFPCommandMoved", err)
 	}
-	if !json.Valid(result) {
-		t.Error("Install() returned invalid JSON")
+	if _, err = adapter.Export(ctx, []string{"test-prompt"}, "skill"); !errors.Is(err, ErrJFPCommandMoved) {
+		t.Fatalf("Export(skill) error = %v, want ErrJFPCommandMoved", err)
 	}
 
 	// Test Export
-	result, err = adapter.Export(ctx, []string{"test-prompt"}, "skill")
+	result, err = adapter.Export(ctx, []string{"test-prompt"}, "md")
 	if err != nil {
 		t.Fatalf("Export() error: %v", err)
 	}
@@ -390,13 +390,13 @@ func TestJFPAdapterMethods(t *testing.T) {
 		t.Error("Export() returned invalid JSON")
 	}
 
-	// Test Update
-	result, err = adapter.Update(ctx)
+	// Test Refresh
+	result, err = adapter.Refresh(ctx)
 	if err != nil {
-		t.Fatalf("Update() error: %v", err)
+		t.Fatalf("Refresh() error: %v", err)
 	}
 	if !json.Valid(result) {
-		t.Error("Update() returned invalid JSON")
+		t.Error("Refresh() returned invalid JSON")
 	}
 }
 

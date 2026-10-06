@@ -765,14 +765,13 @@ func GetJFPList(opts JFPListOptions) (*JFPListOutput, error) {
 		return output, nil
 	}
 
-	output.Prompts = data
-
-	// Try to count items
-	var items []interface{}
-	if json.Unmarshal(data, &items) == nil {
-		output.Count = len(items)
+	prompts, count, err := jfpListField(data, "prompts")
+	if err != nil {
+		output.RobotResponse = NewErrorResponse(err, "LIST_FAILED", "Check 'jfp list --json' output")
+		return output, nil
 	}
-
+	output.Prompts = prompts
+	output.Count = count
 	return output, nil
 }
 
@@ -831,14 +830,13 @@ func GetJFPSearch(query string) (*JFPSearchOutput, error) {
 		return output, nil
 	}
 
-	output.Results = data
-
-	// Try to count results
-	var items []interface{}
-	if json.Unmarshal(data, &items) == nil {
-		output.Count = len(items)
+	results, count, err := jfpListField(data, "results")
+	if err != nil {
+		output.RobotResponse = NewErrorResponse(err, "SEARCH_FAILED", "Check 'jfp search --json' output")
+		return output, nil
 	}
-
+	output.Results = results
+	output.Count = count
 	return output, nil
 }
 
@@ -954,8 +952,34 @@ func GetJFPSuggest(task string) (*JFPSuggestOutput, error) {
 		return output, nil
 	}
 
-	output.Suggestions = data
+	suggestions, _, err := jfpListField(data, "suggestions")
+	if err != nil {
+		output.RobotResponse = NewErrorResponse(err, "SUGGEST_FAILED", "Check 'jfp suggest --json' output")
+		return output, nil
+	}
+	output.Suggestions = suggestions
 	return output, nil
+}
+
+// jfpListField returns one array field of a jfp JSON object (list, search and
+// suggest wrap their items, e.g. {"prompts":[...],"count":N}) and its length.
+func jfpListField(data json.RawMessage, field string) (json.RawMessage, int, error) {
+	var envelope map[string]json.RawMessage
+	if err := json.Unmarshal(data, &envelope); err != nil {
+		return nil, 0, fmt.Errorf("decode jfp output: %w", err)
+	}
+	var items []json.RawMessage
+	list, ok := envelope[field]
+	if !ok || json.Unmarshal(list, &items) != nil {
+		return nil, 0, fmt.Errorf("jfp output has no %q array", field)
+	}
+	return list, len(items), nil
+}
+
+// jfpMovedResponse reports a jfp command that upstream retired as unavailable
+// rather than as a failure.
+func jfpMovedResponse(err error) RobotResponse {
+	return NewErrorResponse(err, ErrCodeNotImplemented, "Skill management moved from jfp to jsm; use jsm directly")
 }
 
 // PrintJFPSuggest outputs prompt suggestions for a task as JSON.
@@ -991,6 +1015,10 @@ func GetJFPInstalled() (*JFPInstalledOutput, error) {
 	ctx := context.Background()
 	data, err := adapter.Installed(ctx)
 
+	if errors.Is(err, tools.ErrJFPCommandMoved) {
+		output.RobotResponse = jfpMovedResponse(err)
+		return output, nil
+	}
 	if err != nil {
 		output.RobotResponse = NewErrorResponse(
 			err,
@@ -1237,6 +1265,10 @@ func GetJFPInstall(rawIDs, project string) (*JFPInstallOutput, error) {
 
 	ctx := context.Background()
 	data, err := adapter.Install(ctx, ids, project)
+	if errors.Is(err, tools.ErrJFPCommandMoved) {
+		output.RobotResponse = jfpMovedResponse(err)
+		return output, nil
+	}
 	if err != nil {
 		output.RobotResponse = NewErrorResponse(
 			err,
@@ -1294,6 +1326,10 @@ func GetJFPExport(rawIDs, format string) (*JFPExportOutput, error) {
 
 	ctx := context.Background()
 	data, err := adapter.Export(ctx, ids, format)
+	if errors.Is(err, tools.ErrJFPCommandMoved) {
+		output.RobotResponse = jfpMovedResponse(err)
+		return output, nil
+	}
 	if err != nil {
 		output.RobotResponse = NewErrorResponse(
 			err,
@@ -1338,12 +1374,12 @@ func GetJFPUpdate() (*JFPUpdateOutput, error) {
 	}
 
 	ctx := context.Background()
-	data, err := adapter.Update(ctx)
+	data, err := adapter.Refresh(ctx)
 	if err != nil {
 		output.RobotResponse = NewErrorResponse(
 			err,
 			"UPDATE_FAILED",
-			"Run 'jfp update' to refresh the registry",
+			"Run 'jfp refresh' to refresh the registry",
 		)
 		return output, nil
 	}

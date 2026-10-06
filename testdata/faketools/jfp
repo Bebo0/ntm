@@ -1,6 +1,9 @@
 #!/bin/bash
 # Fake jfp tool for testing
 # Supports MODE environment variable: normal (default), timeout, error
+# Mirrors jfp 1.0.x: list/search/suggest wrap their items in objects, failures
+# are {"error":true,...} on stdout with exit 1, and skill management
+# (install/installed/update, export --format skill) moved to jsm.
 
 MODE="${FAKE_TOOL_MODE:-normal}"
 
@@ -14,6 +17,11 @@ case "$MODE" in
         ;;
 esac
 
+moved() {
+    echo '{"error":true,"code":"deprecated_command","message":"'"$1"'"}'
+    exit 1
+}
+
 # Normal mode - check arguments
 case "$1" in
     --version)
@@ -22,7 +30,7 @@ case "$1" in
         ;;
     list)
         if [[ "$*" == *"--json"* ]]; then
-            echo '[{"id": "test-prompt", "title": "Test Prompt", "category": "testing"}]'
+            echo '{"prompts":[{"id":"test-prompt","title":"Test Prompt","category":"testing"}],"count":1}'
         else
             echo "test-prompt  Test Prompt  testing"
         fi
@@ -30,7 +38,7 @@ case "$1" in
         ;;
     search)
         if [[ "$*" == *"--json"* ]]; then
-            echo '[{"id": "test-prompt", "title": "Test Prompt", "score": 0.95}]'
+            echo '{"results":[{"id":"test-prompt","title":"Test Prompt","score":0.95}],"query":"'"$2"'","authenticated":false}'
         else
             echo "test-prompt  Test Prompt (0.95)"
         fi
@@ -86,45 +94,38 @@ case "$1" in
         fi
         exit 0
         ;;
-    installed)
-        if [[ "$*" == *"--json"* ]]; then
-            echo '[]'
-        else
-            echo "No skills installed"
-        fi
-        exit 0
-        ;;
     suggest)
         if [[ "$*" == *"--json"* ]]; then
-            echo '[{"id": "test-prompt", "title": "Test Prompt", "relevance": 0.8}]'
+            echo '{"task":"'"$2"'","suggestions":[{"id":"test-prompt","title":"Test Prompt","relevance":0.8}],"total":1}'
         else
             echo "Suggested: test-prompt"
         fi
         exit 0
         ;;
-    install)
-        if [[ "$*" == *"--json"* ]]; then
-            echo '{"installed": ["test-prompt"], "project": "default"}'
-        else
-            echo "Installed test-prompt"
-        fi
-        exit 0
-        ;;
     export)
+        if [[ "$*" == *"--format skill"* ]]; then
+            moved "Skill export moved to jsm. Run: jsm --help"
+        fi
         if [[ "$*" == *"--json"* ]]; then
-            echo '{"exported": ["test-prompt"], "format": "skill"}'
+            echo '{"success":true,"format":"md","stdout":false,"exported":[{"id":"test-prompt","file":"test-prompt.md"}]}'
         else
             echo "Exported test-prompt"
         fi
         exit 0
         ;;
-    update)
+    refresh)
         if [[ "$*" == *"--json"* ]]; then
-            echo '{"updated": true}'
+            echo '{"success":true,"source":"cache","promptCount":21,"version":"1.0.0"}'
         else
-            echo "Updated"
+            echo "Registry refreshed"
         fi
         exit 0
+        ;;
+    install)
+        moved "This command moved to jsm. Run: jsm install <skill>"
+        ;;
+    installed|update)
+        moved "Skill management moved to jsm. Run: jsm --help"
         ;;
     --help|-h)
         echo "jfp - JeffreysPrompts CLI (fake for testing)"

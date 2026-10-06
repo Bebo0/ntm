@@ -648,6 +648,63 @@ func TestRobotMSSearchAndShowReadInstalledMS(t *testing.T) {
 	}
 }
 
+// TestRobotJFPReadsInstalledJFP drives the --robot-jfp-* surfaces through the
+// installed jfp with an isolated home, where jfp serves its bundled registry.
+func TestRobotJFPReadsInstalledJFP(t *testing.T) {
+	if _, err := exec.LookPath("jfp"); err != nil {
+		t.Skip("jfp not installed")
+	}
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	t.Setenv("XDG_CACHE_HOME", filepath.Join(home, ".cache"))
+	t.Chdir(t.TempDir()) // jfp export writes into the working directory
+
+	arrayLen := func(raw json.RawMessage) int {
+		t.Helper()
+		var items []json.RawMessage
+		if err := json.Unmarshal(raw, &items); err != nil {
+			t.Fatalf("expected a JSON array, got %s: %v", raw, err)
+		}
+		return len(items)
+	}
+
+	list, err := GetJFPList(JFPListOptions{})
+	if err != nil || !list.Success || list.Count == 0 || list.Count != arrayLen(list.Prompts) {
+		t.Fatalf("GetJFPList = success:%t count:%d err:%q (%v)", list.Success, list.Count, list.Error, err)
+	}
+
+	search, err := GetJFPSearch("commit")
+	if err != nil || !search.Success || search.Count == 0 || search.Count != arrayLen(search.Results) {
+		t.Fatalf("GetJFPSearch = success:%t count:%d err:%q (%v)", search.Success, search.Count, search.Error, err)
+	}
+
+	suggest, err := GetJFPSuggest("write documentation")
+	if err != nil || !suggest.Success {
+		t.Fatalf("GetJFPSuggest = success:%t err:%q (%v)", suggest.Success, suggest.Error, err)
+	}
+	arrayLen(suggest.Suggestions)
+
+	installed, err := GetJFPInstalled()
+	if err != nil || installed.Success || installed.ErrorCode != ErrCodeNotImplemented {
+		t.Fatalf("GetJFPInstalled = success:%t code:%q err:%q, want NOT_IMPLEMENTED (moved to jsm)", installed.Success, installed.ErrorCode, installed.Error)
+	}
+	skillExport, err := GetJFPExport("idea-wizard", "skill")
+	if err != nil || skillExport.Success || skillExport.ErrorCode != ErrCodeNotImplemented {
+		t.Fatalf("GetJFPExport(skill) = success:%t code:%q err:%q, want NOT_IMPLEMENTED", skillExport.Success, skillExport.ErrorCode, skillExport.Error)
+	}
+	mdExport, err := GetJFPExport("idea-wizard", "")
+	if err != nil || !mdExport.Success {
+		t.Fatalf("GetJFPExport(md) = success:%t err:%q (%v)", mdExport.Success, mdExport.Error, err)
+	}
+
+	// Refresh may fail offline, but never as the retired `jfp update`.
+	update, err := GetJFPUpdate()
+	if err != nil || strings.Contains(update.Error, "jsm") {
+		t.Fatalf("GetJFPUpdate = success:%t err:%q (%v), want jfp refresh", update.Success, update.Error, err)
+	}
+}
+
 // ====================
 // Test Type Marshaling
 // ====================

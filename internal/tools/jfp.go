@@ -4,12 +4,18 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os/exec"
 	"strings"
 	"time"
 )
+
+// ErrJFPCommandMoved is returned for jfp commands that upstream retired with a
+// "deprecated_command" error; skill management (install/installed/update)
+// moved to jsm.
+var ErrJFPCommandMoved = errors.New("jfp command moved")
 
 // JFPAdapter provides integration with the JeffreysPrompts CLI (jfp)
 type JFPAdapter struct {
@@ -240,9 +246,9 @@ func (a *JFPAdapter) Export(ctx context.Context, ids []string, format string) (j
 	return a.runCommand(ctx, args...)
 }
 
-// Update refreshes the local prompt registry/cache.
-func (a *JFPAdapter) Update(ctx context.Context) (json.RawMessage, error) {
-	return a.runCommand(ctx, "update", "--json")
+// Refresh refreshes the local prompt registry cache from the remote registry.
+func (a *JFPAdapter) Refresh(ctx context.Context) (json.RawMessage, error) {
+	return a.runCommand(ctx, "refresh", "--json")
 }
 
 // runCommand executes a jfp command and returns raw JSON
@@ -280,6 +286,18 @@ func (a *JFPAdapter) runCommand(ctx context.Context, args ...string) (json.RawMe
 	if err := cmd.Wait(); err != nil {
 		if ctx.Err() == context.DeadlineExceeded {
 			return nil, ErrTimeout
+		}
+		// jfp reports failures as {"error":true,"code":...,"message":...} on stdout.
+		var failure struct {
+			Error   bool   `json:"error"`
+			Code    string `json:"code"`
+			Message string `json:"message"`
+		}
+		if json.Unmarshal(bytes.TrimSpace(output), &failure) == nil && failure.Error && failure.Message != "" {
+			if failure.Code == "deprecated_command" {
+				return nil, fmt.Errorf("%w: %s", ErrJFPCommandMoved, failure.Message)
+			}
+			return nil, fmt.Errorf("jfp %s failed: %s (%s)", strings.Join(args, " "), failure.Message, failure.Code)
 		}
 		return nil, fmt.Errorf("jfp %s failed: %w: %s", strings.Join(args, " "), err, stderr.String())
 	}
