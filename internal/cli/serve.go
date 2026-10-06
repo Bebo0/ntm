@@ -295,6 +295,12 @@ func runServe(opts serveOptions) error {
 	}
 	// Create server with default event bus
 	srv := serve.New(serverCfg)
+	// API launches must honor the same selected policy as robot CLI launches,
+	// including an explicit --config/NTM_CONFIG and per-project safety overlays.
+	if err := srv.ConfigureSpawnPolicy(selectedConfigPath(), selectedConfigIsExplicit()); err != nil {
+		srv.Stop()
+		return fmt.Errorf("configure agent spawn policy: %w", err)
+	}
 	closeJobs, err := srv.RestoreJobHistory()
 	if err != nil {
 		srv.Stop()

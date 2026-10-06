@@ -102,6 +102,40 @@ agent may use different providers internally; its type is not a subscription.
 
 The configuration reaches `--robot-spawn` through its normal selected config
 and `GetSpawn` callers that provide a config (including the authoritative
-assignment-policy path). It does not change ordinary human `ntm spawn` pacing,
-or make unconfigured REST calls start loading global configuration. Existing
-launch readiness, work-source checks, and reservation gates remain separate.
+assignment-policy path). It does not change ordinary human `ntm spawn` pacing.
+Existing launch readiness, work-source checks, and reservation gates remain
+separate.
+
+## HTTP server policy
+
+`ntm serve`, `ntm serve --web`, and `ntm web` bind their spawn backend to the same
+global configuration selected by `--config`, `NTM_CONFIG`, or the default path.
+Both `POST /api/v1/sessions/{sessionId}/agents/spawn` and `swarm_spawn` jobs now
+load that policy, even without `assign_work`. Configured agent commands, model
+defaults, fleet limits, and serialized admission therefore apply to API launches
+as well as direct robot launches; HTTP no longer implicitly supplies a nil
+configuration that bypasses these controls.
+
+The selected config path is made absolute when the server is constructed. Its
+contents and the launch project's overlay are loaded strictly at execution,
+not frozen when a job is accepted. Missing explicitly selected files and invalid
+global or project configuration fail with `INVALID_FLAG` before the spawn engine
+can create panes or launch agents. An absent default-path file still uses the
+built-in defaults. Each call loads its own configuration rather than reusing a
+mutable merged config from another project. Existing project-overlay rules still
+apply: repositories cannot override the operator's agent execution commands or
+erase global assignment gates.
+
+Synchronous launches without a directory use the server's selected project;
+relative overrides resolve against that project. Queued jobs retain the absolute
+directory captured at admission, even after the server changes project. The same
+global config selection is forwarded to spawn's assignment preflight. Existing
+partial results, cancellation, progress, readiness, and reservation checks are
+not replaced. A preview still reports the admission decision without launching.
+
+Embedding callers of `serve.New` must explicitly call
+`ConfigureSpawnPolicy(selectedPath, requireSelectedFile)` during construction,
+before restoring jobs or serving requests, to opt into this backend. `New` itself
+remains side-effect-free and does not implicitly read user configuration. This
+method is not a concurrent runtime policy setter. No HTTP parameter permits a
+client to replace the server's selected global config path.
