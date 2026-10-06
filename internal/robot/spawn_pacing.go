@@ -4,11 +4,154 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sort"
 	"time"
 
+	"github.com/Dicklesworthstone/ntm/internal/config"
+	"github.com/Dicklesworthstone/ntm/internal/pressure"
 	"github.com/Dicklesworthstone/ntm/internal/resilience"
 	"github.com/Dicklesworthstone/ntm/internal/tmux"
 )
+
+// SpawnAdmissionError retains a machine-readable admission decision for launch
+// surfaces which return errors rather than a SpawnOutput (notably add/scale).
+// Err remains unwrap-able so cancellation does not turn into a quota refusal.
+type SpawnAdmissionError struct {
+	ErrorCode string
+	Admission *pressure.SpawnAdmission
+	Err       error
+}
+
+func (e *SpawnAdmissionError) Error() string {
+	if e == nil || e.Err == nil {
+		return "agent addition was not admitted"
+	}
+	return e.Err.Error()
+}
+
+func (e *SpawnAdmissionError) Unwrap() error {
+	if e == nil {
+		return nil
+	}
+	return e.Err
+}
+
+// BeginAgentAddition admits an entire add batch with the same fleet inventory,
+// pressure policy and cross-process ownership used by GetSpawn. Counts include
+// every requested type, including personas' underlying types and plugins; aliases
+// are combined before evaluation. It does not create panes or launch agents.
+//
+// On success, defer the returned idempotent release immediately and call it once
+// the last launch completes. Retain ownership across splits, launch delays and
+// partial failures; releasing per agent would reopen the check-then-launch race.
+// On error ownership has already been released and release is nil. Disabled
+// pacing returns a no-op release and nil admission without observing the fleet.
+func BeginAgentAddition(ctx context.Context, session string, counts map[string]int, cfg *config.Config) (func(), *pressure.SpawnAdmission, error) {
+	return beginAgentAddition(ctx, session, counts, cfg, spawnLifecycleDeps(nil))
+}
+
+func beginAgentAddition(ctx context.Context, session string, counts map[string]int, cfg *config.Config, deps SpawnLifecycleDependencies) (func(), *pressure.SpawnAdmission, error) {
+	fail := func(code string, admission *pressure.SpawnAdmission, err error) (func(), *pressure.SpawnAdmission, error) {
+		return nil, admission, &SpawnAdmissionError{ErrorCode: code, Admission: admission, Err: err}
+	}
+	if ctx == nil {
+		return fail(ErrCodeInvalidFlag, nil, errors.New("agent addition admission requires a context"))
+	}
+	if err := ctx.Err(); err != nil {
+		return fail(ErrCodeTimeout, nil, err)
+	}
+	if err := tmux.ValidateSessionName(session); err != nil {
+		return fail(ErrCodeInvalidFlag, nil, err)
+	}
+	if cfg == nil {
+		return fail(ErrCodeInvalidFlag, nil, errors.New("agent addition admission requires the selected configuration"))
+	}
+	keys := make([]string, 0, len(counts))
+	for kind := range counts {
+		keys = append(keys, kind)
+	}
+	sort.Strings(keys)
+	requested := make(map[string]int, len(counts))
+	total, maxCount := 0, int(^uint(0)>>1)
+	for _, raw := range keys {
+		count := counts[raw]
+		kind := spawnAdmissionAgentType(tmux.AgentType(raw))
+		if count < 0 || kind == "" || kind == "user" || kind == "unknown" {
+			return fail(ErrCodeInvalidFlag, nil, fmt.Errorf("invalid agent addition count %q=%d", raw, count))
+		}
+		if count > maxCount-total {
+			return fail(ErrCodeInvalidFlag, nil, errors.New("requested agent count exceeds supported pane capacity"))
+		}
+		total += count
+		requested[kind] += count
+	}
+	if total == 0 {
+		return fail(ErrCodeInvalidFlag, nil, errors.New("no agents specified"))
+	}
+	if !cfg.SpawnPacing.Enabled {
+		return func() {}, nil, nil
+	}
+
+	// Reuse the existing fence and failure receipts rather than a separate
+	// lock namespace or quota policy. Retain the underlying ownership error.
+	opts := SpawnOptions{Session: session, NoUserPane: true}
+	output := newSpawnOutput(time.Now(), opts)
+	var ownershipErr error
+	if acquire := deps.AcquireAdmission; acquire != nil {
+		deps.AcquireAdmission = func(ctx context.Context) (func(), error) {
+			release, err := acquire(ctx)
+			ownershipErr = err
+			return release, err
+		}
+	}
+	release, ok := beginSpawnAdmission(ctx, opts, cfg, deps, output, total, total)
+	if !ok {
+		cause := errors.Join(ownershipErr, ctx.Err())
+		if cause == nil {
+			cause = errors.New(output.Error)
+		}
+		return fail(output.ErrorCode, output.Admission, cause)
+	}
+	handedOff := false
+	defer func() {
+		if !handedOff {
+			release()
+		}
+	}()
+	var inventoryErr error
+	input := collectSpawnAdmissionInputWithPanes(ctx, opts, cfg, total, total,
+		func(ctx context.Context) (map[string][]tmux.Pane, error) {
+			if deps.GetAllPanes == nil {
+				inventoryErr = errors.New("agent addition fleet inventory is unavailable")
+				return nil, inventoryErr
+			}
+			panes, err := deps.GetAllPanes(ctx)
+			inventoryErr = err
+			return panes, err
+		})
+	// The collector shares all host/topology policy with robot spawning. Add
+	// supports more types than SpawnOptions, so supply its complete count map.
+	input.RequestedByType = requested
+	if err := spawnCancellationError(ctx, inventoryErr); err != nil {
+		return fail(ErrCodeTimeout, nil, err)
+	}
+	// EvaluateSpawnAdmission's pane request is a desired session total, not
+	// an increment. Add never reuses the session's existing agent panes.
+	if input.SessionPanes > maxCount-total {
+		return fail(ErrCodeInvalidFlag, nil, errors.New("agent addition exceeds supported session pane capacity"))
+	}
+	input.RequestedPanes = input.SessionPanes + total
+	admission := pressure.EvaluateSpawnAdmission(input)
+	admission.Serialized = needsSpawnAdmissionFence(opts, cfg)
+	if err := ctx.Err(); err != nil {
+		return fail(ErrCodeTimeout, &admission, err)
+	}
+	if admission.Decision != pressure.SpawnAdmissionAdmit {
+		return fail(ErrCodeResourceBusy, &admission, fmt.Errorf("agent addition %s: %s; %s", admission.Decision, admission.Reason, admission.Hint))
+	}
+	handedOff = true
+	return release, &admission, nil
+}
 
 // WithSpawnLaunchInterval adds a minimum start-to-start interval to one spawn
 // request. It wraps the existing launcher, so topology validation, admission,

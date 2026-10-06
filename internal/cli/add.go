@@ -25,6 +25,7 @@ import (
 	"github.com/Dicklesworthstone/ntm/internal/output"
 	"github.com/Dicklesworthstone/ntm/internal/persona"
 	"github.com/Dicklesworthstone/ntm/internal/plugins"
+	"github.com/Dicklesworthstone/ntm/internal/pressure"
 	"github.com/Dicklesworthstone/ntm/internal/ratelimit"
 	"github.com/Dicklesworthstone/ntm/internal/resilience"
 	"github.com/Dicklesworthstone/ntm/internal/robot"
@@ -59,6 +60,9 @@ type AddOutcome struct {
 	Added int
 	// SeatSkips lists the panes CAAM seat selection refused, with reasons.
 	SeatSkips []output.SeatSkipResponse
+	// Admission is the shared fleet decision, including a refusal before any
+	// panes were added. Composed scale callers retain the same evidence.
+	Admission *pressure.SpawnAdmission
 }
 
 // promptSendFailure distinguishes a requested prompt delivery failure from
@@ -101,7 +105,8 @@ type agentLifecycleFailureResponse struct {
 	AffectedPaneIDs []string `json:"affected_pane_ids"`
 	// AffectedWorktreePaths is present when spawn provisioned one or more
 	// isolated checkouts before a later lifecycle failure.
-	AffectedWorktreePaths []string `json:"affected_worktree_paths,omitempty"`
+	AffectedWorktreePaths []string                 `json:"affected_worktree_paths,omitempty"`
+	Admission             *pressure.SpawnAdmission `json:"admission,omitempty"`
 }
 
 func newAgentLifecycleFailureResponse(
@@ -112,6 +117,11 @@ func newAgentLifecycleFailureResponse(
 	affectedWorktreePaths []string,
 ) agentLifecycleFailureResponse {
 	code := robot.ErrCodeInternalError
+	var admissionErr *robot.SpawnAdmissionError
+	var admission *pressure.SpawnAdmission
+	if errors.As(err, &admissionErr) {
+		admission = admissionErr.Admission
+	}
 	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 		code = robot.ErrCodeTimeout
 	} else {
@@ -121,6 +131,8 @@ func newAgentLifecycleFailureResponse(
 			code = robot.ErrCodePromptSendFailed
 		case errors.Is(err, errCLIInvalidInput):
 			code = robot.ErrCodeInvalidFlag
+		case admissionErr != nil:
+			code = admissionErr.ErrorCode
 		}
 	}
 	normalizedPaneIDs := make([]string, 0, len(affectedPaneIDs))
@@ -160,6 +172,7 @@ func newAgentLifecycleFailureResponse(
 		SessionMayExist:       sessionMayExist,
 		AffectedPaneIDs:       normalizedPaneIDs,
 		AffectedWorktreePaths: normalizedWorktreePaths,
+		Admission:             admission,
 	}
 }
 
@@ -230,8 +243,8 @@ func resolveAddAgentCommandTemplate(agentType AgentType, pluginMap map[string]pl
 // has no system-prompt flag or env var). --prompt and CASS context now flow
 // through the grok-aware readiness/composer/verify protocol.
 func validateGrokPhaseOneAdd(opts AddOptions) error {
-	for _, spec := range opts.Agents.Flatten() {
-		if spec.Type != AgentTypeGrok {
+	for _, spec := range opts.Agents {
+		if spec.Count <= 0 || spec.Type != AgentTypeGrok {
 			continue
 		}
 		if profile, ok := opts.PersonaMap[spec.Model]; ok && profile != nil {
@@ -422,10 +435,31 @@ func runAdd(ctx context.Context, opts AddOptions) error {
 	return executeAdd(ctx, opts, true)
 }
 
+// addAdmissionCounts counts before Flatten allocates one entry per agent. Large
+// rejected requests must reach admission without first allocating that fleet.
+func addAdmissionCounts(specs AgentSpecs) (map[string]int, int, error) {
+	counts := make(map[string]int)
+	total, maxCount := 0, int(^uint(0)>>1)
+	for _, spec := range specs {
+		if spec.Count < 0 || spec.Count > maxCount-total {
+			return nil, 0, markCLIInvalidInput(errors.New("requested agent count exceeds supported pane capacity or is negative"))
+		}
+		if spec.Count == 0 {
+			continue
+		}
+		total += spec.Count
+		counts[string(spec.Type)] += spec.Count
+	}
+	return counts, total, nil
+}
+
 // executeAdd performs the add workflow. Composing commands such as scale pass
 // emitResult=false so the outer command remains the sole owner of terminal
 // JSON output while add still returns the underlying execution error.
 func executeAdd(ctx context.Context, opts AddOptions, emitResult bool) error {
+	if opts.Outcome != nil {
+		*opts.Outcome = AddOutcome{}
+	}
 	session := opts.Session
 	sessionMayExist := false
 	partialMutation := false
@@ -451,7 +485,10 @@ func executeAdd(ctx context.Context, opts AddOptions, emitResult bool) error {
 	if err := ctx.Err(); err != nil {
 		return outputError(fmt.Errorf("add canceled: %w", err))
 	}
-	totalAgents := opts.Agents.TotalCount()
+	requestedCounts, totalAgents, err := addAdmissionCounts(opts.Agents)
+	if err != nil {
+		return outputError(err)
+	}
 	if err := validateAgentSpecModelOverrides(opts.Agents, opts.PersonaMap); err != nil {
 		return outputError(err)
 	}
@@ -527,6 +564,20 @@ func executeAdd(ctx context.Context, opts AddOptions, emitResult bool) error {
 			return outputError(hooks.AllErrors(results))
 		}
 	}
+
+	// Evaluate after pre-add hooks, which may themselves launch work, but
+	// before checkpointing, per-agent expansion, index selection or splitting.
+	// Retain the SAME fence as robot/HTTP spawning through the entire add loop,
+	// including its prompt/readiness work. No per-agent release can authorize
+	// two requests to spend the same remaining slots.
+	releaseAdmission, admission, err := robot.BeginAgentAddition(ctx, session, requestedCounts, cfg)
+	if opts.Outcome != nil {
+		opts.Outcome.Admission = admission
+	}
+	if err != nil {
+		return outputError(err)
+	}
+	defer releaseAdmission()
 
 	if !IsJSONOutput() {
 		fmt.Printf("Adding %d agent(s) to session '%s'...\n", totalAgents, session)
@@ -1092,6 +1143,10 @@ func executeAdd(ctx context.Context, opts AddOptions, emitResult bool) error {
 		})
 	}
 
+	// No future launch remains. Registration and post-add hooks must not hold
+	// capacity ownership; the deferred call still covers every early return.
+	releaseAdmission()
+
 	// Panes that seat selection refused were never created, so the requested
 	// count is no longer the added count. Report what actually launched
 	// (ntm#319) — a partially-placed add that claims the full number would
@@ -1153,7 +1208,7 @@ func executeAdd(ctx context.Context, opts AddOptions, emitResult bool) error {
 			newPanes[i].Command = command
 			newPanes[i].Variant = variant
 		}
-		return output.PrintJSON(output.AddResponse{
+		response := output.AddResponse{
 			TimestampedResponse: output.NewTimestamped(),
 			Session:             session,
 			AddedClaude:         ccCount,
@@ -1171,7 +1226,11 @@ func executeAdd(ctx context.Context, opts AddOptions, emitResult bool) error {
 			NewPanes:            newPanes,
 			AgentMail:           agentMailStatus,
 			SeatSkips:           seatSkips,
-		})
+		}
+		return output.PrintJSON(struct {
+			output.AddResponse
+			Admission *pressure.SpawnAdmission `json:"admission,omitempty"`
+		}{AddResponse: response, Admission: admission})
 	}
 
 	fmt.Printf("✓ Added %d agent(s) (total %d panes now)\n", totalAgents, len(panes)+totalAgents)

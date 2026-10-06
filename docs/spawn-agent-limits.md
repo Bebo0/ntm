@@ -88,7 +88,7 @@ root consistent across participating processes and do not remove/replace the
 lock file while NTM is running. Symlinks and unsafe lock-file types fail closed.
 
 This is cooperating-launch serialization, not a durable capacity reservation,
-provider-seat discovery, or token-quota enforcement. Human `ntm spawn`, `ntm add`,
+provider-seat discovery, or token-quota enforcement. Human `ntm spawn`,
 unconfigured/disabled callers, older binaries, manual tmux launches, and processes
 using different cache roots do not participate. They can still change fleet
 counts concurrently. Different requests can also select different limits; this
@@ -139,3 +139,41 @@ before restoring jobs or serving requests, to opt into this backend. `New` itsel
 remains side-effect-free and does not implicitly read user configuration. This
 method is not a concurrent runtime policy setter. No HTTP parameter permits a
 client to replace the server's selected global config path.
+
+## Adding to a running fleet
+
+`ntm add` now participates in the same admission policy and cross-process fence
+as robot/HTTP spawning. This includes `ntm scale` scale-up and dashboard actions
+that invoke add. No separate quota setting is introduced: the selected
+`spawn_pacing` policy applies, and disabling it retains the unfenced add behavior.
+
+Inside the add execution loop, the complete agent-spec batch is counted before
+its per-instance expansion. Resolved model/persona entries contribute their
+underlying agent counts; Cursor, Aider,
+Ollama and plugin agents count toward the shared host budget even when no separate
+per-type limit is configured for them. Existing configured type limits still
+use canonical names. Pane forecasts treat add as an increment, not a request to
+reuse existing panes. Overflowing or negative counts fail before expansion.
+
+Existing pre-add hooks run before admission, without owning the fence: a hook
+may itself launch work, so add must count afterwards rather than rely on an older
+snapshot. Once admitted, add retains the fence across its entire existing loop,
+including splits, startup delays, command preparation and inline prompt/readiness
+work. It releases ownership before Agent Mail registration and post-add hooks.
+Errors, cancellation and panic unwinding release it too. A refused admission
+does not run NTM's auto-checkpoint, split panes, or launch agents; pre-add hook
+effects are not rolled back. Successful or partial launches are never killed.
+
+Admission conservatively includes every requested agent before CAAM seat
+selection may skip individual launches. It does not promise that every admitted
+agent will launch, reserve provider seats, or change persona/plugin execution.
+Long inline startup or prompt work can hold the fence long enough for a competing
+request's existing 30-second acquisition budget to expire.
+
+Successful `ntm add --json` output includes the shared `admission` receipt.
+Refusals include that decision in the existing lifecycle error envelope, with
+`RESOURCE_BUSY` for cap/pressure/ownership failures and `TIMEOUT` for cancellation.
+Composed callers receive the same typed error and `AddOutcome.Admission` without
+nested JSON. As with robot spawning, only count-capped local Linux/macOS requests
+are serialized; uncapped pressure checks are advisory snapshots. This does not
+yet make human `ntm spawn`, manual launches, or different cache roots cooperate.
