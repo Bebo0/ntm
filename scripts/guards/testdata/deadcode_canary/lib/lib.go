@@ -19,3 +19,20 @@ func OrphanExported() string {
 func TestedButUnwired() string {
 	return "canary: tested but orphaned"
 }
+
+// Reflected reaches an interface value in main, so RTA keeps every exported
+// method of it alive (reflection could call them) and deadcode never reports
+// them. scripts/guards/reflectdead covers that blind spot (bd-8gbr3).
+type Reflected struct{}
+
+// Describe is called through an interface. reflectdead MUST NOT report it
+// (canary case e).
+func (Reflected) Describe() string {
+	return "canary: described"
+}
+
+// ReflectOnly has no caller; only RTA's reflection rule keeps it. reflectdead
+// MUST report it (canary case d).
+func (Reflected) ReflectOnly() string {
+	return "canary: reachable only through reflection"
+}

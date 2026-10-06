@@ -9,6 +9,10 @@
 //	(c) lib.TestedButUnwired   — called only from a _test.go  => MUST be reported dead
 //	                             (roots are ./cmd/canary WITHOUT -test; this is
 //	                             the tested-but-orphaned pathology the gate exists for)
+//	(d) lib.Reflected.ReflectOnly — kept only by RTA's reflection rule => reflectdead
+//	                             MUST report it (deadcode cannot, bd-8gbr3)
+//	(e) lib.Reflected.Describe — called through an interface    => reflectdead
+//	                             MUST NOT report it
 package main
 
 import (
@@ -24,6 +28,8 @@ import (
 // still see it as live (canary case b).
 func runEDispatch(cmd *cobra.Command, args []string) error {
 	fmt.Println(lib.Used())
+	var described interface{ Describe() string } = lib.Reflected{}
+	fmt.Println(described.Describe())
 	return nil
 }
 

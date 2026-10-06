@@ -26,6 +26,12 @@
 #     import graph, so a NEVER-imported package (C9's nine) produces zero
 #     entries. `go list ./internal/...` minus `go list -deps ./cmd/ntm` fills
 #     that blind spot; those violations use entry form `pkg:internal/<path>`.
+#   - Reflection-only check: deadcode keeps every exported method of a type
+#     that reaches an interface value (RTA's reflection rule), so an uncalled
+#     method on a live type is never reported. scripts/guards/reflectdead
+#     lists functions RTA reaches that no call path from main reaches, per
+#     GOOS, intersected like deadcode, in the same <file>.go:<Func> form
+#     (bd-8gbr3). Canary cases d/e pin its behavior.
 #
 # Entry format in ci/allowlists/deadcode.txt:
 #   <file>.go:<Func>        e.g. internal/coordinator/conflicts.go:Engine.Run
@@ -120,6 +126,12 @@ if ! go build -o "$tmp/deadcode" golang.org/x/tools/cmd/deadcode; then
   echo "deadcode_gate: FAIL — could not build pinned golang.org/x/tools/cmd/deadcode (see go.mod tool directive)" >&2
   exit 1
 fi
+# reflectdead reports what deadcode keeps alive by RTA's reflection rule:
+# functions RTA reaches that no call path from main reaches (bd-8gbr3).
+if ! go build -o "$tmp/reflectdead" ./scripts/guards/reflectdead; then
+  echo "deadcode_gate: FAIL — could not build scripts/guards/reflectdead" >&2
+  exit 1
+fi
 
 # --- mandatory canary self-test ---------------------------------------------
 if ! (cd "$CANARY_DIR" && "$tmp/deadcode" ./cmd/canary) > "$tmp/canary.out" 2>"$tmp/canary.err"; then
@@ -135,6 +147,17 @@ if grep -q 'runEDispatch' "$tmp/canary.out"; then
   echo "deadcode_gate: CANARY FAILURE — cobra RunE-only func falsely reported dead (case b): deadcode version regressed on dynamic-call tracking" >&2
   exit 1
 fi
+if ! "$tmp/reflectdead" -dir "$CANARY_DIR" -filter deadcodecanary/ ./cmd/canary > "$tmp/canary-reflect.out" 2>"$tmp/canary-reflect.err"; then
+  echo "deadcode_gate: CANARY FAILURE — reflectdead failed on $CANARY_DIR:" >&2
+  cat "$tmp/canary-reflect.err" >&2
+  exit 1
+fi
+grep -qx 'lib/lib.go:Reflected.ReflectOnly' "$tmp/canary-reflect.out" || {
+  echo "deadcode_gate: CANARY FAILURE — method kept only by RTA's reflection rule not reported (case d)" >&2; exit 1; }
+if grep -q 'Reflected.Describe' "$tmp/canary-reflect.out"; then
+  echo "deadcode_gate: CANARY FAILURE — interface-called method falsely reported (case e)" >&2
+  exit 1
+fi
 
 # --- multi-GOOS analysis, intersected ---------------------------------------
 for goos in $GOOS_LIST; do
@@ -146,8 +169,15 @@ for goos in $GOOS_LIST; do
   # "internal/x/y.go:12:3: unreachable func: T.F" -> "internal/x/y.go:T.F"
   awk -F': unreachable func: ' 'NF==2 {p=$1; sub(/:[0-9]+:[0-9]+$/, "", p); print p ":" $2}' \
     "$tmp/raw.$goos" | sort -u > "$tmp/norm.$goos"
+  if ! GOOS="$goos" GOARCH=amd64 "$tmp/reflectdead" -tags liveness_audit -filter "${MODULE}/internal/" ./cmd/ntm > "$tmp/reflect.raw.$goos" 2>"$tmp/reflect.err.$goos"; then
+    echo "deadcode_gate: FAIL — reflectdead analysis failed for GOOS=$goos:" >&2
+    cat "$tmp/reflect.err.$goos" >&2
+    exit 1
+  fi
+  sort -u "$tmp/reflect.raw.$goos" > "$tmp/reflect.$goos"
 done
 comm -12 "$tmp/norm.linux" "$tmp/norm.darwin" | comm -12 - "$tmp/norm.windows" > "$tmp/dead.txt"
+comm -12 "$tmp/reflect.linux" "$tmp/reflect.darwin" | comm -12 - "$tmp/reflect.windows" >> "$tmp/dead.txt"
 
 # --- orphan-package check (deadcode's whole-package blind spot) -------------
 comm -23 <(go list ./internal/... | sort) \
@@ -175,4 +205,4 @@ if ! ratchet_compare "$ALLOWLIST" "$tmp/pairs.txt"; then
   echo "deadcode_gate.sh: FAILED — see ci/allowlists/README.md (waiver protocol: bead FIRST, then the allowlist line)" >&2
   exit 1
 fi
-echo "deadcode_gate.sh: OK (canary fired on a+c, passed b; $(wc -l < "$tmp/dead.txt" | tr -d ' ') dead entries all ratchet-matched against $ALLOWLIST)"
+echo "deadcode_gate.sh: OK (canary fired on a+c+d, passed b+e; $(wc -l < "$tmp/dead.txt" | tr -d ' ') dead entries all ratchet-matched against $ALLOWLIST)"
