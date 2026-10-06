@@ -6467,8 +6467,8 @@
       "name": "slb-approve",
       "flag": "--robot-slb-approve",
       "category": "utility",
-      "summary": "Approve an SLB request by ID.",
-      "description": "Approve an SLB request by ID.",
+      "summary": "Approve an SLB request by ID, signed by the reviewer session in SLB_SESSION_ID/SLB_SESSION_KEY.",
+      "description": "Approve an SLB request by ID, signed by the reviewer session in SLB_SESSION_ID/SLB_SESSION_KEY.",
       "output_formats": [
         "json"
       ],
@@ -6499,8 +6499,8 @@
       "name": "slb-deny",
       "flag": "--robot-slb-deny",
       "category": "utility",
-      "summary": "Deny an SLB request by ID.",
-      "description": "Deny an SLB request by ID.",
+      "summary": "Reject an SLB request by ID, signed by the reviewer session in SLB_SESSION_ID/SLB_SESSION_KEY.",
+      "description": "Reject an SLB request by ID, signed by the reviewer session in SLB_SESSION_ID/SLB_SESSION_KEY.",
       "output_formats": [
         "json"
       ],
@@ -6520,8 +6520,8 @@
           "name": "reason",
           "flag": "--reason",
           "type": "string",
-          "required": false,
-          "description": "Optional denial reason"
+          "required": true,
+          "description": "Rejection reason (slb requires one)"
         }
       ],
       "examples": [

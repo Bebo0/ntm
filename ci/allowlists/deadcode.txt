@@ -483,7 +483,6 @@ internal/tools/ru.go:RUAdapter.GetStatus	bd-ld4j2	reachable only through RTA's r
 internal/tools/ru.go:RUAdapter.Sync	bd-ld4j2	reachable only through RTA's reflection rule at the 2026-10-05 baseline; wire it (surface + behavioral test) or delete it
 internal/tools/s2p.go:S2PAdapter.HasCapability	bd-ld4j2	reachable only through RTA's reflection rule at the 2026-10-05 baseline; wire it (surface + behavioral test) or delete it
 internal/tools/slb.go:SLBAdapter.HasCapability	bd-ld4j2	reachable only through RTA's reflection rule at the 2026-10-05 baseline; wire it (surface + behavioral test) or delete it
-internal/tools/slb.go:SLBAdapter.Status	bd-ld4j2	reachable only through RTA's reflection rule at the 2026-10-05 baseline; wire it (surface + behavioral test) or delete it
 internal/tools/ubs.go:UBSAdapter.Doctor	bd-ld4j2	reachable only through RTA's reflection rule at the 2026-10-05 baseline; wire it (surface + behavioral test) or delete it
 internal/tools/ubs.go:UBSAdapter.HasCapability	bd-ld4j2	reachable only through RTA's reflection rule at the 2026-10-05 baseline; wire it (surface + behavioral test) or delete it
 internal/tools/ubs.go:UBSAdapter.Scan	bd-ld4j2	reachable only through RTA's reflection rule at the 2026-10-05 baseline; wire it (surface + behavioral test) or delete it

@@ -4341,7 +4341,7 @@ var (
 	robotSLBPending bool   // --robot-slb-pending flag
 	robotSLBApprove string // --robot-slb-approve flag
 	robotSLBDeny    string // --robot-slb-deny flag
-	slbReason       string // --reason (optional with --robot-slb-deny)
+	slbReason       string // --reason (required with --robot-slb-deny)
 
 	// Robot-ru-sync flag for RU
 	robotRUSync bool // --robot-ru-sync flag
@@ -4976,7 +4976,7 @@ func init() {
 	rootCmd.Flags().BoolVar(&robotSLBPending, "robot-slb-pending", false, "List pending SLB approval requests. JSON output. Example: ntm --robot-slb-pending")
 	rootCmd.Flags().StringVar(&robotSLBApprove, "robot-slb-approve", "", "Approve SLB request by ID. JSON output. Example: ntm --robot-slb-approve=req-123")
 	rootCmd.Flags().StringVar(&robotSLBDeny, "robot-slb-deny", "", "Deny SLB request by ID. JSON output. Example: ntm --robot-slb-deny=req-123 --reason='Too risky'")
-	rootCmd.Flags().StringVar(&slbReason, "reason", "", "Reason for SLB denial. Optional with --robot-slb-deny")
+	rootCmd.Flags().StringVar(&slbReason, "reason", "", "Reason for SLB denial. Required with --robot-slb-deny")
 
 	// Robot-ru-sync flag for RU
 	rootCmd.Flags().BoolVar(&robotRUSync, "robot-ru-sync", false, "Run ru sync with JSON output. Optional with --dry-run. Example: ntm --robot-ru-sync")

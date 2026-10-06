@@ -4,7 +4,9 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"os"
 	"os/exec"
 	"strings"
 	"time"
@@ -107,7 +109,7 @@ func (a *SLBAdapter) Capabilities(ctx context.Context) ([]Capability, error) {
 		CapDaemonMode, // slb can run as daemon (slb daemon)
 		"request",     // slb request <command>
 		"approve",     // slb approve <request-id>
-		"deny",        // slb deny <request-id>
+		"reject",      // slb reject <request-id>
 		"status",      // slb status
 		"pending",     // slb pending
 	}
@@ -171,37 +173,64 @@ func (a *SLBAdapter) Info(ctx context.Context) (*ToolInfo, error) {
 
 // SLB-specific methods
 
-// Status returns the current SLB daemon status
-func (a *SLBAdapter) Status(ctx context.Context) (json.RawMessage, error) {
-	return a.runCommand(ctx, "status", "--json")
+// SLBSession is an slb agent session, as printed by
+// `slb session start --agent NAME --program PROG --model MODEL --json`.
+// Requests are filed under a session; reviews are signed with its key, and slb
+// refuses a review from the session that filed the request.
+type SLBSession struct {
+	ID  string
+	Key string
 }
+
+// SLBSessionFromEnv reads the caller's session from SLB_SESSION_ID and
+// SLB_SESSION_KEY, the variables slb itself uses.
+func SLBSessionFromEnv() SLBSession {
+	return SLBSession{
+		ID:  strings.TrimSpace(os.Getenv("SLB_SESSION_ID")),
+		Key: strings.TrimSpace(os.Getenv("SLB_SESSION_KEY")),
+	}
+}
+
+// ErrSLBSessionRequired is returned when an slb call needs a session the caller
+// has not provided.
+var ErrSLBSessionRequired = errors.New("slb session required: start one with `slb session start --agent NAME --program PROG --model MODEL --json` and export its session_id and session_key as SLB_SESSION_ID and SLB_SESSION_KEY")
 
 // Pending returns list of pending approval requests
 func (a *SLBAdapter) Pending(ctx context.Context) (json.RawMessage, error) {
 	return a.runCommand(ctx, "pending", "--json")
 }
 
-// Request creates a new approval request for a command
-func (a *SLBAdapter) Request(ctx context.Context, command string, reason string) (json.RawMessage, error) {
-	args := []string{"request", command, "--json"}
+// Request files an approval request for command under session; the response
+// carries its request_id.
+func (a *SLBAdapter) Request(ctx context.Context, session SLBSession, command, reason string) (json.RawMessage, error) {
+	if session.ID == "" {
+		return nil, ErrSLBSessionRequired
+	}
+	args := []string{"request", "--json", "--session-id", session.ID}
 	if reason != "" {
 		args = append(args, "--reason", reason)
 	}
-	return a.runCommand(ctx, args...)
+	return a.runCommand(ctx, append(args, "--", command)...)
 }
 
-// Approve approves a pending request
-func (a *SLBAdapter) Approve(ctx context.Context, requestID string) (json.RawMessage, error) {
-	return a.runCommand(ctx, "approve", requestID, "--json")
-}
-
-// Deny denies a pending request
-func (a *SLBAdapter) Deny(ctx context.Context, requestID string, reason string) (json.RawMessage, error) {
-	args := []string{"deny", requestID, "--json"}
-	if reason != "" {
-		args = append(args, "--reason", reason)
+// Approve records an approving review of requestID signed by session.
+func (a *SLBAdapter) Approve(ctx context.Context, session SLBSession, requestID string) (json.RawMessage, error) {
+	if session.ID == "" || session.Key == "" {
+		return nil, ErrSLBSessionRequired
 	}
-	return a.runCommand(ctx, args...)
+	return a.runCommand(ctx, "approve", "--json", "--session-id", session.ID, "--session-key", session.Key, "--", requestID)
+}
+
+// Reject records a rejecting review of requestID signed by session; slb
+// requires a reason.
+func (a *SLBAdapter) Reject(ctx context.Context, session SLBSession, requestID, reason string) (json.RawMessage, error) {
+	if session.ID == "" || session.Key == "" {
+		return nil, ErrSLBSessionRequired
+	}
+	if strings.TrimSpace(reason) == "" {
+		return nil, errors.New("slb reject requires a reason")
+	}
+	return a.runCommand(ctx, "reject", "--json", "--session-id", session.ID, "--session-key", session.Key, "--reason", reason, "--", requestID)
 }
 
 // runCommand executes an slb command and returns raw JSON
@@ -223,7 +252,8 @@ func (a *SLBAdapter) runCommand(ctx context.Context, args ...string) (json.RawMe
 		if strings.Contains(err.Error(), ErrOutputLimitExceeded.Error()) {
 			return nil, fmt.Errorf("slb output exceeded 10MB limit")
 		}
-		return nil, fmt.Errorf("slb %s failed: %w: %s", strings.Join(args, " "), err, stderr.String())
+		// Name only the subcommand: approve/reject args carry the session key.
+		return nil, fmt.Errorf("slb %s failed: %w: %s", args[0], err, cliErrorLine(stderr.String()))
 	}
 
 	output := stdout.Bytes()

@@ -109,15 +109,9 @@ func GetSLBApprove(requestID string) (*SLBActionOutput, error) {
 		return output, nil
 	}
 
-	raw, err := adapter.Approve(ctx, requestID)
+	raw, err := adapter.Approve(ctx, tools.SLBSessionFromEnv(), requestID)
 	if err != nil {
-		code := ErrCodeInternalError
-		hint := "Run 'slb approve <id> --json' to diagnose"
-		if errors.Is(err, tools.ErrTimeout) {
-			code = ErrCodeTimeout
-			hint = "SLB timed out; try again or check daemon status"
-		}
-		output.RobotResponse = NewErrorResponse(err, code, hint)
+		output.RobotResponse = slbReviewError(err)
 		return output, nil
 	}
 
@@ -152,6 +146,15 @@ func GetSLBDeny(requestID, reason string) (*SLBActionOutput, error) {
 		)
 		return output, nil
 	}
+	reason = strings.TrimSpace(reason)
+	if reason == "" {
+		output.RobotResponse = NewErrorResponse(
+			fmt.Errorf("missing denial reason"),
+			ErrCodeInvalidFlag,
+			"slb rejects need a reason: ntm --robot-slb-deny=req-123 --reason='Too risky'",
+		)
+		return output, nil
+	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
@@ -166,15 +169,9 @@ func GetSLBDeny(requestID, reason string) (*SLBActionOutput, error) {
 		return output, nil
 	}
 
-	raw, err := adapter.Deny(ctx, requestID, strings.TrimSpace(reason))
+	raw, err := adapter.Reject(ctx, tools.SLBSessionFromEnv(), requestID, reason)
 	if err != nil {
-		code := ErrCodeInternalError
-		hint := "Run 'slb deny <id> --json' to diagnose"
-		if errors.Is(err, tools.ErrTimeout) {
-			code = ErrCodeTimeout
-			hint = "SLB timed out; try again or check daemon status"
-		}
-		output.RobotResponse = NewErrorResponse(err, code, hint)
+		output.RobotResponse = slbReviewError(err)
 		return output, nil
 	}
 
@@ -190,6 +187,23 @@ func PrintSLBDeny(requestID, reason string) error {
 		return err
 	}
 	return encodeTerminalRobotOutput(output, output.RobotResponse, "robot slb deny failed")
+}
+
+// slbReviewError maps a failed slb approve/reject to a robot error.
+func slbReviewError(err error) RobotResponse {
+	msg := err.Error()
+	switch {
+	case errors.Is(err, tools.ErrTimeout):
+		return NewErrorResponse(err, ErrCodeTimeout, "SLB timed out; try again or check daemon status")
+	case errors.Is(err, tools.ErrSLBSessionRequired):
+		return NewErrorResponse(err, ErrCodePermissionDenied, "Reviews are signed by your slb session: export SLB_SESSION_ID and SLB_SESSION_KEY")
+	case strings.Contains(msg, "request not found"):
+		return NewErrorResponse(err, ErrCodeNotFound, "List reviewable requests with ntm --robot-slb-pending")
+	case strings.Contains(msg, "cannot review your own request"), strings.Contains(msg, "session key does not match"):
+		return NewErrorResponse(err, ErrCodePermissionDenied, "Review from a different slb session than the requester, using that session's key")
+	default:
+		return NewErrorResponse(err, ErrCodeInternalError, "Check the request with 'slb review <id>'")
+	}
 }
 
 func countJSONArray(raw json.RawMessage) int {

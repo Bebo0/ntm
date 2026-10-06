@@ -1955,7 +1955,7 @@ func buildCommandRegistry() []RobotCommandInfo {
 			Name:        "slb-approve",
 			Flag:        "--robot-slb-approve",
 			Category:    "utility",
-			Description: "Approve an SLB request by ID.",
+			Description: "Approve an SLB request by ID, signed by the reviewer session in SLB_SESSION_ID/SLB_SESSION_KEY.",
 			Parameters: []RobotParameter{
 				{Name: "id", Flag: "--robot-slb-approve", Type: "string", Required: true, Description: "Request ID"},
 			},
@@ -1965,10 +1965,10 @@ func buildCommandRegistry() []RobotCommandInfo {
 			Name:        "slb-deny",
 			Flag:        "--robot-slb-deny",
 			Category:    "utility",
-			Description: "Deny an SLB request by ID.",
+			Description: "Reject an SLB request by ID, signed by the reviewer session in SLB_SESSION_ID/SLB_SESSION_KEY.",
 			Parameters: []RobotParameter{
 				{Name: "id", Flag: "--robot-slb-deny", Type: "string", Required: true, Description: "Request ID"},
-				{Name: "reason", Flag: "--reason", Type: "string", Required: false, Description: "Optional denial reason"},
+				{Name: "reason", Flag: "--reason", Type: "string", Required: true, Description: "Rejection reason (slb requires one)"},
 			},
 			Examples: []string{"ntm --robot-slb-deny=req-123 --reason='Too risky'"},
 		},

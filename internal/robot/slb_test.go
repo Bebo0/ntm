@@ -1,10 +1,15 @@
 package robot
 
 import (
+	"context"
 	"encoding/json"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
+
+	"github.com/Dicklesworthstone/ntm/internal/tools"
 )
 
 func fakeToolsPath(t *testing.T) string {
@@ -28,7 +33,9 @@ func fakeToolsPath(t *testing.T) string {
 	return ""
 }
 
-func withFakeTools(t *testing.T) func() {
+// withFakeTools prepends the fake tools to PATH for the rest of the test.
+// t.Setenv keeps the restore ordered with any later t.Setenv in the test.
+func withFakeTools(t *testing.T) {
 	t.Helper()
 
 	fakePath := fakeToolsPath(t)
@@ -36,75 +43,116 @@ func withFakeTools(t *testing.T) func() {
 		t.Skip("testdata/faketools not found")
 	}
 
-	oldPath := os.Getenv("PATH")
-	os.Setenv("PATH", fakePath+":"+oldPath)
+	t.Setenv("PATH", fakePath+string(os.PathListSeparator)+os.Getenv("PATH"))
+}
 
-	return func() {
-		os.Setenv("PATH", oldPath)
+// slbTestProject initializes an slb project in a temp working directory and
+// starts two agent sessions in it with the installed slb.
+func slbTestProject(t *testing.T) (requester, reviewer tools.SLBSession) {
+	t.Helper()
+	if _, err := exec.LookPath("slb"); err != nil {
+		t.Skip("slb not installed")
+	}
+	t.Setenv("HOME", t.TempDir())
+	t.Chdir(t.TempDir())
+
+	run := func(args ...string) []byte {
+		t.Helper()
+		out, err := exec.Command("slb", args...).Output()
+		if err != nil {
+			var stderr []byte
+			if exitErr, ok := err.(*exec.ExitError); ok {
+				stderr = exitErr.Stderr
+			}
+			t.Fatalf("slb %s: %v\n%s", strings.Join(args, " "), err, stderr)
+		}
+		return out
+	}
+	run("init", "--json")
+	start := func(agent string) tools.SLBSession {
+		t.Helper()
+		var s struct {
+			SessionID  string `json:"session_id"`
+			SessionKey string `json:"session_key"`
+		}
+		if err := json.Unmarshal(run("session", "start", "--agent", agent, "--program", "ntm-test", "--model", "test", "--json"), &s); err != nil || s.SessionID == "" {
+			t.Fatalf("slb session start for %s: %v", agent, err)
+		}
+		return tools.SLBSession{ID: s.SessionID, Key: s.SessionKey}
+	}
+	return start("requester"), start("reviewer")
+}
+
+func TestRobotSLBReviewsThroughInstalledSLB(t *testing.T) {
+	requester, reviewer := slbTestProject(t)
+	adapter := tools.NewSLBAdapter()
+	file := func(command string) string {
+		t.Helper()
+		raw, err := adapter.Request(context.Background(), requester, command, "clean up test output")
+		var created struct {
+			RequestID string `json:"request_id"`
+		}
+		if err != nil || json.Unmarshal(raw, &created) != nil || created.RequestID == "" {
+			t.Fatalf("Request(%q) = %s, %v", command, raw, err)
+		}
+		return created.RequestID
+	}
+	approveID := file("rm -rf ./build")
+	rejectID := file("git push --force")
+
+	pending, err := GetSLBPending()
+	if err != nil || !pending.Success || pending.Count != 2 {
+		t.Fatalf("GetSLBPending = success:%t count:%d err:%q (%v)", pending.Success, pending.Count, pending.Error, err)
+	}
+
+	review := func(s tools.SLBSession) {
+		t.Setenv("SLB_SESSION_ID", s.ID)
+		t.Setenv("SLB_SESSION_KEY", s.Key)
+	}
+
+	review(tools.SLBSession{})
+	if out, _ := GetSLBApprove(approveID); out.Success || out.ErrorCode != ErrCodePermissionDenied {
+		t.Fatalf("approve without a reviewer session = success:%t code:%q err:%q, want PERMISSION_DENIED", out.Success, out.ErrorCode, out.Error)
+	}
+
+	review(requester)
+	selfReview, _ := GetSLBApprove(approveID)
+	if selfReview.Success || selfReview.ErrorCode != ErrCodePermissionDenied {
+		t.Fatalf("self-review = success:%t code:%q err:%q, want PERMISSION_DENIED", selfReview.Success, selfReview.ErrorCode, selfReview.Error)
+	}
+	if strings.Contains(selfReview.Error, requester.Key) {
+		t.Fatalf("robot error leaks the session key: %q", selfReview.Error)
+	}
+
+	review(reviewer)
+	var decision struct {
+		Decision  string `json:"decision"`
+		NewStatus string `json:"new_request_status"`
+	}
+	approved, err := GetSLBApprove(approveID)
+	if err != nil || !approved.Success || json.Unmarshal(approved.Result, &decision) != nil ||
+		decision.Decision != "approve" || decision.NewStatus != "approved" {
+		t.Fatalf("GetSLBApprove = success:%t result:%s err:%q (%v)", approved.Success, approved.Result, approved.Error, err)
+	}
+
+	rejected, err := GetSLBDeny(rejectID, "too risky")
+	if err != nil || !rejected.Success || json.Unmarshal(rejected.Result, &decision) != nil ||
+		decision.Decision != "reject" || decision.NewStatus != "rejected" {
+		t.Fatalf("GetSLBDeny = success:%t result:%s err:%q (%v)", rejected.Success, rejected.Result, rejected.Error, err)
+	}
+
+	if out, _ := GetSLBApprove("00000000-0000-0000-0000-000000000000"); out.Success || out.ErrorCode != ErrCodeNotFound {
+		t.Fatalf("approve unknown request = success:%t code:%q err:%q, want NOT_FOUND", out.Success, out.ErrorCode, out.Error)
 	}
 }
 
-func TestGetSLBPending(t *testing.T) {
-	cleanup := withFakeTools(t)
-	defer cleanup()
-
-	output, err := GetSLBPending()
-	if err != nil {
-		t.Fatalf("GetSLBPending error: %v", err)
-	}
-
-	if !output.Success {
-		t.Fatalf("expected success, got error: %s", output.Error)
-	}
-
-	var pending []map[string]interface{}
-	if err := json.Unmarshal(output.Pending, &pending); err != nil {
-		t.Fatalf("pending payload invalid JSON: %v", err)
-	}
-	if len(pending) != output.Count {
-		t.Fatalf("count mismatch: count=%d pending=%d", output.Count, len(pending))
-	}
-}
-
-func TestGetSLBApprove(t *testing.T) {
-	cleanup := withFakeTools(t)
-	defer cleanup()
-
-	output, err := GetSLBApprove("req-123")
-	if err != nil {
-		t.Fatalf("GetSLBApprove error: %v", err)
-	}
-	if !output.Success {
-		t.Fatalf("expected success, got error: %s", output.Error)
-	}
-
-	var payload map[string]interface{}
-	if err := json.Unmarshal(output.Result, &payload); err != nil {
-		t.Fatalf("approve payload invalid JSON: %v", err)
-	}
-	if got, _ := payload["id"].(string); got != "req-123" {
-		t.Fatalf("approve id=%q, want req-123", got)
-	}
-}
-
-func TestGetSLBDeny(t *testing.T) {
-	cleanup := withFakeTools(t)
-	defer cleanup()
-
-	output, err := GetSLBDeny("req-456", "too risky")
+func TestGetSLBDenyRequiresReason(t *testing.T) {
+	output, err := GetSLBDeny("req-123", "  ")
 	if err != nil {
 		t.Fatalf("GetSLBDeny error: %v", err)
 	}
-	if !output.Success {
-		t.Fatalf("expected success, got error: %s", output.Error)
-	}
-
-	var payload map[string]interface{}
-	if err := json.Unmarshal(output.Result, &payload); err != nil {
-		t.Fatalf("deny payload invalid JSON: %v", err)
-	}
-	if got, _ := payload["id"].(string); got != "req-456" {
-		t.Fatalf("deny id=%q, want req-456", got)
+	if output.Success || output.ErrorCode != ErrCodeInvalidFlag {
+		t.Fatalf("GetSLBDeny without reason = success:%t code:%q, want INVALID_FLAG", output.Success, output.ErrorCode)
 	}
 }
 

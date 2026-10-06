@@ -261,6 +261,17 @@ func (a *BaseAdapter) SetTimeout(t time.Duration) {
 	a.timeout = t
 }
 
+// cliErrorLine picks a CLI's "Error: ..." line out of stderr, which may also
+// carry log lines (ms's storage layer logs WARNs there, for instance).
+func cliErrorLine(stderr string) string {
+	for _, line := range strings.Split(stderr, "\n") {
+		if line = strings.TrimSpace(line); strings.HasPrefix(line, "Error:") {
+			return line
+		}
+	}
+	return strings.TrimSpace(stderr)
+}
+
 // Info returns complete tool information using the adapter methods
 func (a *BaseAdapter) Info(ctx context.Context, adapter Adapter) (*ToolInfo, error) {
 	info := &ToolInfo{

@@ -75,15 +75,15 @@ func TestMSSearchAndShowReadInstalledMS(t *testing.T) {
 	}
 }
 
-func TestMSErrorDetail(t *testing.T) {
+func TestCLIErrorLine(t *testing.T) {
 	t.Parallel()
 
 	stderr := "2026-10-06T20:36:10Z  WARN fsqlite_core::connection: WAL-FEC requires a caller-owned native runtime\n" +
 		"Error: Skill not found: skill not found: x\n"
-	if got := msErrorDetail(stderr); got != "Error: Skill not found: skill not found: x" {
-		t.Fatalf("msErrorDetail() = %q", got)
+	if got := cliErrorLine(stderr); got != "Error: Skill not found: skill not found: x" {
+		t.Fatalf("cliErrorLine() = %q", got)
 	}
-	if got := msErrorDetail("  plain failure \n"); got != "plain failure" {
-		t.Fatalf("msErrorDetail() without an Error: line = %q", got)
+	if got := cliErrorLine("  plain failure \n"); got != "plain failure" {
+		t.Fatalf("cliErrorLine() without an Error: line = %q", got)
 	}
 }

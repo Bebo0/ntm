@@ -215,7 +215,7 @@ func (a *MSAdapter) runCommand(ctx context.Context, args ...string) (json.RawMes
 		if strings.Contains(err.Error(), ErrOutputLimitExceeded.Error()) {
 			return nil, fmt.Errorf("ms output exceeded 10MB limit")
 		}
-		return nil, fmt.Errorf("ms %s failed: %w: %s", strings.Join(args, " "), err, msErrorDetail(stderr.String()))
+		return nil, fmt.Errorf("ms %s failed: %w: %s", strings.Join(args, " "), err, cliErrorLine(stderr.String()))
 	}
 
 	output := stdout.Bytes()
@@ -224,15 +224,4 @@ func (a *MSAdapter) runCommand(ctx context.Context, args ...string) (json.RawMes
 	}
 
 	return output, nil
-}
-
-// msErrorDetail picks ms's "Error: ..." line out of stderr, which also carries
-// tracing log lines from its storage layer.
-func msErrorDetail(stderr string) string {
-	for _, line := range strings.Split(stderr, "\n") {
-		if line = strings.TrimSpace(line); strings.HasPrefix(line, "Error:") {
-			return line
-		}
-	}
-	return strings.TrimSpace(stderr)
 }

@@ -179,8 +179,15 @@ func (e *Engine) enqueueSLBRequest(ctx context.Context, params RequestParams) (s
 		return "", nil
 	}
 
+	// slb files requests under an agent session; without one in the
+	// environment there is nothing to mirror into.
+	session := tools.SLBSessionFromEnv()
+	if session.ID == "" {
+		return "", nil
+	}
+
 	command := buildSLBCommand(params.Action, params.Resource)
-	raw, err := adapter.Request(ctx, command, params.Reason)
+	raw, err := adapter.Request(ctx, session, command, params.Reason)
 	if err != nil {
 		// Graceful fallback to internal approvals if SLB is unavailable or errors.
 		slog.Warn("SLB adapter request failed, falling back to internal approval", "error", err, "command", command)
@@ -206,14 +213,13 @@ func parseSLBRequestID(raw json.RawMessage) string {
 	if len(raw) == 0 {
 		return ""
 	}
-	var payload map[string]interface{}
+	var payload struct {
+		RequestID string `json:"request_id"`
+	}
 	if err := json.Unmarshal(raw, &payload); err != nil {
 		return ""
 	}
-	if id, ok := payload["id"].(string); ok {
-		return id
-	}
-	return ""
+	return payload.RequestID
 }
 
 // Check returns the current status of an approval request.

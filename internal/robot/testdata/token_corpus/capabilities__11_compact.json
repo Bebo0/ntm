@@ -1780,7 +1780,7 @@
       "name": "slb-approve",
       "flag": "--robot-slb-approve",
       "category": "utility",
-      "summary": "Approve an SLB request by ID.",
+      "summary": "Approve an SLB request by ID, signed by the reviewer session in SLB_SESSION_ID/SLB_SESSION_KEY.",
       "output_formats": [
         "json"
       ],
@@ -1793,7 +1793,7 @@
       "name": "slb-deny",
       "flag": "--robot-slb-deny",
       "category": "utility",
-      "summary": "Deny an SLB request by ID.",
+      "summary": "Reject an SLB request by ID, signed by the reviewer session in SLB_SESSION_ID/SLB_SESSION_KEY.",
       "output_formats": [
         "json"
       ],

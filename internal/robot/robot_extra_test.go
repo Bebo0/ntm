@@ -252,8 +252,7 @@ func TestAdditionalBVSurfacesReportTypedMissingDependency(t *testing.T) {
 }
 
 func TestGetACFSStatus_WithFakeTools(t *testing.T) {
-	cleanup := withFakeTools(t)
-	defer cleanup()
+	withFakeTools(t)
 
 	output, err := GetACFSStatus()
 	if err != nil {
