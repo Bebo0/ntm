@@ -1,7 +1,10 @@
 // Package bv provides integration with the beads_viewer (bv) tool
 package bv
 
-import "time"
+import (
+	"encoding/json"
+	"time"
+)
 
 // InsightsResponse contains graph analysis insights
 type InsightsResponse struct {
@@ -233,10 +236,64 @@ type ScoreBreakdown struct {
 
 // ProjectHealth contains overall project health metrics
 type ProjectHealth struct {
+	Total                int            `json:"total,omitempty"`
 	StatusDistribution   map[string]int `json:"status_distribution,omitempty"`
 	TypeDistribution     map[string]int `json:"type_distribution,omitempty"`
 	PriorityDistribution map[string]int `json:"priority_distribution,omitempty"`
 	GraphMetrics         *GraphMetrics  `json:"graph_metrics,omitempty"`
+}
+
+// UnmarshalJSON reads bv's triage project_health, counts{total, by_status,
+// by_type, by_priority} and graph{node_count, edge_count, density,
+// has_cycles, cycle_count} (bv pkg/analysis/triage.go), and still accepts the
+// older status_distribution/graph_metrics layout. Reading only the older names
+// left the health section of every triage empty against current bv.
+func (h *ProjectHealth) UnmarshalJSON(data []byte) error {
+	type legacyProjectHealth ProjectHealth
+	var wire struct {
+		legacyProjectHealth
+		Counts *struct {
+			Total      int            `json:"total"`
+			ByStatus   map[string]int `json:"by_status"`
+			ByType     map[string]int `json:"by_type"`
+			ByPriority map[string]int `json:"by_priority"`
+		} `json:"counts"`
+		Graph *struct {
+			NodeCount  int     `json:"node_count"`
+			EdgeCount  int     `json:"edge_count"`
+			Density    float64 `json:"density"`
+			HasCycles  bool    `json:"has_cycles"`
+			CycleCount int     `json:"cycle_count"`
+		} `json:"graph"`
+	}
+	if err := json.Unmarshal(data, &wire); err != nil {
+		return err
+	}
+	*h = ProjectHealth(wire.legacyProjectHealth)
+	if c := wire.Counts; c != nil {
+		if h.Total == 0 {
+			h.Total = c.Total
+		}
+		if h.StatusDistribution == nil {
+			h.StatusDistribution = c.ByStatus
+		}
+		if h.TypeDistribution == nil {
+			h.TypeDistribution = c.ByType
+		}
+		if h.PriorityDistribution == nil {
+			h.PriorityDistribution = c.ByPriority
+		}
+	}
+	if g := wire.Graph; g != nil && h.GraphMetrics == nil {
+		h.GraphMetrics = &GraphMetrics{
+			TotalNodes: g.NodeCount,
+			TotalEdges: g.EdgeCount,
+			Density:    g.Density,
+			HasCycles:  g.HasCycles,
+			CycleCount: g.CycleCount,
+		}
+	}
+	return nil
 }
 
 // GraphMetrics contains graph-level metrics
@@ -246,6 +303,7 @@ type GraphMetrics struct {
 	Density    float64 `json:"density"`
 	AvgDegree  float64 `json:"avg_degree"`
 	MaxDepth   int     `json:"max_depth"`
+	HasCycles  bool    `json:"has_cycles,omitempty"`
 	CycleCount int     `json:"cycle_count"`
 }
 
@@ -287,16 +345,38 @@ type ForecastSummary struct {
 	LatestETA     time.Time `json:"latest_eta"`
 }
 
-// SuggestionsResponse contains hygiene suggestions
+// SuggestionsResponse is bv --robot-suggest output. The hygiene suggestions
+// sit in a SuggestionSet under "suggestions" (bv analysis.SuggestionSet);
+// decoding that object as a list failed every --robot-suggest call.
 type SuggestionsResponse struct {
-	Suggestions []Suggestion `json:"suggestions"`
+	Suggestions SuggestionSet `json:"suggestions"`
 }
 
-// Suggestion represents a hygiene suggestion
+// SuggestionSet is bv's analysis.SuggestionSet.
+type SuggestionSet struct {
+	Suggestions []Suggestion    `json:"suggestions"`
+	GeneratedAt time.Time       `json:"generated_at"`
+	DataHash    string          `json:"data_hash,omitempty"`
+	Stats       SuggestionStats `json:"stats"`
+}
+
+// Suggestion is one bv hygiene suggestion (bv analysis.Suggestion).
 type Suggestion struct {
-	Type        string   `json:"type"`
-	Description string   `json:"description"`
-	Items       []string `json:"items"`
+	Type          string  `json:"type"`
+	TargetBead    string  `json:"target_bead"`
+	RelatedBead   string  `json:"related_bead,omitempty"`
+	Summary       string  `json:"summary"`
+	Reason        string  `json:"reason"`
+	Confidence    float64 `json:"confidence"`
+	ActionCommand string  `json:"action_command,omitempty"`
+}
+
+// SuggestionStats summarizes a SuggestionSet.
+type SuggestionStats struct {
+	Total               int            `json:"total"`
+	ByType              map[string]int `json:"by_type"`
+	ByConfidence        map[string]int `json:"by_confidence"`
+	HighConfidenceCount int            `json:"high_confidence_count"`
 }
 
 // ImpactResponse is the envelope emitted by bv --robot-impact.
@@ -426,35 +506,54 @@ type LabelDependency struct {
 }
 
 // FileBeadsResponse contains file-to-bead mapping
+// The --robot-file-* shapes below follow bv's cmd/bv/robot_registry.go and
+// pkg/correlation types. ntm decoded invented shapes (files[], path/score,
+// relations[]), so these surfaces returned success with empty data.
 type FileBeadsResponse struct {
-	Files []FileBeads `json:"files"`
+	FilePath    string          `json:"file_path"`
+	TotalBeads  int             `json:"total_beads"`
+	OpenBeads   []BeadReference `json:"open_beads"`
+	ClosedBeads []BeadReference `json:"closed_beads"`
 }
 
-// FileBeads represents beads associated with a file
-type FileBeads struct {
-	Path  string   `json:"path"`
-	Beads []string `json:"beads"`
+// BeadReference is a bead that touched a file (bv correlation.BeadReference).
+type BeadReference struct {
+	BeadID       string    `json:"bead_id"`
+	Title        string    `json:"title"`
+	Status       string    `json:"status"`
+	CommitSHAs   []string  `json:"commit_shas"`
+	LastTouch    time.Time `json:"last_touch"`
+	TotalChanges int       `json:"total_changes"`
 }
 
-// FileHotspotsResponse contains file hotspot analysis
+// FileHotspotsResponse is bv --robot-file-hotspots output.
 type FileHotspotsResponse struct {
-	Hotspots []FileHotspot `json:"hotspots"`
+	Hotspots []FileHotspot  `json:"hotspots"`
+	Stats    map[string]any `json:"stats,omitempty"`
 }
 
-// FileHotspot represents a frequently changed file
+// FileHotspot is a file touched by many beads (bv correlation.FileHotspot).
 type FileHotspot struct {
-	Path  string `json:"path"`
-	Score int    `json:"score"`
+	FilePath    string `json:"file_path"`
+	TotalBeads  int    `json:"total_beads"`
+	OpenBeads   int    `json:"open_beads"`
+	ClosedBeads int    `json:"closed_beads"`
 }
 
-// FileRelationsResponse contains file relation analysis
+// FileRelationsResponse is bv --robot-file-relations output.
 type FileRelationsResponse struct {
-	Relations []FileRelation `json:"relations"`
+	FilePath     string          `json:"file_path"`
+	TotalCommits int             `json:"total_commits"`
+	Threshold    float64         `json:"threshold"`
+	RelatedFiles []CoChangeEntry `json:"related_files"`
 }
 
-// FileRelation represents a relationship between files
-type FileRelation struct {
-	Source string  `json:"source"`
-	Target string  `json:"target"`
-	Weight float64 `json:"weight"`
+// CoChangeEntry is a file that changes together with the queried one (bv
+// correlation.CoChangeEntry).
+type CoChangeEntry struct {
+	FilePath      string   `json:"file_path"`
+	CoChangeCount int      `json:"co_change_count"`
+	TotalCommits  int      `json:"total_commits"`
+	Correlation   float64  `json:"correlation"`
+	SampleCommits []string `json:"sample_commits"`
 }

@@ -3,6 +3,9 @@ package robot
 import (
 	"encoding/json"
 	"errors"
+	"os"
+	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -89,6 +92,64 @@ func TestGetACFSStatus_MissingBinary(t *testing.T) {
 	}
 	if output.Tools == nil {
 		t.Fatalf("expected tools map to be present")
+	}
+}
+
+// --robot-suggest decoded bv's SuggestionSet object as a list and failed on
+// every call. Run it against the installed bv on two near-duplicate issues.
+func TestGetSuggestReadsInstalledBV(t *testing.T) {
+	if _, err := exec.LookPath("bv"); err != nil {
+		t.Skip("bv not installed")
+	}
+	dir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(dir, ".beads"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	issue := func(id, title string) string {
+		return `{"id":"` + id + `","title":"` + title + `","description":"Users get logged out when the session token expires during a long form.","status":"open","priority":2,"issue_type":"bug","created_at":"2026-10-01T00:00:00Z","updated_at":"2026-10-01T00:00:00Z"}`
+	}
+	jsonl := issue("sg-a", "Fix login timeout when session expires") + "\n" + issue("sg-b", "Fix login timeout when the session expires") + "\n"
+	if err := os.WriteFile(filepath.Join(dir, ".beads", "issues.jsonl"), []byte(jsonl), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(dir)
+
+	out, err := GetSuggest()
+	if err != nil || !out.Success || out.Suggestions == nil {
+		t.Fatalf("GetSuggest = %+v, %v; want bv's suggestions", out, err)
+	}
+	found := false
+	for _, s := range out.Suggestions.Suggestions.Suggestions {
+		if s.Type == "potential_duplicate" && (s.TargetBead == "sg-a" || s.TargetBead == "sg-b") {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("suggestions = %+v, want the sg-a/sg-b duplicate", out.Suggestions.Suggestions)
+	}
+}
+
+// --robot-file-beads decoded an invented files[] shape and returned success
+// with nothing in it; bv answers {file_path,total_beads,open_beads,closed_beads}.
+func TestGetFileBeadsReadsInstalledBV(t *testing.T) {
+	if _, err := exec.LookPath("bv"); err != nil {
+		t.Skip("bv not installed")
+	}
+	dir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(dir, ".beads"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, ".beads", "issues.jsonl"), []byte(`{"id":"fb-a","title":"A","status":"open","priority":2,"issue_type":"task","created_at":"2026-10-01T00:00:00Z","updated_at":"2026-10-01T00:00:00Z"}`+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(dir)
+
+	out, err := GetFileBeads(FileBeadsOptions{FilePath: "app.go"})
+	if err != nil || !out.Success || out.Beads == nil {
+		t.Fatalf("GetFileBeads = %+v, %v", out, err)
+	}
+	if out.Beads.FilePath != "app.go" || out.Beads.OpenBeads == nil {
+		t.Fatalf("file beads = %+v, want bv's file_path and bead lists", out.Beads)
 	}
 }
 

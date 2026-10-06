@@ -443,7 +443,8 @@ func (c *BVClient) buildInsightsFromTriage(triage *TriageResponse) *Insights {
 
 	if triage.Triage.ProjectHealth != nil {
 		// Extract counts from project health
-		if counts, ok := triage.Triage.ProjectHealth.StatusDistribution["total"]; ok {
+		insights.TotalCount = triage.Triage.ProjectHealth.Total
+		if counts, ok := triage.Triage.ProjectHealth.StatusDistribution["total"]; ok && insights.TotalCount == 0 {
 			insights.TotalCount = counts
 		}
 

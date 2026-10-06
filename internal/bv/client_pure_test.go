@@ -221,6 +221,81 @@ func TestInsightsResponseDecodesBVCycles(t *testing.T) {
 	}
 }
 
+// Captured from bv v0.25.2: `bv --robot-suggest` on two near-duplicate issues
+// (trimmed to one suggestion), and the project_health block of
+// `bv --robot-triage` on a two-issue workspace.
+const (
+	bvSuggestFragment      = `{"suggestions":{"suggestions":[{"type":"potential_duplicate","target_bead":"sg-a","related_bead":"sg-b","summary":"Potential duplicate of sg-b","reason":"93% keyword similarity; common: during, expires, fix, form, get","confidence":0.9285714285714286,"generated_at":"2026-10-06T20:09:05.387498439Z","metadata":{"action_unavailable_reason":"source has no verified live tracker route","method":"jaccard"}}],"stats":{"total":2,"by_type":{"missing_dependency":1,"potential_duplicate":1},"by_confidence":{"high":1,"medium":1},"high_confidence_count":1,"actionable_count":0}}}`
+	bvTriageHealthFragment = `{"counts":{"total":2,"open":2,"closed":0,"blocked":0,"actionable":0,"not_closed":2,"dependency_blocked":2,"by_status":{"open":2},"by_type":{"task":2},"by_priority":{"2":2}},"graph":{"node_count":2,"edge_count":2,"density":1,"has_cycles":false,"phase2_ready":true}}`
+)
+
+// bv wraps suggestions in a SuggestionSet object; decoding it as a list made
+// every --robot-suggest call fail with INTERNAL_ERROR.
+func TestSuggestionsResponseDecodesBVSuggestionSet(t *testing.T) {
+	var resp SuggestionsResponse
+	if err := json.Unmarshal([]byte(bvSuggestFragment), &resp); err != nil {
+		t.Fatalf("decode bv suggestions: %v", err)
+	}
+	set := resp.Suggestions
+	if len(set.Suggestions) != 1 || set.Stats.Total != 2 || set.Stats.HighConfidenceCount != 1 {
+		t.Fatalf("suggestion set = %+v", set)
+	}
+	if s := set.Suggestions[0]; s.Type != "potential_duplicate" || s.TargetBead != "sg-a" || s.RelatedBead != "sg-b" || s.Confidence < 0.9 {
+		t.Fatalf("suggestion = %+v", s)
+	}
+}
+
+// Triage health reads bv's counts/graph layout (and still the older
+// status_distribution/graph_metrics one); before, it was always empty.
+func TestProjectHealthDecodesBVTriageShape(t *testing.T) {
+	var h ProjectHealth
+	if err := json.Unmarshal([]byte(bvTriageHealthFragment), &h); err != nil {
+		t.Fatalf("decode bv project_health: %v", err)
+	}
+	if h.Total != 2 || h.StatusDistribution["open"] != 2 || h.TypeDistribution["task"] != 2 || h.PriorityDistribution["2"] != 2 {
+		t.Fatalf("counts = total %d status %v type %v priority %v", h.Total, h.StatusDistribution, h.TypeDistribution, h.PriorityDistribution)
+	}
+	if g := h.GraphMetrics; g == nil || g.TotalNodes != 2 || g.TotalEdges != 2 || g.Density != 1 {
+		t.Fatalf("graph metrics = %+v", g)
+	}
+
+	var legacy ProjectHealth
+	if err := json.Unmarshal([]byte(`{"status_distribution":{"open":1},"graph_metrics":{"total_nodes":3,"total_edges":1,"cycle_count":1}}`), &legacy); err != nil {
+		t.Fatalf("decode legacy project_health: %v", err)
+	}
+	if legacy.StatusDistribution["open"] != 1 || legacy.GraphMetrics == nil || legacy.GraphMetrics.TotalNodes != 3 || legacy.GraphMetrics.CycleCount != 1 {
+		t.Fatalf("legacy health = %+v / %+v", legacy, legacy.GraphMetrics)
+	}
+}
+
+// The --robot-file-* item shapes follow bv's correlation types (BeadReference,
+// FileHotspot, CoChangeEntry); the envelopes were captured from bv v0.25.2.
+func TestFileResponsesDecodeBVShapes(t *testing.T) {
+	var beads FileBeadsResponse
+	if err := json.Unmarshal([]byte(`{"file_path":"app.go","total_beads":1,"open_beads":[{"bead_id":"sg-a","title":"Fix login","status":"open","commit_shas":["abc123"],"last_touch":"2026-10-06T20:00:00Z","total_changes":4}],"closed_beads":[]}`), &beads); err != nil {
+		t.Fatalf("decode file beads: %v", err)
+	}
+	if beads.FilePath != "app.go" || beads.TotalBeads != 1 || len(beads.OpenBeads) != 1 || beads.OpenBeads[0].BeadID != "sg-a" || beads.OpenBeads[0].TotalChanges != 4 {
+		t.Fatalf("file beads = %+v", beads)
+	}
+
+	var hotspots FileHotspotsResponse
+	if err := json.Unmarshal([]byte(`{"hotspots":[{"file_path":"app.go","total_beads":3,"open_beads":1,"closed_beads":2}],"stats":{"total_files":1,"total_bead_links":3,"files_with_multiple_beads":1}}`), &hotspots); err != nil {
+		t.Fatalf("decode hotspots: %v", err)
+	}
+	if len(hotspots.Hotspots) != 1 || hotspots.Hotspots[0].FilePath != "app.go" || hotspots.Hotspots[0].TotalBeads != 3 || hotspots.Stats["total_files"] != float64(1) {
+		t.Fatalf("hotspots = %+v", hotspots)
+	}
+
+	var relations FileRelationsResponse
+	if err := json.Unmarshal([]byte(`{"file_path":"app.go","total_commits":3,"threshold":0.5,"related_files":[{"file_path":"util.go","co_change_count":2,"total_commits":3,"correlation":0.67,"sample_commits":["abc123"]}]}`), &relations); err != nil {
+		t.Fatalf("decode relations: %v", err)
+	}
+	if relations.FilePath != "app.go" || len(relations.RelatedFiles) != 1 || relations.RelatedFiles[0].FilePath != "util.go" || relations.RelatedFiles[0].CoChangeCount != 2 {
+		t.Fatalf("relations = %+v", relations)
+	}
+}
+
 // The live contract: run the installed bv on a workspace with a cycle.
 func TestGetInsightsReadsCyclesFromInstalledBV(t *testing.T) {
 	if _, err := exec.LookPath("bv"); err != nil {
