@@ -102,6 +102,7 @@ var SchemaPagination = map[string]SchemaPaginationFlag{
 	"mail_check":       {Reason: "bounded: per-session mail check rows"},
 	"metrics":          {Reason: "bounded: current metric snapshot rows"},
 	"monitor":          {Reason: "bounded: one row per monitored pane"},
+	"ms_search":        {Reason: "bounded: ms returns at most its --limit (default 20) skill matches"},
 	"palette":          {Reason: "bounded: fixed palette command catalog"},
 	"pane_address":     {Reason: "bounded: address forms for one pane"},
 	"plan":             {Reason: "bounded: execution tracks for one plan request"},

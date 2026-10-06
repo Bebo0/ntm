@@ -7769,7 +7769,9 @@
       "paginated_reason": "bounded: per-session mail check rows"
     },
     {
-      "name": "ms-search"
+      "name": "ms-search",
+      "paginated": false,
+      "paginated_reason": "bounded: ms returns at most its --limit (default 20) skill matches"
     },
     {
       "name": "ms-show"
