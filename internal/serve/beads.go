@@ -174,7 +174,7 @@ func (s *Server) handleListBeads(w http.ResponseWriter, r *http.Request) {
 		args = append(args, "--status", status)
 	}
 	if label != "" {
-		args = append(args, "--labels", label)
+		args = append(args, "--label", label)
 	}
 	if assignee != "" {
 		args = append(args, "--assignee", assignee)

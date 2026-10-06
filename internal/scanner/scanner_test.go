@@ -3,6 +3,8 @@ package scanner
 import (
 	"context"
 	"errors"
+	"fmt"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -222,6 +224,13 @@ func TestBuildArgs(t *testing.T) {
 			},
 			expected: []string{"--format=json", "--staged", "."},
 		},
+		{
+			// ubs --exclude takes path globs and exits 2 on a language name.
+			name:     "excluded languages",
+			path:     ".",
+			opts:     ScanOptions{ExcludeLanguages: []string{"golang", "rust"}},
+			expected: []string{"--format=json", "--exclude-langs=golang,rust", "."},
+		},
 	}
 
 	for _, tt := range tests {
@@ -260,6 +269,113 @@ func TestParseOutput_WithWarningsPrefix(t *testing.T) {
 	}
 	if warnings[0] != "ℹ Created filtered scan workspace at /tmp" {
 		t.Fatalf("unexpected warning: %q", warnings[0])
+	}
+}
+
+// ubsModuleReport is `ubs --format=json --ci` output from ubs v5.4.17 on a
+// one-file project with an eval() call (exit 1), with the project path
+// shortened. Findings sit inside each scanner, not in a top-level list.
+const ubsModuleReport = `{"project":"/proj","timestamp":"2026-10-06T19:36:55Z","status":"ok","failed_modules":[],"scanners":[{"language":"js","project":"/proj","timestamp":"2026-10-06T19:36:55Z","files":1,"critical":2,"warning":0,"info":0,"version":"4.7","status":"ok","findings":[{"rule":"js.security.eval","category_id":"js.security","path":"/proj/app.js","line":2,"col":1,"severity":"critical","message":"eval() ALLOWS ARBITRARY CODE EXECUTION — return eval(input);","suppressed":false},{"rule":"js.eval-call","category_id":"js","path":"/proj/app.js","line":2,"col":10,"severity":"critical","message":"eval() allows arbitrary code execution","suppressed":false}],"extras":{"profile":{"files_considered":1,"files_after_prefilter":1,"prefilter_ms":10,"cache_hits":0,"cache_misses":1,"cache_hit_rate":0.0}}}],"totals":{"critical":2,"warning":0,"info":0,"files":1}}`
+
+// ntm read findings only from a top-level list ubs emits just when its
+// ubs_core helper is installed, so real scans reported no findings: no beads
+// were created and `ntm bugs list` stayed empty.
+func TestParseOutputReadsUBSModuleFindings(t *testing.T) {
+	result, _, err := (&Scanner{binaryPath: "ubs"}).parseOutput([]byte(ubsModuleReport))
+	if err != nil {
+		t.Fatalf("parseOutput: %v", err)
+	}
+	if result.Totals.Critical != 2 || len(result.Scanners) != 1 || result.Status != "ok" {
+		t.Fatalf("totals=%+v scanners=%d status=%q", result.Totals, len(result.Scanners), result.Status)
+	}
+	if len(result.Findings) != 2 {
+		t.Fatalf("findings = %+v, want the two eval() findings", result.Findings)
+	}
+	f := result.Findings[0]
+	if f.File != "/proj/app.js" || f.Line != 2 || f.Column != 1 || f.Severity != SeverityCritical ||
+		f.RuleID != "js.security.eval" || f.Category != "js.security" || !strings.HasPrefix(f.Message, "eval() ALLOWS") {
+		t.Fatalf("finding = %+v", f)
+	}
+}
+
+func TestParseOutputReadsMergedAndSummaryFindings(t *testing.T) {
+	// With ubs_core installed ubs merges a deduplicated top-level list
+	// (rule_id/file/col/category_id/remediation); per-scanner findings are
+	// then not counted again. Suppressed findings are dropped.
+	merged := `{"project":"/p","status":"ok","scanners":[{"language":"golang","files":1,"critical":1,"warning":0,"info":0,"findings":[{"rule":"go.x","path":"/p/a.go","line":3,"severity":"critical","message":"dup"}]}],"totals":{"critical":1,"warning":0,"info":0,"files":1},"findings":[{"lang":"golang","rule_id":"go.x","category_id":"go.resource","severity":"critical","file":"/p/a.go","line":3,"col":7,"message":"leak","remediation":"close it","suppressed":false},{"rule_id":"go.y","severity":"warning","file":"/p/b.go","line":1,"message":"ignored","suppressed":true}]}`
+	result, _, err := (&Scanner{binaryPath: "ubs"}).parseOutput([]byte(merged))
+	if err != nil {
+		t.Fatalf("parseOutput: %v", err)
+	}
+	if len(result.Findings) != 1 {
+		t.Fatalf("findings = %+v, want the one unsuppressed merged finding", result.Findings)
+	}
+	if f := result.Findings[0]; f.Column != 7 || f.Category != "go.resource" || f.Suggestion != "close it" || f.RuleID != "go.x" {
+		t.Fatalf("merged finding = %+v", f)
+	}
+
+	// A per-category summary names locations as samples; "good" entries
+	// are not findings.
+	summary := `{"project":"/p","status":"ok","scanners":[{"language":"python","files":2,"critical":0,"warning":2,"info":0,"findings":[{"severity":"warning","title":"Bare except","count":2,"samples":[{"file":"/p/a.py","line":4},{"file":"/p/b.py","line":9}]},{"severity":"good","title":"No eval","count":0}]}],"totals":{"critical":0,"warning":2,"info":0,"files":2}}`
+	result, _, err = (&Scanner{binaryPath: "ubs"}).parseOutput([]byte(summary))
+	if err != nil {
+		t.Fatalf("parseOutput: %v", err)
+	}
+	if len(result.Findings) != 2 || result.Findings[1].File != "/p/b.py" || result.Findings[1].Line != 9 ||
+		result.Findings[0].Severity != SeverityWarning || result.Findings[0].Message != "Bare except" {
+		t.Fatalf("summary findings = %+v", result.Findings)
+	}
+}
+
+// fakeUBS writes a stand-in ubs that prints stdout/stderr and exits with code.
+func fakeUBS(t *testing.T, stdout, stderr string, code int) *Scanner {
+	t.Helper()
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "out"), []byte(stdout), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "err"), []byte(stderr), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	script := fmt.Sprintf("#!/bin/sh\ncat %q\ncat %q >&2\nexit %d\n", filepath.Join(dir, "out"), filepath.Join(dir, "err"), code)
+	bin := filepath.Join(dir, "ubs")
+	if err := os.WriteFile(bin, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	return &Scanner{binaryPath: bin}
+}
+
+// ubs exit 2 is an environment error, refused scan or partial run. Read as an
+// empty clean scan it passed the pre-commit hook and let --update-beads close
+// every open finding.
+func TestScanTreatsUBSExit2AsIncomplete(t *testing.T) {
+	cases := map[string]*Scanner{
+		// The --exclude guard prints nothing on stdout.
+		"empty stdout": fakeUBS(t, "", "✗ --exclude now takes path globs; 'golang' names a language. Use --exclude-langs=golang to skip the language.\n", 2),
+		"error envelope": fakeUBS(t, `{"error":"refused","status":"refused","reason":"home-directory","exit_code":2,"project":"/home/u","message":"refusing to scan $HOME"}`, "", 2),
+		"partial report": fakeUBS(t, `{"project":"/p","timestamp":"t","status":"partial","failed_modules":[{"language":"rust","status":"timeout"}],"error":"","scanners":[],"totals":{"critical":0,"warning":0,"info":0,"files":3},"exit_code":2}`, "", 2),
+	}
+	for name, sc := range cases {
+		t.Run(name, func(t *testing.T) {
+			result, err := sc.Scan(context.Background(), t.TempDir(), ScanOptions{})
+			if !errors.Is(err, ErrScanIncomplete) || result != nil {
+				t.Fatalf("Scan = %+v, %v; want ErrScanIncomplete and no result", result, err)
+			}
+		})
+	}
+}
+
+func TestScanReportsNothingScannedForUBSExit3(t *testing.T) {
+	sc := fakeUBS(t, `{"result":"no-supported-languages","exit_code":3,"project":"/docs","detected_languages":[],"supported_languages":["js","golang"],"totals":{"critical":0,"warning":0,"info":0,"files":0},"scanners":[]}`, "", 3)
+	result, err := sc.Scan(context.Background(), t.TempDir(), ScanOptions{})
+	if err != nil || result == nil || !result.NothingScanned || result.ExitCode != 3 {
+		t.Fatalf("Scan = %+v, %v; want a NothingScanned result", result, err)
+	}
+
+	findings := fakeUBS(t, ubsModuleReport, "", 1)
+	result, err = findings.Scan(context.Background(), t.TempDir(), ScanOptions{})
+	if err != nil || result.NothingScanned || result.ExitCode != 1 || len(result.Findings) != 2 {
+		t.Fatalf("Scan = %+v, %v; want exit 1 with the two findings", result, err)
 	}
 }
 

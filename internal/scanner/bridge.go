@@ -271,10 +271,17 @@ func parseCreatedBeadID(output string) (string, error) {
 	return arrayResult[0].ID, nil
 }
 
+// ubsScanBeadListArgs lists open ubs-scan beads. br's list takes --label and
+// one --status per value; the --labels / comma-joined form it rejects (exit 2)
+// made --create-beads duplicate findings and --update-beads close none.
+func ubsScanBeadListArgs() []string {
+	return []string{"list", "--json", "--label", "ubs-scan", "--status", "open", "--status", "in_progress"}
+}
+
 // loadExistingSignatures loads signatures of existing UBS-created beads.
 func loadExistingSignatures() (map[string]bool, error) {
 	// Query beads with ubs-scan label that are open
-	output, err := bv.RunBd("", "list", "--json", "--labels=ubs-scan", "--status=open,in_progress")
+	output, err := bv.RunBd("", ubsScanBeadListArgs()...)
 	if err != nil {
 		return nil, fmt.Errorf("listing beads: %w", err)
 	}
@@ -379,6 +386,13 @@ func UpdateBeadsFromFindings(result *ScanResult, cfg BridgeConfig) (*BridgeResul
 		Messages: make([]string, 0),
 	}
 
+	// With nothing scanned there are no findings to compare: closing beads
+	// for "absent" findings would mark every open one fixed.
+	if result.NothingScanned {
+		br.Messages = append(br.Messages, "ubs scanned no supported files; open findings left unchanged")
+		return br, nil
+	}
+
 	// Get current findings signatures
 	currentSigs := make(map[string]bool)
 	for _, f := range result.Findings {
@@ -386,7 +400,7 @@ func UpdateBeadsFromFindings(result *ScanResult, cfg BridgeConfig) (*BridgeResul
 	}
 
 	// Get existing UBS beads
-	output, err := bv.RunBd("", "list", "--json", "--labels=ubs-scan", "--status=open,in_progress")
+	output, err := bv.RunBd("", ubsScanBeadListArgs()...)
 	if err != nil {
 		return nil, fmt.Errorf("listing beads: %w", err)
 	}

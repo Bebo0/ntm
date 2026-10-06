@@ -113,7 +113,8 @@ func TestSemanticBeadCollectorPreservesAvailability(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			want := []string{"list", "--label", PaneBeadLabel("test", 2, 3), "--include-closed", "--json"}
+			// br includes closed issues with --all and rejects --include-closed.
+			want := []string{"list", "--label", PaneBeadLabel("test", 2, 3), "--all", "--json"}
 			if got := strings.Split(strings.TrimSpace(string(args)), "\n"); !reflect.DeepEqual(got, want) {
 				t.Fatalf("br args=%q, want %q", got, want)
 			}

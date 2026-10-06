@@ -54,6 +54,12 @@ type ScanResult struct {
 	Warnings  []string        `json:"warnings,omitempty"`
 	Duration  time.Duration   `json:"duration,omitempty"`
 	ExitCode  int             `json:"exit_code"`
+	// Status is ubs's report status: ok, or partial/error for an incomplete
+	// run (which Scan returns as ErrScanIncomplete instead).
+	Status string `json:"status,omitempty"`
+	// NothingScanned is set when ubs found no supported language (exit 3).
+	// No findings then means nothing was checked, not that anything is fixed.
+	NothingScanned bool `json:"nothing_scanned,omitempty"`
 }
 
 // ScanOptions configures a UBS scan.

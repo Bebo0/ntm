@@ -300,7 +300,8 @@ func gatherClaimActivityWithContext(ctx context.Context, dir, label string, wind
 	if strings.TrimSpace(dir) == "" || strings.TrimSpace(label) == "" {
 		return claimActivity{}
 	}
-	raw, err := semanticCommandOutput(ctx, dir, "br", "list", "--label", label, "--include-closed", "--json")
+	// br includes closed issues with --all; it rejects --include-closed.
+	raw, err := semanticCommandOutput(ctx, dir, "br", "list", "--label", label, "--all", "--json")
 	if err != nil {
 		return claimActivity{}
 	}

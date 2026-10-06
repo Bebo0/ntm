@@ -1,6 +1,8 @@
 package scanner
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -308,5 +310,56 @@ func TestBeadPriorityConstants(t *testing.T) {
 	}
 	if BeadPriorityP2 >= BeadPriorityP3 {
 		t.Error("P2 should be less than P3")
+	}
+}
+
+// fakeBr puts a stand-in br first on PATH that logs every call and answers
+// list the way br does: it rejects --labels (exit 2) and otherwise returns one
+// open ubs-scan bead in br's {"issues":[...]} envelope.
+func fakeBr(t *testing.T) string {
+	t.Helper()
+	dir := t.TempDir()
+	calls := filepath.Join(dir, "calls")
+	script := `#!/bin/sh
+echo "$*" >> "` + calls + `"
+for a in "$@"; do
+  case "$a" in --labels*) echo "error: unexpected argument '--labels' found" >&2; exit 2 ;; esac
+done
+case " $* " in
+  *" list "*) echo '{"issues":[{"id":"bd-gone","description":"**Signature:** /p/gone.go:3:go.x"}],"total":1}' ;;
+esac
+exit 0
+`
+	if err := os.WriteFile(filepath.Join(dir, "br"), []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	return calls
+}
+
+// --update-beads used br list flags br rejects, so no fixed finding was ever
+// closed; and a scan that checked nothing must not close any.
+func TestUpdateBeadsFromFindingsClosesFixedFindingsOnlyAfterAScan(t *testing.T) {
+	calls := fakeBr(t)
+
+	result, err := UpdateBeadsFromFindings(&ScanResult{NothingScanned: true}, BridgeConfig{})
+	if err != nil || result.Created != 0 {
+		t.Fatalf("nothing scanned: closed %+v, %v; want nothing closed", result, err)
+	}
+	if _, err := os.Stat(calls); !os.IsNotExist(err) {
+		t.Fatalf("nothing scanned still ran br: %v", err)
+	}
+
+	result, err = UpdateBeadsFromFindings(&ScanResult{}, BridgeConfig{})
+	if err != nil || result.Created != 1 {
+		t.Fatalf("clean scan: %+v, %v; want the fixed finding's bead closed", result, err)
+	}
+	logged, err := os.ReadFile(calls)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(logged), "list --json --label ubs-scan --status open --status in_progress") ||
+		!strings.Contains(string(logged), "close bd-gone") {
+		t.Fatalf("br calls = %q, want the open ubs-scan list then close bd-gone", logged)
 	}
 }

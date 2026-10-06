@@ -18,6 +18,10 @@ var (
 	ErrScanFailed     = errors.New("scan failed")
 	ErrOutputTooLarge = errors.New("scan output exceeded limit")
 	ErrOutputNotJSON  = errors.New("scan output missing JSON")
+	// ErrScanIncomplete reports a ubs run with no complete result: invalid
+	// arguments, an environment error, a refused scan or a partial run (ubs
+	// exit 2). It is never a clean scan.
+	ErrScanIncomplete = errors.New("ubs scan incomplete")
 )
 
 // MaxScanOutputBytes limits the size of scan output to prevent OOM.
@@ -124,6 +128,30 @@ func (s *Scanner) Scan(ctx context.Context, path string, opts ScanOptions) (*Sca
 	if len(stderrWarnings) > 0 {
 		warnings = append(warnings, stderrWarnings...)
 	}
+
+	exitCode := 0
+	if waitErr != nil {
+		exitErr, ok := waitErr.(*exec.ExitError)
+		if !ok {
+			return nil, fmt.Errorf("running ubs: %w", waitErr)
+		}
+		exitCode = exitErr.ExitCode()
+	}
+	// ubs exit 2 (or a report it marks error/partial) is an environment
+	// error, a refused scan or a partial run, never a result. Read as an empty
+	// scan it passed the pre-commit hook and let --update-beads close every
+	// open finding.
+	if errors.Is(parseErr, ErrScanIncomplete) {
+		return nil, parseErr
+	}
+	if exitCode == 2 || (result != nil && (result.Status == "error" || result.Status == "partial")) {
+		detail := strings.Join(stderrWarnings, "; ")
+		if detail == "" && result != nil {
+			detail = "status " + result.Status
+		}
+		return nil, fmt.Errorf("%w (exit %d): %s", ErrScanIncomplete, exitCode, detail)
+	}
+
 	if parseErr != nil {
 		// If we can't parse output but command succeeded, return basic result
 		if waitErr == nil {
@@ -149,14 +177,11 @@ func (s *Scanner) Scan(ctx context.Context, path string, opts ScanOptions) (*Sca
 	}
 
 	result.Duration = duration
-
-	// Get exit code
-	if waitErr != nil {
-		if exitErr, ok := waitErr.(*exec.ExitError); ok {
-			result.ExitCode = exitErr.ExitCode()
-		} else {
-			return nil, fmt.Errorf("running ubs: %w", waitErr)
-		}
+	result.ExitCode = exitCode
+	// Exit 3: no supported language, so nothing was scanned. That is not a
+	// clean scan either, and callers must not treat absent findings as fixed.
+	if exitCode == 3 {
+		result.NothingScanned = true
 	}
 
 	return result, nil
@@ -194,7 +219,8 @@ func (s *Scanner) buildArgs(path string, opts ScanOptions) []string {
 		args = append(args, "--only="+strings.Join(opts.Languages, ","))
 	}
 	if len(opts.ExcludeLanguages) > 0 {
-		args = append(args, "--exclude="+strings.Join(opts.ExcludeLanguages, ","))
+		// ubs --exclude takes path globs; languages are --exclude-langs.
+		args = append(args, "--exclude-langs="+strings.Join(opts.ExcludeLanguages, ","))
 	}
 	if opts.CI {
 		args = append(args, "--ci")
@@ -222,21 +248,127 @@ func (s *Scanner) parseOutput(data []byte) (*ScanResult, []string, error) {
 		return &ScanResult{}, nil, nil
 	}
 
-	var result ScanResult
-	if err := json.Unmarshal(data, &result); err == nil {
-		return &result, nil, nil
-	} else {
-		jsonBlob, warnings := splitJSONAndWarnings(data)
-		if len(jsonBlob) > 0 {
-			if err := json.Unmarshal(jsonBlob, &result); err == nil {
-				return &result, warnings, nil
+	var doc ubsDocument
+	var warnings []string
+	if err := json.Unmarshal(data, &doc); err != nil {
+		jsonBlob, lines := splitJSONAndWarnings(data)
+		warnings = lines
+		if len(jsonBlob) == 0 || json.Unmarshal(jsonBlob, &doc) != nil {
+			if len(warnings) > 0 {
+				return nil, warnings, ErrOutputNotJSON
 			}
+			return nil, nil, fmt.Errorf("unmarshaling result: %w", err)
 		}
-		if len(warnings) > 0 {
-			return nil, warnings, ErrOutputNotJSON
-		}
-		return nil, nil, fmt.Errorf("unmarshaling result: %w", err)
 	}
+	if doc.Error != "" {
+		return nil, warnings, fmt.Errorf("%w: %s (%s)", ErrScanIncomplete, doc.Message, doc.Reason)
+	}
+	return doc.toResult(), warnings, nil
+}
+
+// ubsDocument is ubs's --format=json stdout (`ubs --schema=json`): a scan
+// report, a no-supported-languages result (exit 3) or an error envelope
+// (exit 2). Only the fields ntm reads are decoded.
+type ubsDocument struct {
+	Project   string       `json:"project"`
+	Timestamp string       `json:"timestamp"`
+	Status    string       `json:"status"`
+	Error     string       `json:"error"`
+	Reason    string       `json:"reason"`
+	Message   string       `json:"message"`
+	Scanners  []ubsScanner `json:"scanners"`
+	Totals    ScanTotals   `json:"totals"`
+	Findings  []ubsFinding `json:"findings"`
+}
+
+type ubsScanner struct {
+	ScannerResult
+	Findings []ubsFinding `json:"findings"`
+}
+
+// ubsFinding covers the three finding shapes ubs emits: the merged top-level
+// list (rule_id/file), a module's own findings (rule/path) and a per-category
+// summary (title/count/samples).
+type ubsFinding struct {
+	RuleID      string      `json:"rule_id"`
+	Rule        string      `json:"rule"`
+	CategoryID  string      `json:"category_id"`
+	Severity    string      `json:"severity"`
+	File        string      `json:"file"`
+	Path        string      `json:"path"`
+	Line        int         `json:"line"`
+	Col         int         `json:"col"`
+	Message     string      `json:"message"`
+	Remediation string      `json:"remediation"`
+	Suppressed  bool        `json:"suppressed"`
+	Title       string      `json:"title"`
+	Samples     []ubsSample `json:"samples"`
+}
+
+type ubsSample struct {
+	File string `json:"file"`
+	Line int    `json:"line"`
+}
+
+// toResult converts a ubs report into ntm's ScanResult. The merged top-level
+// list, when ubs emits one, is the deduplicated set; otherwise findings come
+// from each scanner.
+func (d *ubsDocument) toResult() *ScanResult {
+	result := &ScanResult{
+		Project:   d.Project,
+		Timestamp: d.Timestamp,
+		Status:    d.Status,
+		Totals:    d.Totals,
+	}
+	findings := d.Findings
+	for _, s := range d.Scanners {
+		result.Scanners = append(result.Scanners, s.ScannerResult)
+		if len(d.Findings) == 0 {
+			findings = append(findings, s.Findings...)
+		}
+	}
+	for _, f := range findings {
+		result.Findings = append(result.Findings, f.toFindings()...)
+	}
+	return result
+}
+
+func (f ubsFinding) toFindings() []Finding {
+	severity := Severity(f.Severity)
+	if f.Suppressed || (severity != SeverityCritical && severity != SeverityWarning && severity != SeverityInfo) {
+		return nil // suppressed, or a summary's "good" entry
+	}
+	file, rule := f.File, f.RuleID
+	if file == "" {
+		file = f.Path
+	}
+	if rule == "" {
+		rule = f.Rule
+	}
+	if file != "" {
+		return []Finding{{
+			File:       file,
+			Line:       f.Line,
+			Column:     f.Col,
+			Severity:   severity,
+			Category:   f.CategoryID,
+			Message:    f.Message,
+			Suggestion: f.Remediation,
+			RuleID:     rule,
+		}}
+	}
+	// A per-category summary names its locations as samples.
+	findings := make([]Finding, 0, len(f.Samples))
+	for _, sample := range f.Samples {
+		findings = append(findings, Finding{
+			File:     sample.File,
+			Line:     sample.Line,
+			Severity: severity,
+			Category: f.Title,
+			Message:  f.Title,
+		})
+	}
+	return findings
 }
 
 func splitJSONAndWarnings(data []byte) ([]byte, []string) {

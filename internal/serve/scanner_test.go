@@ -717,9 +717,11 @@ case "$cmd1" in
     exit 0
     ;;
   list)
+    # Real br list filters with --label (and --label-any); it rejects
+    # --labels, which only create takes (br list --help).
     for arg in "$@"; do
-      if [ "$arg" = "--label" ]; then
-        echo "unexpected legacy list arg: $arg" >&2
+      if [ "$arg" = "--labels" ]; then
+        echo "error: unexpected argument '$arg' found" >&2
         exit 2
       fi
     done

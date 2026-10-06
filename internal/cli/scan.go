@@ -433,7 +433,9 @@ func printScanResults(t theme.Theme, result *scanner.ScanResult, showWarnings bo
 
 	// Summary line
 	fmt.Printf("%s───────────────────────────────────────────────────%s\n", "\033[2m", "\033[0m")
-	if result.IsHealthy() {
+	if result.NothingScanned {
+		fmt.Printf("%s⚠%s Nothing scanned: ubs found no supported language here\n", colorize(t.Warning), "\033[0m")
+	} else if result.IsHealthy() {
 		fmt.Printf("%s✓%s No critical or warning issues found\n", colorize(t.Success), "\033[0m")
 	} else if result.HasCritical() {
 		fmt.Printf("%s✗%s Critical issues found - fix before committing\n", colorize(t.Error), "\033[0m")
