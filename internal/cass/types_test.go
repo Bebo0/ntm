@@ -434,14 +434,6 @@ func TestCapabilitiesUnmarshalCurrentLimitsSchema(t *testing.T) {
 		t.Fatalf("limits[max_agg_buckets] = %v, want 10", got)
 	}
 }
-func TestTimelineEntryTimestampTime(t *testing.T) {
-	tm := time.Unix(1702200000, 0)
-	entry := TimelineEntry{Timestamp: FlexTime{Time: tm}}
-	got := entry.TimestampTime()
-	if !got.Equal(tm) {
-		t.Errorf("TimestampTime() = %v, want %v", got, tm)
-	}
-}
 
 // =============================================================================
 // FlexTime.UnmarshalJSON tests

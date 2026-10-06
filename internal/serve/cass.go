@@ -13,6 +13,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -549,19 +550,16 @@ func (s *Server) handleCASSTimeline(w http.ResponseWriter, r *http.Request) {
 	}
 
 	agent := r.URL.Query().Get("agent")
-	workspace := r.URL.Query().Get("workspace")
+	if r.URL.Query().Get("workspace") != "" {
+		writeErrorResponse(w, http.StatusBadRequest, ErrCodeBadRequest,
+			"cass timeline cannot filter by workspace; filter by agent or use /cass/search", nil, reqID)
+		return
+	}
 
 	ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
 	defer cancel()
 
-	result, err := client.Search(ctx, cass.SearchOptions{
-		Query:     "*",
-		Limit:     limit,
-		Agent:     agent,
-		Workspace: workspace,
-		Since:     since,
-		Fields:    "summary",
-	})
+	result, err := client.Timeline(ctx, since, "none", agent)
 	if err != nil {
 		slog.Warn("cass timeline failed", "error", err, "request_id", reqID)
 		writeErrorResponse(w, http.StatusInternalServerError, ErrCodeCASSUnavailable,
@@ -569,27 +567,28 @@ func (s *Server) handleCASSTimeline(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Build timeline entries
-	entries := make([]map[string]interface{}, 0, len(result.Hits))
-	for _, hit := range result.Hits {
-		entry := map[string]interface{}{
-			"type":      hit.MatchType,
-			"agent":     hit.Agent,
-			"workspace": hit.Workspace,
-			"title":     hit.Title,
-			"snippet":   hit.Snippet,
-			"path":      hit.SourcePath,
-		}
-		if hit.CreatedAt != nil {
-			entry["timestamp"] = hit.CreatedAt.Format(time.RFC3339)
-		}
-		entries = append(entries, entry)
+	// Most recent sessions first, capped at limit.
+	sessions := result.Sessions
+	sort.SliceStable(sessions, func(i, j int) bool { return sessions[i].StartedAt > sessions[j].StartedAt })
+	if len(sessions) > limit {
+		sessions = sessions[:limit]
+	}
+	entries := make([]map[string]interface{}, 0, len(sessions))
+	for _, session := range sessions {
+		entries = append(entries, map[string]interface{}{
+			"agent":         session.Agent,
+			"title":         session.Title,
+			"path":          session.SourcePath,
+			"message_count": session.MessageCount,
+			"timestamp":     session.StartTime().UTC().Format(time.RFC3339),
+		})
 	}
 
 	writeSuccessResponse(w, http.StatusOK, map[string]interface{}{
-		"entries": entries,
-		"count":   len(entries),
-		"since":   since,
+		"entries":        entries,
+		"count":          len(entries),
+		"total_sessions": result.TotalSessions,
+		"since":          since,
 	}, reqID)
 }
 

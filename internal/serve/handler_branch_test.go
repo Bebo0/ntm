@@ -8469,13 +8469,41 @@ func TestHandleCASSTimeline_WithRealCass(t *testing.T) {
 	}
 	s, _ := setupTestServer(t)
 
-	req := httptest.NewRequest("GET", "/api/v1/memory/cass/timeline?limit=5", nil)
+	req := httptest.NewRequest("GET", "/api/v1/memory/cass/timeline?limit=3&since=30d", nil)
 	rec := httptest.NewRecorder()
 
 	s.handleCASSTimeline(rec, req)
 
-	if rec.Code == http.StatusServiceUnavailable {
-		t.Fatal("cass is installed but got 503")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body %s", rec.Code, rec.Body.String())
+	}
+	var body struct {
+		Entries []struct {
+			Agent     string `json:"agent"`
+			Path      string `json:"path"`
+			Timestamp string `json:"timestamp"`
+		} `json:"entries"`
+		Count         int `json:"count"`
+		TotalSessions int `json:"total_sessions"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if body.Count != len(body.Entries) || body.Count > 3 || body.TotalSessions < body.Count {
+		t.Fatalf("count=%d entries=%d total=%d", body.Count, len(body.Entries), body.TotalSessions)
+	}
+	for _, e := range body.Entries {
+		if e.Agent == "" || e.Path == "" || e.Timestamp == "" {
+			t.Fatalf("timeline entry missing agent/path/timestamp: %+v", e)
+		}
+	}
+
+	// cass timeline has no workspace filter; refusing beats ignoring it.
+	req = httptest.NewRequest("GET", "/api/v1/memory/cass/timeline?workspace=/data/projects/ntm", nil)
+	rec = httptest.NewRecorder()
+	s.handleCASSTimeline(rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("workspace filter status = %d, want 400", rec.Code)
 	}
 }
 

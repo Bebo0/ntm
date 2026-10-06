@@ -351,19 +351,6 @@ type Message struct {
 	Timestamp *FlexTime `json:"timestamp,omitempty"`
 }
 
-// TimelineEntry represents an event in the timeline
-type TimelineEntry struct {
-	ID        string   `json:"id"`
-	Type      string   `json:"type"`
-	Timestamp FlexTime `json:"timestamp"`
-	Data      any      `json:"data"`
-}
-
-// TimestampTime returns the entry timestamp as time.Time
-func (e TimelineEntry) TimestampTime() time.Time {
-	return e.Timestamp.Time
-}
-
 // SearchOptions configures a search request
 type SearchOptions struct {
 	Query     string

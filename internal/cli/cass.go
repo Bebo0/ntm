@@ -307,7 +307,7 @@ func newCassTimelineCmd() *cobra.Command {
 		},
 	}
 	cmd.Flags().StringVar(&since, "since", "24h", "Timeline period")
-	cmd.Flags().StringVar(&groupBy, "group-by", "hour", "Grouping (hour, day)")
+	cmd.Flags().StringVar(&groupBy, "group-by", "hour", "Grouping (hour, day, none)")
 	return cmd
 }
 
@@ -323,32 +323,55 @@ func runCassTimeline(since, groupBy string) error {
 	}
 
 	t := theme.Current()
-	fmt.Printf("%sActivity Timeline (%s)%s\n", colorize(t.Primary), since, "\033[0m")
+	fmt.Printf("%sActivity Timeline (%s): %d sessions%s\n", colorize(t.Primary), since, resp.TotalSessions, "\033[0m")
 
 	w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
-	fmt.Fprintln(w, "Time\tType\tCount")
-	fmt.Fprintln(w, "────\t────\t─────")
-
-	for _, entry := range resp.Entries {
-		ts := entry.TimestampTime().Format("15:04")
-		if groupBy == "day" {
-			ts = entry.TimestampTime().Format("Jan 02")
+	if resp.Sessions != nil {
+		fmt.Fprintln(w, "Started\tAgent\tTitle")
+		fmt.Fprintln(w, "───────\t─────\t─────")
+		for _, s := range resp.Sessions {
+			fmt.Fprintf(w, "%s\t%s\t%s\n", s.StartTime().Format("Jan 02 15:04"), s.Agent, truncateRunes(s.Title, 60, "…"))
 		}
-
-		count := 1
-		if c, ok := entry.Data.(float64); ok {
-			count = int(c)
-		} else if m, ok := entry.Data.(map[string]interface{}); ok {
-			if c, ok := m["count"].(float64); ok {
-				count = int(c)
-			}
+	} else {
+		fmt.Fprintln(w, "Period\tSessions\tAgents")
+		fmt.Fprintln(w, "──────\t────────\t──────")
+		periods := make([]string, 0, len(resp.Groups))
+		for period := range resp.Groups {
+			periods = append(periods, period)
 		}
-
-		fmt.Fprintf(w, "%s\t%s\t%d\n", ts, entry.Type, count)
+		sort.Strings(periods)
+		for _, period := range periods {
+			sessions := resp.Groups[period]
+			fmt.Fprintf(w, "%s\t%d\t%s\n", period, len(sessions), timelineAgents(sessions))
+		}
 	}
 	w.Flush()
 
 	return nil
+}
+
+// timelineAgents summarizes which agents ran in a timeline period, busiest
+// first, e.g. "claude_code×12, codex×3".
+func timelineAgents(sessions []cass.TimelineSession) string {
+	counts := make(map[string]int)
+	for _, s := range sessions {
+		counts[s.Agent]++
+	}
+	agents := make([]string, 0, len(counts))
+	for agent := range counts {
+		agents = append(agents, agent)
+	}
+	sort.Slice(agents, func(i, j int) bool {
+		if counts[agents[i]] != counts[agents[j]] {
+			return counts[agents[i]] > counts[agents[j]]
+		}
+		return agents[i] < agents[j]
+	})
+	parts := make([]string, 0, len(agents))
+	for _, agent := range agents {
+		parts = append(parts, fmt.Sprintf("%s×%d", agent, counts[agent]))
+	}
+	return strings.Join(parts, ", ")
 }
 
 func newCassPreviewCmd() *cobra.Command {
