@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -125,7 +126,7 @@ func TestCollectOptionalCMParsesContext(t *testing.T) {
 	snapshot := NewIdeaEvidenceSnapshot(t.TempDir())
 	runner := fakeOptionalRunner{
 		outputs: map[string][]byte{
-			"cm context queue-dry ideation --json --top 5": []byte(`{"success":true,"data":{"relevantBullets":[{"id":"b-1","category":"debugging","summary":"Check tests at /home/jeff/repo/x","tags":["go"]}],"antiPatterns":[{"id":"b-2","category":"refactor","summary":"Don't reset --hard"}],"suggestedCassQueries":["auth error","supabase 5xx"]}}`),
+			"cm context queue-dry ideation --json --top 5": []byte(`{"success":true,"data":{"relevantBullets":[{"id":"b-1","category":"debugging","content":"Check tests at /home/jeff/repo/x","tags":["go"]}],"antiPatterns":[{"id":"b-2","category":"refactor","content":"Don't reset --hard"}],"suggestedCassQueries":["auth error","supabase 5xx"]}}`),
 		},
 	}
 	collector := Collector{Runner: runner}
@@ -142,6 +143,31 @@ func TestCollectOptionalCMParsesContext(t *testing.T) {
 	if !foundPathRedaction {
 		t.Fatalf("expected /home path redaction in cm signal: %+v", snapshot.OptionalSignals)
 	}
+}
+
+// TestCollectOptionalCMReadsInstalledCM adds one rule to an isolated cm
+// playbook (HOME points at a temp dir) and collects it through the real cm.
+func TestCollectOptionalCMReadsInstalledCM(t *testing.T) {
+	if _, err := exec.LookPath("cm"); err != nil {
+		t.Skip("cm not installed")
+	}
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	ctx := context.Background()
+	add := exec.CommandContext(ctx, "cm", "playbook", "add", "Always run the race detector on concurrent Go tests", "--category", "testing", "--json")
+	add.Dir = home
+	if out, err := add.CombinedOutput(); err != nil {
+		t.Fatalf("cm playbook add: %v\n%s", err, out)
+	}
+
+	snapshot := NewIdeaEvidenceSnapshot(home)
+	Collector{}.CollectCMSignals(ctx, &snapshot, OptionalAdapterOptions{ProjectDir: home, CMQuery: "race detector go tests"})
+	for _, signal := range snapshot.OptionalSignals {
+		if signal.Kind == "cm_rule" && strings.Contains(signal.Summary, "race detector") {
+			return
+		}
+	}
+	t.Fatalf("no cm_rule signal carrying the rule text: %+v (sources %+v)", snapshot.OptionalSignals, snapshot.Sources)
 }
 
 func TestCollectOptionalCMWhenMissingRecordsDegradedSource(t *testing.T) {

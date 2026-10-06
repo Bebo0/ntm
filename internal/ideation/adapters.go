@@ -373,17 +373,19 @@ func parseCMContextOutput(output []byte, sourceID string, opts OptionalAdapterOp
 	if err := json.Unmarshal(output, &wrapped); err == nil && len(wrapped.Data) > 0 {
 		output = wrapped.Data
 	}
+	// cm context bullets carry their rule text in content (cm's
+	// ContextBulletSchema); there is no summary field.
 	var parsed struct {
 		RelevantBullets []struct {
 			ID       string   `json:"id"`
 			Category string   `json:"category"`
-			Summary  string   `json:"summary"`
+			Content  string   `json:"content"`
 			Tags     []string `json:"tags"`
 		} `json:"relevantBullets"`
 		AntiPatterns []struct {
 			ID       string `json:"id"`
 			Category string `json:"category"`
-			Summary  string `json:"summary"`
+			Content  string `json:"content"`
 		} `json:"antiPatterns"`
 		SuggestedQueries []string `json:"suggestedCassQueries"`
 	}
@@ -404,7 +406,7 @@ func parseCMContextOutput(output []byte, sourceID string, opts OptionalAdapterOp
 			SourceID: sourceID,
 			Kind:     "cm_rule",
 			Title:    truncateForEvidence(bullet.Category, 64),
-			Summary:  redactAndTruncate(bullet.Summary, opts.PerSignalSummaryBytes),
+			Summary:  redactAndTruncate(bullet.Content, opts.PerSignalSummaryBytes),
 			Tags:     stableStrings(append([]string{"cm_rule"}, bullet.Tags...)),
 			Evidence: stableStrings([]string{"cm rule " + bullet.ID}),
 		})
@@ -418,7 +420,7 @@ func parseCMContextOutput(output []byte, sourceID string, opts OptionalAdapterOp
 			SourceID: sourceID,
 			Kind:     "cm_anti_pattern",
 			Title:    truncateForEvidence(anti.Category, 64),
-			Summary:  redactAndTruncate(anti.Summary, opts.PerSignalSummaryBytes),
+			Summary:  redactAndTruncate(anti.Content, opts.PerSignalSummaryBytes),
 			Tags:     stableStrings([]string{"cm_anti_pattern"}),
 			Evidence: stableStrings([]string{"cm anti-pattern " + anti.ID}),
 		})
