@@ -142,6 +142,19 @@ func TestGetFileBeadsReadsInstalledBV(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dir, ".beads", "issues.jsonl"), []byte(`{"id":"fb-a","title":"A","status":"open","priority":2,"issue_type":"task","created_at":"2026-10-01T00:00:00Z","updated_at":"2026-10-01T00:00:00Z"}`+"\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
+	// bv's file correlation reads git history, so it needs a commit.
+	if err := os.WriteFile(filepath.Join(dir, "app.go"), []byte("package app\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	for _, args := range [][]string{
+		{"init", "-q"},
+		{"add", "-A"},
+		{"-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "fb-a: add app"},
+	} {
+		if out, err := exec.Command("git", append([]string{"-C", dir}, args...)...).CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v: %s", args, err, out)
+		}
+	}
 	t.Chdir(dir)
 
 	out, err := GetFileBeads(FileBeadsOptions{FilePath: "app.go"})
