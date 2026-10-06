@@ -544,20 +544,34 @@ func TestIsSameProject(t *testing.T) {
 func TestNormalizeScore(t *testing.T) {
 	tests := []struct {
 		input float64
+		best  float64
 		want  float64
 	}{
-		{0.5, 0.5},   // Already 0-1 scale
-		{1.0, 1.0},   // Already 0-1 scale
-		{50.0, 0.5},  // 0-100 scale
-		{100.0, 1.0}, // 0-100 scale
-		{0.0, 0.0},   // Zero
+		{1.0 / 61, 1.0 / 61, 1.0}, // best hybrid hit
+		{50.0, 100.0, 0.5},        // half the best BM25 score
+		{0.25, 0.5, 0.5},          // half the best similarity
+		{0.0, 1.0, 0.0},           // unscored
+		{0.5, 0.0, 0.0},           // no best score
 	}
 
 	for _, tt := range tests {
-		got := normalizeScore(tt.input)
-		if got != tt.want {
-			t.Errorf("normalizeScore(%f) = %f, want %f", tt.input, got, tt.want)
+		got := normalizeScore(tt.input, tt.best)
+		if diff := got - tt.want; diff < -0.001 || diff > 0.001 {
+			t.Errorf("normalizeScore(%f, %f) = %f, want %f", tt.input, tt.best, got, tt.want)
 		}
+	}
+}
+
+// The robot engine's default filter (MinRelevance 0.7) must keep hits from
+// cass's default hybrid search, whose fused scores are ~1/(61+rank).
+func TestFilterResultsKeepsHybridSearchHits(t *testing.T) {
+	hits := []CASSHit{
+		{SourcePath: "/s/a.jsonl", Score: 1.0 / 61},
+		{SourcePath: "/s/b.jsonl", Score: 1.0 / 62},
+	}
+	got := FilterResults(hits, DefaultFilterConfig())
+	if len(got.Hits) != 2 || got.RemovedByScore != 0 {
+		t.Fatalf("kept=%d removed_by_score=%d, want both hybrid hits kept", len(got.Hits), got.RemovedByScore)
 	}
 }
 

@@ -79,33 +79,36 @@ func TestFilterResults_ExplicitScoreOverridesPosition(t *testing.T) {
 	if result.FilteredCount != 2 {
 		t.Fatalf("FilteredCount = %d, want 2", result.FilteredCount)
 	}
-	// Sorted descending by score, so 0.9 first
-	if result.Hits[0].ScoreDetail.BaseScore != 0.9 {
-		t.Errorf("first hit BaseScore = %v, want 0.9", result.Hits[0].ScoreDetail.BaseScore)
+	// Sorted descending by score, so 0.9 first; scores are relative to the
+	// best hit, so the 0.9 hit is 1.0 and the 0.3 hit is a third of it.
+	if result.Hits[0].SourcePath != "sessions/b.jsonl" || result.Hits[0].ScoreDetail.BaseScore != 1.0 {
+		t.Errorf("first hit = %s BaseScore %v, want b at 1.0", result.Hits[0].SourcePath, result.Hits[0].ScoreDetail.BaseScore)
 	}
-	if result.Hits[1].ScoreDetail.BaseScore != 0.3 {
-		t.Errorf("second hit BaseScore = %v, want 0.3", result.Hits[1].ScoreDetail.BaseScore)
+	if got := result.Hits[1].ScoreDetail.BaseScore; got < 0.33 || got > 0.34 {
+		t.Errorf("second hit BaseScore = %v, want 0.3/0.9", got)
 	}
 }
 
-func TestFilterResults_PercentageScoreNormalized(t *testing.T) {
+func TestFilterResults_ScoreRelativeToBestHit(t *testing.T) {
 	t.Parallel()
 
-	// Score > 1.0 is treated as percentage
+	// Any cass scale (BM25 here) maps onto 0-1 relative to the best hit.
 	hits := []CASSHit{
-		{SourcePath: "sessions/pct.jsonl", Score: 85.0},
+		{SourcePath: "sessions/best.jsonl", Score: 85.0},
+		{SourcePath: "sessions/half.jsonl", Score: 42.5},
 	}
 	config := FilterConfig{MaxItems: 10}
 
 	result := FilterResults(hits, config)
 
-	if len(result.Hits) != 1 {
-		t.Fatalf("Hits len = %d, want 1", len(result.Hits))
+	if len(result.Hits) != 2 {
+		t.Fatalf("Hits len = %d, want 2", len(result.Hits))
 	}
-	got := result.Hits[0].ScoreDetail.BaseScore
-	want := 0.85
-	if diff := got - want; diff < -0.01 || diff > 0.01 {
-		t.Errorf("BaseScore = %v, want %v (85%% normalized)", got, want)
+	if got := result.Hits[0].ScoreDetail.BaseScore; got != 1.0 {
+		t.Errorf("best BaseScore = %v, want 1.0", got)
+	}
+	if got := result.Hits[1].ScoreDetail.BaseScore; got < 0.49 || got > 0.51 {
+		t.Errorf("half BaseScore = %v, want 0.5", got)
 	}
 }
 
@@ -223,8 +226,9 @@ func TestFilterResults_MinRelevanceFiltering(t *testing.T) {
 	if result.FilteredCount != 1 {
 		t.Errorf("FilteredCount = %d, want 1", result.FilteredCount)
 	}
-	if result.Hits[0].ScoreDetail.BaseScore != 0.8 {
-		t.Errorf("remaining hit BaseScore = %v, want 0.8", result.Hits[0].ScoreDetail.BaseScore)
+	// The kept hit is the best one (1.0); the other is a quarter of it.
+	if result.Hits[0].SourcePath != "sessions/high.jsonl" || result.Hits[0].ScoreDetail.BaseScore != 1.0 {
+		t.Errorf("remaining hit = %s BaseScore %v, want high at 1.0", result.Hits[0].SourcePath, result.Hits[0].ScoreDetail.BaseScore)
 	}
 }
 

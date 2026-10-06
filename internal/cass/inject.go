@@ -621,11 +621,31 @@ func isSameProject(sessionPath, currentWorkspace string) bool {
 	return strings.Contains(sessionPath, projName)
 }
 
-func normalizeScore(score float64) float64 {
-	if score > 1.0 {
-		return score / 100.0
+// normalizeScore scales a cass score against the best score in the same result
+// set. cass's scale depends on its search mode: hybrid (the default) fuses
+// ranks into ~1/(61+rank), about 0.016; lexical returns BM25 scores; semantic
+// returns similarities. Read as an absolute 0-1 (or /100) value, no hybrid hit
+// could reach the default 0.7 threshold, so injection silently added nothing.
+// Relative to the best hit, the top result is 1.0 and the rest keep their gaps.
+func normalizeScore(score, best float64) float64 {
+	if score <= 0 || best <= 0 {
+		return 0
 	}
-	return score
+	if score >= best {
+		return 1.0
+	}
+	return score / best
+}
+
+// bestHitScore is the highest cass score in a result set (0 if none scored).
+func bestHitScore(hits []CASSHit) float64 {
+	best := 0.0
+	for _, hit := range hits {
+		if hit.Score > best {
+			best = hit.Score
+		}
+	}
+	return best
 }
 
 func sortScoredHits(hits []ScoredHit) {
@@ -682,6 +702,7 @@ func FilterResults(hits []CASSHit, config FilterConfig) FilterResult {
 	}
 	now := time.Now()
 	maxAgeTime := now.AddDate(0, 0, -config.MaxAgeDays)
+	best := bestHitScore(hits)
 	var scored []ScoredHit
 	for i, hit := range hits {
 		sessionDate := ExtractSessionDate(hit.SourcePath)
@@ -696,7 +717,7 @@ func FilterResults(hits []CASSHit, config FilterConfig) FilterResult {
 			breakdown.BaseScore = 1.0
 		}
 		if hit.Score > 0 {
-			breakdown.BaseScore = normalizeScore(hit.Score)
+			breakdown.BaseScore = normalizeScore(hit.Score, best)
 		}
 		if !sessionDate.IsZero() {
 			age := now.Sub(sessionDate)
