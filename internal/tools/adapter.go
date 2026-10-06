@@ -8,6 +8,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os/exec"
 	"regexp"
 	"strings"
 	"time"
@@ -256,6 +257,22 @@ func (a *BaseAdapter) Timeout() time.Duration {
 // SetTimeout sets the default operation timeout
 func (a *BaseAdapter) SetTimeout(t time.Duration) {
 	a.timeout = t
+}
+
+// helpText runs a tool's help command and returns what it printed on either
+// stream: ubs and ru print help on stderr, pt and rano on stdout, and some
+// exit non-zero, so only the text matters.
+func helpText(ctx context.Context, timeout time.Duration, path string, args ...string) string {
+	ctx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+
+	cmd := exec.CommandContext(ctx, path, args...)
+	cmd.WaitDelay = time.Second
+	var out bytes.Buffer
+	cmd.Stdout = &out
+	cmd.Stderr = &out
+	_ = cmd.Run()
+	return out.String()
 }
 
 // cliErrorLine picks a CLI's "Error: ..." line out of stderr, which may also

@@ -1,9 +1,37 @@
 package tools
 
 import (
+	"context"
+	"slices"
 	"testing"
 	"time"
 )
+
+// TestCapabilityProbesReadInstalledHelp: ubs prints --help on stderr, pt and
+// rano on stdout, and rano has no `help` subcommand, so each probe must read
+// both streams of `--help` to see the robot surface.
+func TestCapabilityProbesReadInstalledHelp(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		adapter Adapter
+	}{
+		{"ubs", NewUBSAdapter()},
+		{"pt", NewPTAdapter()},
+		{"rano", NewRanoAdapter()},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if _, installed := tc.adapter.Detect(); !installed {
+				t.Skipf("%s not installed", tc.name)
+			}
+			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			defer cancel()
+			caps, err := tc.adapter.Capabilities(ctx)
+			if err != nil || !slices.Contains(caps, CapRobotMode) {
+				t.Fatalf("Capabilities() = %v, %v; want robot mode from %s --help", caps, err, tc.name)
+			}
+		})
+	}
+}
 
 func TestParseStandardVersion(t *testing.T) {
 	t.Parallel()

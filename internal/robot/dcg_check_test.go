@@ -2,6 +2,7 @@ package robot
 
 import (
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"testing"
@@ -263,6 +264,25 @@ func TestGetDCGCheckWithOptions_CombinedOptions(t *testing.T) {
 	}
 }
 
+// TestGetDCGCheckReadsInstalledDCGRule checks a denied command through the
+// installed dcg: its rule_id and explanation must reach the robot output.
+func TestGetDCGCheckReadsInstalledDCGRule(t *testing.T) {
+	if _, err := exec.LookPath("dcg"); err != nil {
+		t.Skip("dcg not installed")
+	}
+	tools.NewDCGAdapter().InvalidateAvailabilityCache()
+
+	out, err := GetDCGCheckWithOptions(DCGCheckOptions{Command: "git reset --hard"})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if out.Allowed || out.RuleMatched != "core.git:reset-hard" || out.Suggestion == "" ||
+		out.AgentHints == nil || !out.AgentHints.RequiresConfirmation {
+		t.Fatalf("GetDCGCheck(git reset --hard) = allowed:%t rule:%q severity:%q suggestion:%d chars hints:%+v",
+			out.Allowed, out.RuleMatched, out.Severity, len(out.Suggestion), out.AgentHints)
+	}
+}
+
 func TestGetDCGCheckWithOptions_AgentHints(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("PATH shim test uses a unix shell script")
@@ -355,7 +375,7 @@ func writeFakeDCGWithHints(t *testing.T, dir string) {
 	t.Helper()
 
 	dcgPath := filepath.Join(dir, "dcg")
-	// Fake DCG script that includes safer_alternative in response
+	// Fake DCG script whose deny carries dcg's explanation text
 	script := `#!/bin/sh
 set -eu
 
@@ -395,7 +415,7 @@ if [ "${1:-}" = "test" ]; then
 
   case "$cmd" in
     *"rm -rf"*)
-      echo "{\"command\":\"$cmd\",\"reason\":\"Destructive recursive delete\",\"severity\":\"high\",\"rule_matched\":\"RECURSIVE_DELETE\",\"safer_alternative\":\"trash-put $cmd\"}"
+      echo "{\"command\":\"$cmd\",\"decision\":\"deny\",\"reason\":\"Destructive recursive delete\",\"severity\":\"high\",\"rule_id\":\"core.filesystem:rm-rf-general\",\"explanation\":\"Move the tree aside instead of deleting it\"}"
       exit 1
       ;;
   esac
@@ -459,7 +479,7 @@ if [ "${1:-}" = "test" ]; then
 
   case "$cmd" in
     *"rm -rf"*)
-      echo "{\"command\":\"$cmd\",\"reason\":\"blocked by fake policy\",\"severity\":\"high\",\"rule_matched\":\"RECURSIVE_DELETE\"}"
+      echo "{\"command\":\"$cmd\",\"decision\":\"deny\",\"reason\":\"blocked by fake policy\",\"severity\":\"high\",\"rule_id\":\"core.filesystem:rm-rf-general\"}"
       exit 1
       ;;
   esac

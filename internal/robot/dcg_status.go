@@ -144,8 +144,7 @@ type DCGCheckOutput struct {
 
 // DCGAgentHints contains hints for AI agents processing blocked commands.
 type DCGAgentHints struct {
-	SaferAlternative     string `json:"safer_alternative,omitempty"`
-	RequiresConfirmation bool   `json:"requires_confirmation,omitempty"`
+	RequiresConfirmation bool `json:"requires_confirmation,omitempty"`
 }
 
 // DCGCheckOptions contains options for the DCG check operation.
@@ -266,12 +265,10 @@ func GetDCGCheckWithOptions(opts DCGCheckOptions) (*DCGCheckOutput, error) {
 		output.RuleMatched = checkResult.RuleMatched
 		output.Suggestion = checkResult.Suggestion
 
-		// Add agent hints if available
-		if checkResult.SaferAlternative != "" || checkResult.Severity == "critical" || checkResult.Severity == "high" {
-			output.AgentHints = &DCGAgentHints{
-				SaferAlternative:     checkResult.SaferAlternative,
-				RequiresConfirmation: checkResult.Severity == "critical" || checkResult.Severity == "high",
-			}
+		// Critical and high severity blocks need a human to confirm; dcg's
+		// remediation text is in Suggestion.
+		if checkResult.Severity == "critical" || checkResult.Severity == "high" {
+			output.AgentHints = &DCGAgentHints{RequiresConfirmation: true}
 		}
 		return output, nil
 	}

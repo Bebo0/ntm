@@ -60,19 +60,11 @@ func (a *PTAdapter) Capabilities(ctx context.Context) ([]Capability, error) {
 		return caps, nil
 	}
 
-	ctx, cancel := context.WithTimeout(ctx, a.Timeout())
-	defer cancel()
+	output := helpText(ctx, a.Timeout(), path, "--help")
 
-	cmd := exec.CommandContext(ctx, path, "--help")
-	cmd.WaitDelay = time.Second
-	var stdout bytes.Buffer
-	cmd.Stdout = &stdout
-	_ = cmd.Run() // Ignore error, just check output
-
-	output := stdout.String()
-
-	// Check for known capabilities
-	if strings.Contains(output, "--json") || strings.Contains(output, "classify") {
+	// Check for known capabilities; pt's robot surface is `pt agent ...`
+	// ("Agent/robot subcommands").
+	if strings.Contains(output, "--json") || strings.Contains(output, "Agent/robot") {
 		caps = append(caps, CapRobotMode)
 	}
 	if strings.Contains(output, "daemon") || strings.Contains(output, "watch") {

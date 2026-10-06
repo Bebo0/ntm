@@ -660,17 +660,20 @@ func (a *CAAMAdapter) SwitchAccount(ctx context.Context, provider, accountID str
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
 
-	if err := cmd.Run(); err != nil {
-		if ctx.Err() == context.DeadlineExceeded {
-			return ErrTimeout
-		}
-		return fmt.Errorf("failed to switch account: %w: %s", err, strings.TrimSpace(stderr.String()))
+	runErr := cmd.Run()
+	if runErr != nil && ctx.Err() == context.DeadlineExceeded {
+		return ErrTimeout
 	}
+	// caam reports a failed activate as {"success":false,"error":...} on
+	// stdout and exits 1, so read the JSON before falling back to stderr.
 	var response struct {
 		Success bool   `json:"success"`
 		Error   string `json:"error"`
 	}
-	if err := json.Unmarshal(stdout.Bytes(), &response); err != nil {
+	if err := json.Unmarshal(bytes.TrimSpace(stdout.Bytes()), &response); err != nil {
+		if runErr != nil {
+			return fmt.Errorf("failed to switch account: %w: %s", runErr, strings.TrimSpace(stderr.String()))
+		}
 		return fmt.Errorf("%w: parse caam activate response: %v", ErrSchemaValidation, err)
 	}
 	if !response.Success {
@@ -678,6 +681,9 @@ func (a *CAAMAdapter) SwitchAccount(ctx context.Context, provider, accountID str
 			return fmt.Errorf("caam activate failed: %s", response.Error)
 		}
 		return fmt.Errorf("%w: caam activate returned success=false", ErrSchemaValidation)
+	}
+	if runErr != nil {
+		return fmt.Errorf("failed to switch account: %w: %s", runErr, strings.TrimSpace(stderr.String()))
 	}
 
 	// Invalidate cache after switch

@@ -230,6 +230,23 @@ func TestBuildRateLimitRecommendation(t *testing.T) {
 	}
 }
 
+// TestBuildRateLimitRecommendation_SwitchNamesProvider: caam cannot switch
+// without a provider, so the hint names the pane's provider via ntm.
+func TestBuildRateLimitRecommendation_SwitchNamesProvider(t *testing.T) {
+	for agentType, want := range map[string]string{
+		"cod":    "ntm --robot-switch-account=openai",
+		"claude": "ntm --robot-switch-account=claude",
+		"gmi":    "ntm --robot-switch-account=gemini",
+		"user":   "ntm --robot-switch-account=PROVIDER",
+	} {
+		check := &HealthCheck{AgentType: agentType, ErrorCheck: &ErrorCheckResult{RateLimited: true}}
+		rec := buildRateLimitRecommendation(0, "0", "s", check)
+		if !strings.HasPrefix(rec.FixCommand, want+" ") {
+			t.Errorf("agent %q: FixCommand = %q, want prefix %q", agentType, rec.FixCommand, want)
+		}
+	}
+}
+
 func TestBuildRateLimitRecommendation_FixCommandFormat(t *testing.T) {
 	// Test that fix command contains correct session and pane info
 	check := &HealthCheck{

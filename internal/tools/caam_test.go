@@ -500,6 +500,23 @@ func TestSwitchToNextAccountNotInstalled(t *testing.T) {
 	}
 }
 
+// TestSwitchAccountReportsInstalledCAAMFailureReason: caam reports why a
+// profile cannot be activated in its stdout JSON and exits 1; activating a
+// profile that does not exist changes nothing.
+func TestSwitchAccountReportsInstalledCAAMFailureReason(t *testing.T) {
+	adapter := NewCAAMAdapter()
+	if _, installed := adapter.Detect(); !installed {
+		t.Skip("caam not installed")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	err := adapter.SwitchAccount(ctx, "claude", "ntm-test-no-such-profile")
+	if err == nil || !strings.Contains(err.Error(), "not found") {
+		t.Fatalf("SwitchAccount(missing profile) error = %v, want caam's not-found reason", err)
+	}
+}
+
 func TestSwitchToNextAccountReturnsSchemaErrorOnInvalidJSONSuccess(t *testing.T) {
 	dir := t.TempDir()
 	fakeCAAM := filepath.Join(dir, "caam")

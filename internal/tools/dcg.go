@@ -143,13 +143,12 @@ type BlockedCommand struct {
 
 // ExtendedCheckResult represents the result of an extended DCG check with full details.
 type ExtendedCheckResult struct {
-	Command          string `json:"command"`
-	Blocked          bool   `json:"blocked"`
-	Reason           string `json:"reason,omitempty"`
-	Severity         string `json:"severity,omitempty"`          // critical, high, medium, low, safe
-	RuleMatched      string `json:"rule_matched,omitempty"`      // e.g., RECURSIVE_DELETE_ROOT
-	Suggestion       string `json:"suggestion,omitempty"`        // e.g., "Use trash-cli instead"
-	SaferAlternative string `json:"safer_alternative,omitempty"` // e.g., "trash-put /data/backup"
+	Command     string `json:"command"`
+	Blocked     bool   `json:"blocked"`
+	Reason      string `json:"reason,omitempty"`
+	Severity    string `json:"severity,omitempty"`     // critical, high, medium, low, safe
+	RuleMatched string `json:"rule_matched,omitempty"` // dcg rule_id, e.g. core.git:reset-hard
+	Suggestion  string `json:"suggestion,omitempty"`   // dcg explanation: what the command would do and safer forms
 }
 
 // DCGStatus represents the current DCG configuration status
@@ -455,19 +454,16 @@ func (a *DCGAdapter) CheckCommandExtended(ctx context.Context, command, context_
 			// Try to parse extended JSON output
 			if json.Valid(output) {
 				var parsed struct {
-					Command          string `json:"command"`
-					Reason           string `json:"reason"`
-					Severity         string `json:"severity"`
-					RuleMatched      string `json:"rule_matched"`
-					Suggestion       string `json:"suggestion"`
-					SaferAlternative string `json:"safer_alternative"`
+					Reason      string `json:"reason"`
+					Severity    string `json:"severity"`
+					RuleID      string `json:"rule_id"`
+					Explanation string `json:"explanation"`
 				}
 				if jsonErr := json.Unmarshal(output, &parsed); jsonErr == nil {
 					result.Reason = parsed.Reason
 					result.Severity = parsed.Severity
-					result.RuleMatched = parsed.RuleMatched
-					result.Suggestion = parsed.Suggestion
-					result.SaferAlternative = parsed.SaferAlternative
+					result.RuleMatched = parsed.RuleID
+					result.Suggestion = parsed.Explanation
 					return result, nil
 				}
 			}

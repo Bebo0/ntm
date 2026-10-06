@@ -60,17 +60,7 @@ func (a *RUAdapter) Capabilities(ctx context.Context) ([]Capability, error) {
 		return caps, nil
 	}
 
-	ctx, cancel := context.WithTimeout(ctx, a.Timeout())
-	defer cancel()
-
-	cmd := exec.CommandContext(ctx, path, "--help")
-	cmd.WaitDelay = time.Second
-	var help bytes.Buffer
-	cmd.Stdout = &help
-	cmd.Stderr = &help // ru prints its help on stderr
-	_ = cmd.Run()      // Ignore error, just check output
-
-	output := help.String()
+	output := helpText(ctx, a.Timeout(), path, "--help")
 
 	// Check for known capabilities
 	if strings.Contains(output, "--json") {

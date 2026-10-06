@@ -60,16 +60,7 @@ func (a *UBSAdapter) Capabilities(ctx context.Context) ([]Capability, error) {
 		return caps, nil
 	}
 
-	ctx, cancel := context.WithTimeout(ctx, a.Timeout())
-	defer cancel()
-
-	cmd := exec.CommandContext(ctx, path, "--help")
-	cmd.WaitDelay = time.Second
-	var stdout bytes.Buffer
-	cmd.Stdout = &stdout
-	_ = cmd.Run() // Ignore error, just check output
-
-	output := stdout.String()
+	output := helpText(ctx, a.Timeout(), path, "--help")
 
 	// Check for known capabilities
 	if strings.Contains(output, "--json") || strings.Contains(output, "robot") {
