@@ -166,6 +166,44 @@ func TestGetFileBeadsReadsInstalledBV(t *testing.T) {
 	}
 }
 
+// br dep tree lists the queried issue itself at depth 0, so --robot-graph's
+// correlation reported every bead as its own blocker and dependent.
+func TestGetBeadNeighborsExcludesTheQueriedIssue(t *testing.T) {
+	if _, err := exec.LookPath("br"); err != nil {
+		t.Skip("br not installed")
+	}
+	dir := t.TempDir()
+	brRun := func(args ...string) string {
+		t.Helper()
+		cmd := exec.Command("br", args...)
+		cmd.Dir = dir
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			t.Fatalf("br %v: %v: %s", args, err, out)
+		}
+		return strings.TrimSpace(string(out))
+	}
+	brRun("init", "--prefix", "zz")
+	newID := func(title string) string {
+		var created struct {
+			ID string `json:"id"`
+		}
+		if err := json.Unmarshal([]byte(brRun("create", "--title", title, "--type", "task", "--json")), &created); err != nil || created.ID == "" {
+			t.Fatalf("br create %q: %v", title, err)
+		}
+		return created.ID
+	}
+	blocked, blocker := newID("Blocked work"), newID("Blocker")
+	brRun("dep", "add", blocked, blocker)
+
+	if ids, _, err := getBeadNeighbors(dir, blocked, "down"); err != nil || len(ids) != 1 || ids[0] != blocker {
+		t.Fatalf("down neighbors of %s = %v, %v; want [%s]", blocked, ids, err, blocker)
+	}
+	if ids, _, err := getBeadNeighbors(dir, blocker, "up"); err != nil || len(ids) != 1 || ids[0] != blocked {
+		t.Fatalf("up neighbors of %s = %v, %v; want [%s]", blocker, ids, err, blocked)
+	}
+}
+
 func TestAdditionalBVSurfacesReportTypedMissingDependency(t *testing.T) {
 	t.Setenv("PATH", "")
 

@@ -10035,7 +10035,9 @@ func getBeadNeighbors(dir, issueID, direction string) ([]string, []bdDepTreeNode
 	cleaned := make([]bdDepTreeNode, 0)
 	for _, n := range nodes {
 		n.ID = strings.TrimSpace(n.ID)
-		if n.ID == "" || seen[n.ID] {
+		// br dep tree lists the queried issue itself at depth 0; it is not
+		// its own blocker or dependent.
+		if n.ID == "" || seen[n.ID] || n.Depth == 0 || n.ID == issueID {
 			continue
 		}
 		seen[n.ID] = true
