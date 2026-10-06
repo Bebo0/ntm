@@ -66,22 +66,6 @@ func TestSafetyEscapeYAMLDoubleQuote(t *testing.T) {
 	}
 }
 
-func TestClaudeHookScriptReadsCurrentStdinPayload(t *testing.T) {
-	for _, want := range []string{
-		"HOOK_INPUT=\"$(cat)\"",
-		"'.tool_name // empty'",
-		"'.tool_input.command // empty'",
-		"exit 2",
-	} {
-		if !strings.Contains(claudeHookScript, want) {
-			t.Fatalf("claude hook script missing %q", want)
-		}
-	}
-	if strings.Contains(claudeHookScript, "exit 1\nfi\n\nexit 0") {
-		t.Fatal("claude hook script still uses non-blocking exit 1 for denied commands")
-	}
-}
-
 // ExpiresAt is never cleared when an approval resolves, so a resolved record
 // stays past its TTL forever. Checking expiry before terminal state therefore
 // let a retry hours later rewrite an APPROVED record to "expired" while

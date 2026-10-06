@@ -295,14 +295,14 @@ func (s *Server) handleSafetyInstallV1(w http.ResponseWriter, r *http.Request) {
 
 	// Install git wrapper
 	gitWrapper := filepath.Join(binDir, "git")
-	if err := installWrapperFile(gitWrapper, gitWrapperScript, req.Force); err != nil {
+	if err := installWrapperFile(gitWrapper, policy.GitWrapperScript, req.Force); err != nil {
 		writeErrorResponse(w, http.StatusConflict, ErrCodeConflict, err.Error(), nil, reqID)
 		return
 	}
 
 	// Install rm wrapper
 	rmWrapper := filepath.Join(binDir, "rm")
-	if err := installWrapperFile(rmWrapper, rmWrapperScript, req.Force); err != nil {
+	if err := installWrapperFile(rmWrapper, policy.RmWrapperScript, req.Force); err != nil {
 		writeErrorResponse(w, http.StatusConflict, ErrCodeConflict, err.Error(), nil, reqID)
 		return
 	}
@@ -316,7 +316,7 @@ func (s *Server) handleSafetyInstallV1(w http.ResponseWriter, r *http.Request) {
 	}
 
 	hookPath := filepath.Join(hookDir, "ntm-safety.sh")
-	if err := installWrapperFile(hookPath, claudeHookScript, req.Force); err != nil {
+	if err := installWrapperFile(hookPath, policy.ClaudeHookScript, req.Force); err != nil {
 		writeErrorResponse(w, http.StatusConflict, ErrCodeConflict, err.Error(), nil, reqID)
 		return
 	}
@@ -1609,149 +1609,3 @@ func safetyEscapeYAMLDoubleQuote(s string) string {
 	s = strings.ReplaceAll(s, "\t", "\\t")
 	return s
 }
-
-// Wrapper scripts (same as CLI)
-
-const gitWrapperScript = `#!/bin/bash
-# NTM Safety Wrapper for git
-# Intercepts destructive git commands
-
-REAL_GIT=$(which -a git | grep -v "$HOME/.ntm/bin" | head -1)
-if [ -z "$REAL_GIT" ]; then
-    REAL_GIT="/usr/bin/git"
-fi
-
-# Check command against policy (include "git" in the command string)
-check_result=$(ntm safety check "git $*" --json 2>&1)
-exit_code=$?
-
-# ntm safety check exits 0 for allow/approve, 1 for block
-if [ $exit_code -eq 1 ]; then
-    # Command was blocked
-    reason=$(echo "$check_result" | jq -r '.reason // "Policy violation"' 2>/dev/null)
-    echo "NTM Safety: Command blocked" >&2
-    echo "  Reason: $reason" >&2
-    echo "  Command: git $*" >&2
-
-    # Log the blocked command (use jq for proper JSON escaping)
-    mkdir -p "$HOME/.ntm/logs"
-    if command -v jq >/dev/null 2>&1; then
-        jq -n --arg ts "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
-              --arg cmd "git $*" \
-              --arg reason "${reason:-Policy violation}" \
-              '{timestamp: $ts, command: $cmd, reason: $reason, action: "block"}' >> "$HOME/.ntm/logs/blocked.jsonl"
-    else
-        # Fallback without proper escaping (best effort)
-        echo "{\"timestamp\":\"$(date -u +%Y-%m-%dT%H:%M:%SZ)\",\"action\":\"block\"}" >> "$HOME/.ntm/logs/blocked.jsonl"
-    fi
-
-    exit 1
-fi
-
-# Pass through to real git
-exec "$REAL_GIT" "$@"
-`
-
-const rmWrapperScript = `#!/bin/bash
-# NTM Safety Wrapper for rm
-# Intercepts destructive rm commands
-
-REAL_RM=$(which -a rm | grep -v "$HOME/.ntm/bin" | head -1)
-if [ -z "$REAL_RM" ]; then
-    REAL_RM="/bin/rm"
-fi
-
-# Check command against policy
-check_result=$(ntm safety check "rm $*" --json 2>&1)
-exit_code=$?
-
-# ntm safety check exits 0 for allow/approve, 1 for block
-if [ $exit_code -eq 1 ]; then
-    # Command was blocked
-    reason=$(echo "$check_result" | jq -r '.reason // "Policy violation"' 2>/dev/null)
-    echo "NTM Safety: Command blocked" >&2
-    echo "  Reason: $reason" >&2
-    echo "  Command: rm $*" >&2
-
-    # Log the blocked command (use jq for proper JSON escaping)
-    mkdir -p "$HOME/.ntm/logs"
-    if command -v jq >/dev/null 2>&1; then
-        jq -n --arg ts "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
-              --arg cmd "rm $*" \
-              --arg reason "${reason:-Policy violation}" \
-              '{timestamp: $ts, command: $cmd, reason: $reason, action: "block"}' >> "$HOME/.ntm/logs/blocked.jsonl"
-    else
-        # Fallback without proper escaping (best effort)
-        echo "{\"timestamp\":\"$(date -u +%Y-%m-%dT%H:%M:%SZ)\",\"action\":\"block\"}" >> "$HOME/.ntm/logs/blocked.jsonl"
-    fi
-
-    exit 1
-fi
-
-# Pass through to real rm
-exec "$REAL_RM" "$@"
-`
-
-const claudeHookScript = `#!/bin/bash
-# NTM Safety Hook for Claude Code
-# PreToolUse hook that validates Bash commands
-
-# Claude Code command hooks receive the event payload as JSON on stdin.
-HOOK_INPUT="$(cat)"
-if [ -n "$HOOK_INPUT" ] && command -v jq >/dev/null 2>&1; then
-    TOOL_NAME="$(printf '%s' "$HOOK_INPUT" | jq -r '.tool_name // empty' 2>/dev/null)"
-    COMMAND="$(printf '%s' "$HOOK_INPUT" | jq -r '.tool_input.command // empty' 2>/dev/null)"
-else
-    TOOL_NAME=""
-    COMMAND=""
-fi
-
-# Fall back to legacy env vars if a caller still provides them directly.
-if [ -z "$TOOL_NAME" ]; then
-    TOOL_NAME="${CLAUDE_TOOL_NAME:-}"
-fi
-if [ -z "$COMMAND" ]; then
-    COMMAND="${CLAUDE_TOOL_INPUT_command:-}"
-fi
-
-# Only process Bash tool calls
-if [ "$TOOL_NAME" != "Bash" ]; then
-    exit 0
-fi
-
-if [ -z "$COMMAND" ]; then
-    exit 0
-fi
-
-# Check against policy
-check_result=$(ntm safety check "$COMMAND" --json 2>&1)
-exit_code=$?
-
-# ntm safety check exits 0 for allow/approve, 1 for block
-if [ $exit_code -eq 1 ]; then
-    # Command was blocked
-    reason=$(echo "$check_result" | jq -r '.reason // "Policy violation"' 2>/dev/null)
-
-    # Log the blocked command (use jq for proper JSON escaping)
-    mkdir -p "$HOME/.ntm/logs"
-    session="${NTM_SESSION:-unknown}"
-    agent="${CLAUDE_AGENT_TYPE:-claude}"
-    if command -v jq >/dev/null 2>&1; then
-        jq -n --arg ts "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
-              --arg session "$session" \
-              --arg agent "$agent" \
-              --arg cmd "$COMMAND" \
-              --arg reason "${reason:-Policy violation}" \
-              '{timestamp: $ts, session: $session, agent: $agent, command: $cmd, reason: $reason, action: "block"}' >> "$HOME/.ntm/logs/blocked.jsonl"
-    else
-        # Fallback without proper escaping (best effort)
-        echo "{\"timestamp\":\"$(date -u +%Y-%m-%dT%H:%M:%SZ)\",\"action\":\"block\"}" >> "$HOME/.ntm/logs/blocked.jsonl"
-    fi
-
-    # Return error to Claude Code
-    echo "BLOCKED: $reason" >&2
-    exit 2
-fi
-
-exit 0
-`

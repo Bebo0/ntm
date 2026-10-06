@@ -3,6 +3,7 @@ package cli
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -14,6 +15,7 @@ import (
 
 	"github.com/Dicklesworthstone/ntm/internal/output"
 	"github.com/Dicklesworthstone/ntm/internal/policy"
+	"github.com/Dicklesworthstone/ntm/internal/tmux"
 	"github.com/Dicklesworthstone/ntm/internal/tools"
 )
 
@@ -254,14 +256,21 @@ func runSafetyBlocked(hours int) error {
 }
 
 func newSafetyCheckCmd() *cobra.Command {
-	return &cobra.Command{
+	var hook bool
+	cmd := &cobra.Command{
 		Use:   "check <command>",
 		Short: "Check a command against safety policy",
 		Args:  cobra.MinimumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return runSafetyCheck(strings.Join(args, " "))
+			return runSafetyCheck(strings.Join(args, " "), hook)
 		},
 	}
+	// The installed wrappers and hook pass --hook: a refusal there is an
+	// agent's command being stopped, so it is recorded. A check run by hand
+	// only reports the verdict.
+	cmd.Flags().BoolVar(&hook, "hook", false, "record a refusal as a blocked command (used by the installed safety hooks)")
+	_ = cmd.Flags().MarkHidden("hook")
+	return cmd
 }
 
 func newSafetySimulateCmd() *cobra.Command {
@@ -326,10 +335,48 @@ type CheckDCGVerdict struct {
 	Error     string `json:"error,omitempty"`
 }
 
-func runSafetyCheck(command string) error {
+// recordHookRefusal files a command an installed safety hook refused: an entry
+// in the blocked-command log (`ntm safety blocked`) naming the tmux session and
+// pane it ran in, and a row in that session's blocked_commands, which `ntm
+// metrics` reports as destructive_cmd_incidents. The hook scripts used to log
+// in shell with no usable session ("unknown"), and the metric never counted
+// these refusals (bd-cl6me).
+func recordHookRefusal(resp CheckResponse) {
+	session := tmux.GetCurrentSession()
+	pane := strings.TrimSpace(os.Getenv("TMUX_PANE"))
+	entry := policy.BlockedEntry{
+		Timestamp: time.Now().UTC(),
+		Session:   session,
+		Agent:     pane,
+		Command:   resp.Command,
+		Pattern:   resp.Pattern,
+		Reason:    resp.Reason,
+		Action:    policy.Action(resp.Action),
+	}
+	if err := policy.AppendBlocked("", entry); err != nil {
+		slog.Default().Debug("blocked command not logged", "error", err)
+	}
+	if session == "" {
+		return // outside tmux there is no session to attribute it to
+	}
+	store, collector, err := getMetricsCollector(session)
+	if err != nil {
+		slog.Default().Debug("blocked-command metric unavailable", "session", session, "error", err)
+		return
+	}
+	if store != nil {
+		defer store.Close()
+	}
+	collector.RecordBlockedCommand(pane, resp.Command, "policy: "+resp.Reason)
+}
+
+func runSafetyCheck(command string, hook bool) error {
 	resp, exitCode, err := evaluateSafetyCheck(command)
 	if err != nil {
 		return err
+	}
+	if hook && exitCode != 0 {
+		recordHookRefusal(resp)
 	}
 
 	if IsJSONOutput() {
@@ -582,13 +629,13 @@ func runSafetyInstall(force bool) error {
 
 	// Install git wrapper
 	gitWrapper := filepath.Join(binDir, "git")
-	if err := installWrapper(gitWrapper, gitWrapperScript, force); err != nil {
+	if err := installWrapper(gitWrapper, policy.GitWrapperScript, force); err != nil {
 		return err
 	}
 
 	// Install rm wrapper
 	rmWrapper := filepath.Join(binDir, "rm")
-	if err := installWrapper(rmWrapper, rmWrapperScript, force); err != nil {
+	if err := installWrapper(rmWrapper, policy.RmWrapperScript, force); err != nil {
 		return err
 	}
 
@@ -599,7 +646,7 @@ func runSafetyInstall(force bool) error {
 	}
 
 	hookPath := filepath.Join(hookDir, "ntm-safety.sh")
-	if err := installWrapper(hookPath, claudeHookScript, force); err != nil {
+	if err := installWrapper(hookPath, policy.ClaudeHookScript, force); err != nil {
 		return err
 	}
 
@@ -766,176 +813,3 @@ func fileExists(path string) bool {
 	_, err := os.Stat(path)
 	return err == nil
 }
-
-// Wrapper scripts
-
-const gitWrapperScript = `#!/bin/bash
-# NTM Safety Wrapper for git
-# Intercepts destructive git commands
-
-REAL_GIT=$(which -a git | grep -v "$HOME/.ntm/bin" | head -1)
-if [ -z "$REAL_GIT" ]; then
-    REAL_GIT="/usr/bin/git"
-fi
-
-# Check command against policy (include "git" in the command string)
-check_result=$(ntm safety check "git $*" --json 2>&1)
-exit_code=$?
-
-# ntm safety check exits 0 for allow, 1 for block/approve
-if [ $exit_code -ne 0 ]; then
-    action=$(echo "$check_result" | jq -r '.action // "block"' 2>/dev/null)
-    reason=$(echo "$check_result" | jq -r '.reason // "Policy violation"' 2>/dev/null)
-    
-    if [ "$action" = "approve" ]; then
-        echo "NTM Safety: Command requires approval" >&2
-        echo "  Reason: $reason" >&2
-        echo "  Command: git $*" >&2
-        echo "  This wrapper is advisory: it refused the command but queued no approval request." >&2
-        echo "  Approval-gated ntm commands (e.g. 'ntm locks force-release') request approval when run; decide with 'ntm approve'." >&2
-    else
-        echo "NTM Safety: Command blocked" >&2
-        echo "  Reason: $reason" >&2
-        echo "  Command: git $*" >&2
-    fi
-
-    # Log the blocked command (use jq for proper JSON escaping)
-    mkdir -p "$HOME/.ntm/logs"
-    if command -v jq >/dev/null 2>&1; then
-        jq -n --arg ts "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
-              --arg cmd "git $*" \
-              --arg reason "${reason:-Policy violation}" \
-              --arg action "$action" \
-              '{timestamp: $ts, command: $cmd, reason: $reason, action: $action}' >> "$HOME/.ntm/logs/blocked.jsonl"
-    else
-        # Fallback without proper escaping (best effort)
-        echo "{\"timestamp\":\"$(date -u +%Y-%m-%dT%H:%M:%SZ)\",\"action\":\"$action\"}" >> "$HOME/.ntm/logs/blocked.jsonl"
-    fi
-
-    exit 1
-fi
-
-# Pass through to real git
-exec "$REAL_GIT" "$@"
-`
-
-const rmWrapperScript = `#!/bin/bash
-# NTM Safety Wrapper for rm
-# Intercepts destructive rm commands
-
-REAL_RM=$(which -a rm | grep -v "$HOME/.ntm/bin" | head -1)
-if [ -z "$REAL_RM" ]; then
-    REAL_RM="/bin/rm"
-fi
-
-# Check command against policy
-check_result=$(ntm safety check "rm $*" --json 2>&1)
-exit_code=$?
-
-# ntm safety check exits 0 for allow, 1 for block/approve
-if [ $exit_code -ne 0 ]; then
-    action=$(echo "$check_result" | jq -r '.action // "block"' 2>/dev/null)
-    reason=$(echo "$check_result" | jq -r '.reason // "Policy violation"' 2>/dev/null)
-    
-    if [ "$action" = "approve" ]; then
-        echo "NTM Safety: Command requires approval" >&2
-        echo "  Reason: $reason" >&2
-        echo "  Command: rm $*" >&2
-        echo "  This wrapper is advisory: it refused the command but queued no approval request." >&2
-        echo "  Approval-gated ntm commands (e.g. 'ntm locks force-release') request approval when run; decide with 'ntm approve'." >&2
-    else
-        echo "NTM Safety: Command blocked" >&2
-        echo "  Reason: $reason" >&2
-        echo "  Command: rm $*" >&2
-    fi
-
-    # Log the blocked command (use jq for proper JSON escaping)
-    mkdir -p "$HOME/.ntm/logs"
-    if command -v jq >/dev/null 2>&1; then
-        jq -n --arg ts "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
-              --arg cmd "rm $*" \
-              --arg reason "${reason:-Policy violation}" \
-              --arg action "$action" \
-              '{timestamp: $ts, command: $cmd, reason: $reason, action: $action}' >> "$HOME/.ntm/logs/blocked.jsonl"
-    else
-        # Fallback without proper escaping (best effort)
-        echo "{\"timestamp\":\"$(date -u +%Y-%m-%dT%H:%M:%SZ)\",\"action\":\"$action\"}" >> "$HOME/.ntm/logs/blocked.jsonl"
-    fi
-
-    exit 1
-fi
-
-# Pass through to real rm
-exec "$REAL_RM" "$@"
-`
-
-const claudeHookScript = `#!/bin/bash
-# NTM Safety Hook for Claude Code
-# PreToolUse hook that validates Bash commands
-
-# Claude Code command hooks receive the event payload as JSON on stdin.
-HOOK_INPUT="$(cat)"
-if [ -n "$HOOK_INPUT" ] && command -v jq >/dev/null 2>&1; then
-    TOOL_NAME="$(printf '%s' "$HOOK_INPUT" | jq -r '.tool_name // empty' 2>/dev/null)"
-    COMMAND="$(printf '%s' "$HOOK_INPUT" | jq -r '.tool_input.command // empty' 2>/dev/null)"
-else
-    TOOL_NAME=""
-    COMMAND=""
-fi
-
-# Fall back to legacy env vars if a caller still provides them directly.
-if [ -z "$TOOL_NAME" ]; then
-    TOOL_NAME="${CLAUDE_TOOL_NAME:-}"
-fi
-if [ -z "$COMMAND" ]; then
-    COMMAND="${CLAUDE_TOOL_INPUT_command:-}"
-fi
-
-# Only process Bash tool calls
-if [ "$TOOL_NAME" != "Bash" ]; then
-    exit 0
-fi
-
-if [ -z "$COMMAND" ]; then
-    exit 0
-fi
-
-# Check against policy
-check_result=$(ntm safety check "$COMMAND" --json 2>&1)
-exit_code=$?
-
-# ntm safety check exits 0 for allow, 1 for block/approve
-if [ $exit_code -ne 0 ]; then
-    action=$(echo "$check_result" | jq -r '.action // "block"' 2>/dev/null)
-    reason=$(echo "$check_result" | jq -r '.reason // "Policy violation"' 2>/dev/null)
-
-    # Log the blocked command (use jq for proper JSON escaping)
-    mkdir -p "$HOME/.ntm/logs"
-    session="${NTM_SESSION:-unknown}"
-    agent="${CLAUDE_AGENT_TYPE:-claude}"
-    if command -v jq >/dev/null 2>&1; then
-        jq -n --arg ts "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
-              --arg session "$session" \
-              --arg agent "$agent" \
-              --arg cmd "$COMMAND" \
-              --arg reason "${reason:-Policy violation}" \
-              --arg action "$action" \
-              '{timestamp: $ts, session: $session, agent: $agent, command: $cmd, reason: $reason, action: $action}' >> "$HOME/.ntm/logs/blocked.jsonl"
-    else
-        # Fallback without proper escaping (best effort)
-        echo "{\"timestamp\":\"$(date -u +%Y-%m-%dT%H:%M:%SZ)\",\"action\":\"$action\"}" >> "$HOME/.ntm/logs/blocked.jsonl"
-    fi
-
-    # Return error to Claude Code
-    if [ "$action" = "approve" ]; then
-        echo "APPROVAL REQUIRED: $reason" >&2
-        echo "This check is advisory: the command was refused but no approval request was queued." >&2
-        echo "Approval-gated ntm commands (e.g. 'ntm locks force-release') request approval when run; decide with 'ntm approve'." >&2
-    else
-        echo "BLOCKED: $reason" >&2
-    fi
-    exit 2
-fi
-
-exit 0
-`
