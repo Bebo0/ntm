@@ -104,7 +104,9 @@ STATE_FILE=%q
 
 # Current caam emits {"profiles":[{tool,name,active,system,health}],"count":N}.
 # claude-b is held in cooldown so rate-limit filtering has something to exclude,
-# and a system profile is included because caam always reports those.
+# and a system profile is included because caam always reports those. caam has
+# no "cooldown" health status: a cooldown sets health.launch_usable=false and
+# status stays healthy/warning (lsHealth in caam cmd/caam/cmd/root.go).
 if [ "${1:-}" = "list" ] && [ "${2:-}" = "--json" ]; then
   active="$(cat "$STATE_FILE" 2>/dev/null || true)"
   if [ "$active" = "claude-b" ]; then
@@ -114,7 +116,7 @@ if [ "${1:-}" = "list" ] && [ "${2:-}" = "--json" ]; then
     a_active=true
     b_active=false
   fi
-  printf '{"profiles":[{"tool":"claude","name":"_original","active":false,"system":true,"health":{"status":"warning"}},{"tool":"claude","name":"claude-a","active":%%s,"system":false,"health":{"status":"ok"}},{"tool":"claude","name":"claude-b","active":%%s,"system":false,"health":{"status":"cooldown"}}],"count":3}\n' "$a_active" "$b_active"
+  printf '{"profiles":[{"tool":"claude","name":"_original","active":false,"system":true,"health":{"status":"warning"}},{"tool":"claude","name":"claude-a","active":%%s,"system":false,"health":{"status":"healthy","launch_usable":true}},{"tool":"claude","name":"claude-b","active":%%s,"system":false,"health":{"status":"healthy","launch_usable":false}}],"count":3}\n' "$a_active" "$b_active"
   exit 0
 fi
 
@@ -408,7 +410,7 @@ func TestAccountRotatorListAccountsContext_ParsesRateLimitedPerAccount(t *testin
 		t.Fatalf("claude-a missing from %+v", accounts)
 	}
 	if a.RateLimited {
-		t.Fatalf("claude-a RateLimited = true, want false (health ok)")
+		t.Fatalf("claude-a RateLimited = true, want false (launch usable)")
 	}
 	if !a.IsActive {
 		t.Fatalf("claude-a IsActive = false, want true")
@@ -418,7 +420,7 @@ func TestAccountRotatorListAccountsContext_ParsesRateLimitedPerAccount(t *testin
 		t.Fatalf("claude-b missing from %+v", accounts)
 	}
 	if !b.RateLimited {
-		t.Fatalf("claude-b RateLimited = false, want true (health cooldown)")
+		t.Fatalf("claude-b RateLimited = false, want true (health.launch_usable false)")
 	}
 	if b.IsActive {
 		t.Fatalf("claude-b IsActive = true, want false")

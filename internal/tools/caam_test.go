@@ -239,7 +239,10 @@ func TestCAAMAdapterFetchesRobotProfilesAndCostSessions(t *testing.T) {
 		// Real caam always reports these; they must not become accounts, so the
 		// AccountsCount and Accounts[1] assertions below double as coverage for
 		// the system-profile skip.
-		"  echo '{\"success\":true,\"data\":{\"providers\":[{\"id\":\"codex\",\"profiles\":[{\"name\":\"_original\",\"active\":false,\"system\":true,\"health\":{\"status\":\"warning\"}},{\"name\":\"work\",\"active\":true,\"health\":{\"status\":\"healthy\"}}]},{\"id\":\"claude\",\"profiles\":[{\"name\":\"personal\",\"active\":false,\"health\":{\"status\":\"cooldown\"}}]}]}}'\n" +
+		// caam reports a rate-limit cooldown as cooldown.active plus
+		// health.launch_usable=false; health.status stays healthy/warning
+		// (RobotProfileInfo/RobotCooldown in caam cmd/caam/cmd/robot.go).
+		"  echo '{\"success\":true,\"data\":{\"providers\":[{\"id\":\"codex\",\"profiles\":[{\"name\":\"_original\",\"active\":false,\"system\":true,\"health\":{\"status\":\"warning\"}},{\"name\":\"work\",\"active\":true,\"health\":{\"status\":\"healthy\",\"launch_usable\":true}}]},{\"id\":\"claude\",\"profiles\":[{\"name\":\"personal\",\"active\":false,\"health\":{\"status\":\"healthy\",\"launch_usable\":false},\"cooldown\":{\"active\":true,\"until\":\"2026-10-06T21:00:00Z\",\"remaining_ms\":3600000}}]}]}}'\n" +
 		"  exit 0\n" +
 		"fi\n" +
 		"if [ \"$1\" = \"robot\" ] && [ \"$2\" = \"paths\" ]; then\n" +
@@ -271,6 +274,12 @@ func TestCAAMAdapterFetchesRobotProfilesAndCostSessions(t *testing.T) {
 	}
 	if status.Accounts[1].Provider != "claude" || !status.Accounts[1].RateLimited || status.Accounts[1].CostCents != 9 {
 		t.Fatalf("second account = %+v, want rate-limited Claude profile with 9 cents", status.Accounts[1])
+	}
+	if want := time.Date(2026, 10, 6, 21, 0, 0, 0, time.UTC); !status.Accounts[1].CooldownUntil.Equal(want) {
+		t.Fatalf("CooldownUntil = %v, want caam's cooldown.until %v", status.Accounts[1].CooldownUntil, want)
+	}
+	if status.Accounts[0].RateLimited {
+		t.Fatalf("launch-usable profile reported rate-limited: %+v", status.Accounts[0])
 	}
 	creds, err := adapter.GetCurrentCredentials(context.Background(), "openai")
 	if err != nil {

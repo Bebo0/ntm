@@ -216,6 +216,15 @@ type CAAMAccount struct {
 	CostCents     int       `json:"cost_cents,omitempty"`
 }
 
+// CAAMProfileUnusable reports whether caam says a profile cannot start work
+// now. caam has no "cooldown" health status: an active rate-limit cooldown is
+// cooldown.active, and it (like a required re-login) sets
+// health.launch_usable false, the field caam documents for routing. A
+// critical composite verdict also counts.
+func CAAMProfileUnusable(status string, launchUsable *bool, cooldownActive bool) bool {
+	return cooldownActive || status == "critical" || (launchUsable != nil && !*launchUsable)
+}
+
 // CAAMCostSession is CAAM's per-profile cost record. Costs are estimates
 // supplied by CAAM, not API-provider invoices.
 type CAAMCostSession struct {
@@ -390,8 +399,13 @@ func (a *CAAMAdapter) fetchStatus(ctx context.Context) (*CAAMStatus, error) {
 					Active bool   `json:"active"`
 					System bool   `json:"system"`
 					Health struct {
-						Status string `json:"status"`
+						Status       string `json:"status"`
+						LaunchUsable *bool  `json:"launch_usable"`
 					} `json:"health"`
+					Cooldown *struct {
+						Active bool   `json:"active"`
+						Until  string `json:"until"`
+					} `json:"cooldown"`
 				} `json:"profiles"`
 			} `json:"providers"`
 		} `json:"data"`
@@ -411,13 +425,20 @@ func (a *CAAMAdapter) fetchStatus(ctx context.Context) (*CAAMStatus, error) {
 			if profile.System {
 				continue
 			}
-			accounts = append(accounts, CAAMAccount{
-				ID:          profile.Name,
-				Provider:    caamProviderForNTM(provider.ID),
-				Name:        profile.Name,
-				Active:      profile.Active,
-				RateLimited: profile.Health.Status == "cooldown" || profile.Health.Status == "critical",
-			})
+			account := CAAMAccount{
+				ID:       profile.Name,
+				Provider: caamProviderForNTM(provider.ID),
+				Name:     profile.Name,
+				Active:   profile.Active,
+			}
+			cooldownActive := profile.Cooldown != nil && profile.Cooldown.Active
+			account.RateLimited = CAAMProfileUnusable(profile.Health.Status, profile.Health.LaunchUsable, cooldownActive)
+			if cooldownActive {
+				if until, err := time.Parse(time.RFC3339, profile.Cooldown.Until); err == nil {
+					account.CooldownUntil = until
+				}
+			}
+			accounts = append(accounts, account)
 		}
 	}
 

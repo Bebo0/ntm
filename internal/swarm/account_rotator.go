@@ -522,7 +522,8 @@ func parseCAAMAccounts(output string) ([]tools.CAAMAccount, error) {
 			Active bool   `json:"active"`
 			System bool   `json:"system"`
 			Health struct {
-				Status string `json:"status"`
+				Status       string `json:"status"`
+				LaunchUsable *bool  `json:"launch_usable"`
 			} `json:"health"`
 		} `json:"profiles"`
 	}
@@ -539,7 +540,7 @@ func parseCAAMAccounts(output string) ([]tools.CAAMAccount, error) {
 				Name:        profile.Name,
 				Provider:    ntmProviderName(profile.Tool),
 				Active:      profile.Active,
-				RateLimited: profile.Health.Status == "cooldown" || profile.Health.Status == "critical",
+				RateLimited: tools.CAAMProfileUnusable(profile.Health.Status, profile.Health.LaunchUsable, false),
 			})
 		}
 		return converted, nil
