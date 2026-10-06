@@ -490,7 +490,6 @@ internal/tools/ubs.go:UBSAdapter.Doctor	bd-ld4j2	reachable only through RTA's re
 internal/tools/ubs.go:UBSAdapter.HasCapability	bd-ld4j2	reachable only through RTA's reflection rule at the 2026-10-05 baseline; wire it (surface + behavioral test) or delete it
 internal/tools/ubs.go:UBSAdapter.Scan	bd-ld4j2	reachable only through RTA's reflection rule at the 2026-10-05 baseline; wire it (surface + behavioral test) or delete it
 internal/tools/xf.go:XFAdapter.Doctor	bd-ld4j2	reachable only through RTA's reflection rule at the 2026-10-05 baseline; wire it (surface + behavioral test) or delete it
-internal/tools/xf.go:XFAdapter.GetStats	bd-ld4j2	reachable only through RTA's reflection rule at the 2026-10-05 baseline; wire it (surface + behavioral test) or delete it
 internal/tools/xf.go:XFAdapter.HasCapability	bd-ld4j2	reachable only through RTA's reflection rule at the 2026-10-05 baseline; wire it (surface + behavioral test) or delete it
 internal/tui/components/scrollable_panel.go:ScrollablePanel.AtBottom	bd-ld4j2	reachable only through RTA's reflection rule at the 2026-10-05 baseline; wire it (surface + behavioral test) or delete it
 internal/tui/components/scrollable_panel.go:ScrollablePanel.AtTop	bd-ld4j2	reachable only through RTA's reflection rule at the 2026-10-05 baseline; wire it (surface + behavioral test) or delete it

@@ -29,7 +29,7 @@ func xfSearchCmd(query string, limit int) tea.Cmd {
 		if _, installed := adapter.Detect(); !installed {
 			return XFSearchResultsMsg{
 				Query: query,
-				Err:   fmt.Errorf("xf is not installed — run 'brew install xf' or see https://github.com/xf-sh/xf"),
+				Err:   fmt.Errorf("xf is not installed — run 'brew install dicklesworthstone/tap/xf' or see https://github.com/Dicklesworthstone/xf"),
 			}
 		}
 		ctx := context.Background()
@@ -144,11 +144,11 @@ func formatXFResultPrompt(r tools.XFSearchResult) string {
 		b.WriteString(fmt.Sprintf(" (%s)", r.CreatedAt))
 	}
 	b.WriteString(":\n\n")
-	b.WriteString(r.Content)
+	b.WriteString(r.Text)
 	if r.ID != "" {
 		b.WriteString(fmt.Sprintf("\n\n[Tweet ID: %s", r.ID))
-		if r.Type != "" {
-			b.WriteString(fmt.Sprintf(", Type: %s", r.Type))
+		if r.ResultType != "" {
+			b.WriteString(fmt.Sprintf(", Type: %s", r.ResultType))
 		}
 		if r.Score > 0 {
 			b.WriteString(fmt.Sprintf(", Score: %.2f", r.Score))
@@ -235,7 +235,7 @@ func (m Model) viewXFResultsPhase() string {
 			isCursor := i == m.xfCursor
 
 			// Truncate content for display
-			content := strings.ReplaceAll(result.Content, "\n", " ")
+			content := strings.ReplaceAll(result.Text, "\n", " ")
 			maxLen := m.width - 12
 			if maxLen < 30 {
 				maxLen = 30
@@ -277,9 +277,9 @@ func (m Model) viewXFResultsPhase() string {
 			BorderForeground(t.Surface1).
 			Padding(1, 2).
 			Width(m.width - 8)
-		previewContent := result.Content
-		if result.Type != "" {
-			previewContent += fmt.Sprintf("\n\nType: %s", result.Type)
+		previewContent := result.Text
+		if result.ResultType != "" {
+			previewContent += fmt.Sprintf("\n\nType: %s", result.ResultType)
 		}
 		if result.Score > 0 {
 			previewContent += fmt.Sprintf(" | Score: %.2f", result.Score)

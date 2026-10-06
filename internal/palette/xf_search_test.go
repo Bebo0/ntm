@@ -114,8 +114,8 @@ func TestXFSearchResultsMsg(t *testing.T) {
 	m.xfSearching = true
 
 	results := []tools.XFSearchResult{
-		{ID: "tweet-1", Content: "Go error handling patterns", CreatedAt: "2024-01-15", Type: "tweet", Score: 0.95},
-		{ID: "tweet-2", Content: "Concurrency in Go", CreatedAt: "2024-02-20", Type: "tweet", Score: 0.88},
+		{ID: "tweet-1", Text: "Go error handling patterns", CreatedAt: "2024-01-15", ResultType: "tweet", Score: 0.95},
+		{ID: "tweet-2", Text: "Concurrency in Go", CreatedAt: "2024-02-20", ResultType: "tweet", Score: 0.88},
 	}
 
 	updated, _ := m.Update(XFSearchResultsMsg{
@@ -146,7 +146,7 @@ func TestXFSearchResultsMsgClearsPreviousErrorOnSuccess(t *testing.T) {
 	m.xfErr = tools.ErrTimeout
 
 	results := []tools.XFSearchResult{
-		{ID: "tweet-1", Content: "Recovered search result", CreatedAt: "2024-01-15", Type: "tweet", Score: 0.95},
+		{ID: "tweet-1", Text: "Recovered search result", CreatedAt: "2024-01-15", ResultType: "tweet", Score: 0.95},
 	}
 
 	updated, _ := m.Update(XFSearchResultsMsg{
@@ -212,9 +212,9 @@ func TestXFResultsNavigation(t *testing.T) {
 	m := New("test-session", testCommands)
 	m.phase = PhaseXFResults
 	m.xfResults = []tools.XFSearchResult{
-		{ID: "1", Content: "First"},
-		{ID: "2", Content: "Second"},
-		{ID: "3", Content: "Third"},
+		{ID: "1", Text: "First"},
+		{ID: "2", Text: "Second"},
+		{ID: "3", Text: "Third"},
 	}
 	m.xfCursor = 0
 
@@ -263,7 +263,7 @@ func TestXFResultsSelectSetsPrompt(t *testing.T) {
 	m := New("test-session", testCommands)
 	m.phase = PhaseXFResults
 	m.xfResults = []tools.XFSearchResult{
-		{ID: "tweet-42", Content: "Go concurrency is great", CreatedAt: "2024-03-10", Type: "tweet", Score: 0.92},
+		{ID: "tweet-42", Text: "Go concurrency is great", CreatedAt: "2024-03-10", ResultType: "tweet", Score: 0.92},
 	}
 	m.xfCursor = 0
 
@@ -293,7 +293,7 @@ func TestXFResultsBackReturnsToSearch(t *testing.T) {
 	m := New("test-session", testCommands)
 	m.phase = PhaseXFResults
 	m.xfResults = []tools.XFSearchResult{
-		{ID: "1", Content: "Test"},
+		{ID: "1", Text: "Test"},
 	}
 
 	updated, _ := m.updateXFResultsPhase(tea.KeyMsg{Type: tea.KeyEscape})
@@ -314,27 +314,27 @@ func TestFormatXFResultPrompt(t *testing.T) {
 		{
 			name: "full result",
 			result: tools.XFSearchResult{
-				ID:        "tweet-123",
-				Content:   "Error handling in Go",
-				CreatedAt: "2024-01-15",
-				Type:      "tweet",
-				Score:     0.95,
+				ID:         "tweet-123",
+				Text:       "Error handling in Go",
+				CreatedAt:  "2024-01-15",
+				ResultType: "tweet",
+				Score:      0.95,
 			},
 			wantParts: []string{"Error handling in Go", "2024-01-15", "tweet-123", "tweet", "0.95"},
 		},
 		{
 			name: "minimal result",
 			result: tools.XFSearchResult{
-				Content: "Just content",
+				Text: "Just content",
 			},
 			wantParts: []string{"Just content"},
 		},
 		{
 			name: "no score",
 			result: tools.XFSearchResult{
-				ID:      "dm-456",
-				Content: "DM content",
-				Type:    "dm",
+				ID:         "dm-456",
+				Text:       "DM content",
+				ResultType: "dm",
 			},
 			wantParts: []string{"DM content", "dm-456", "dm"},
 		},
@@ -379,8 +379,8 @@ func TestXFResultsViewRendering(t *testing.T) {
 	m.height = 24
 	m.phase = PhaseXFResults
 	m.xfResults = []tools.XFSearchResult{
-		{ID: "tweet-1", Content: "First tweet about Go", CreatedAt: "2024-01-15", Score: 0.95},
-		{ID: "tweet-2", Content: "Second tweet about Rust", CreatedAt: "2024-02-20", Score: 0.88},
+		{ID: "tweet-1", Text: "First tweet about Go", CreatedAt: "2024-01-15", Score: 0.95},
+		{ID: "tweet-2", Text: "Second tweet about Rust", CreatedAt: "2024-02-20", Score: 0.88},
 	}
 	m.xfCursor = 0
 	m.xfQuery = initXFQuery(m.theme)
@@ -420,7 +420,7 @@ func TestXFSearchQuitFromResultsPhase(t *testing.T) {
 	t.Parallel()
 	m := New("test-session", testCommands)
 	m.phase = PhaseXFResults
-	m.xfResults = []tools.XFSearchResult{{ID: "1", Content: "Test"}}
+	m.xfResults = []tools.XFSearchResult{{ID: "1", Text: "Test"}}
 
 	updated, cmd := m.updateXFResultsPhase(tea.KeyMsg{Type: tea.KeyCtrlC})
 	result := updated.(Model)

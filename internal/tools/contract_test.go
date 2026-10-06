@@ -35,8 +35,11 @@ func fakeToolsPath(t *testing.T) string {
 	return ""
 }
 
-// withFakeTools sets up PATH to include fake tools and returns a cleanup function
-func withFakeTools(t *testing.T) func() {
+// withFakeTools prepends the fake tools to PATH for the rest of the test.
+// t.Setenv keeps the restore ordered with any later t.Setenv("PATH", ...) in
+// the same test; a deferred os.Setenv restore ran first and let the later
+// t.Setenv cleanup put the fakes back on PATH for every following test.
+func withFakeTools(t *testing.T) {
 	t.Helper()
 
 	fakePath := fakeToolsPath(t)
@@ -44,13 +47,7 @@ func withFakeTools(t *testing.T) func() {
 		t.Skip("testdata/faketools not found")
 	}
 
-	// Prepend fake tools to PATH
-	oldPath := os.Getenv("PATH")
-	os.Setenv("PATH", fakePath+":"+oldPath)
-
-	return func() {
-		os.Setenv("PATH", oldPath)
-	}
+	t.Setenv("PATH", fakePath+string(os.PathListSeparator)+os.Getenv("PATH"))
 }
 
 // TestJFPAdapterVersionParsing tests JFP version string parsing
@@ -171,8 +168,7 @@ func TestMSAdapterVersionParsing(t *testing.T) {
 }
 
 func TestDCGAvailabilityWithFakeTool(t *testing.T) {
-	cleanup := withFakeTools(t)
-	defer cleanup()
+	withFakeTools(t)
 
 	adapter := NewDCGAdapter()
 	adapter.InvalidateAvailabilityCache()
@@ -200,8 +196,7 @@ func TestDCGAvailabilityWithFakeTool(t *testing.T) {
 // be cached: the send guard treats unavailable dcg as "no check", so a cached
 // miss let destructive commands through for the whole TTL.
 func TestDCGAvailabilityDoesNotCacheCanceledProbe(t *testing.T) {
-	cleanup := withFakeTools(t)
-	defer cleanup()
+	withFakeTools(t)
 
 	adapter := NewDCGAdapter()
 	adapter.InvalidateAvailabilityCache()
@@ -274,8 +269,7 @@ func TestDCGAvailabilityIncompatibleVersion(t *testing.T) {
 
 // TestJFPAdapterWithFakeTools tests the JFP adapter with fake tools
 func TestJFPAdapterWithFakeTools(t *testing.T) {
-	cleanup := withFakeTools(t)
-	defer cleanup()
+	withFakeTools(t)
 
 	adapter := NewJFPAdapter()
 	ctx := context.Background()
@@ -328,8 +322,7 @@ func TestJFPAdapterWithFakeTools(t *testing.T) {
 
 // TestJFPAdapterMethods tests JFP-specific adapter methods
 func TestJFPAdapterMethods(t *testing.T) {
-	cleanup := withFakeTools(t)
-	defer cleanup()
+	withFakeTools(t)
 
 	adapter := NewJFPAdapter()
 	ctx := context.Background()
@@ -453,8 +446,7 @@ func TestVersionAtLeast(t *testing.T) {
 
 // TestBVAdapterWithFakeTools tests the BV adapter with fake tools
 func TestBVAdapterWithFakeTools(t *testing.T) {
-	cleanup := withFakeTools(t)
-	defer cleanup()
+	withFakeTools(t)
 
 	adapter := NewBVAdapter()
 	ctx := context.Background()
@@ -507,8 +499,7 @@ func TestBVAdapterWithFakeTools(t *testing.T) {
 
 // TestBVAdapterRobotTriage tests robot-triage command
 func TestBVAdapterRobotTriage(t *testing.T) {
-	cleanup := withFakeTools(t)
-	defer cleanup()
+	withFakeTools(t)
 
 	adapter := NewBVAdapter()
 	ctx := context.Background()
@@ -547,8 +538,7 @@ func TestBVAdapterRobotTriage(t *testing.T) {
 }
 
 func TestBVAdapterRobotModes(t *testing.T) {
-	cleanup := withFakeTools(t)
-	defer cleanup()
+	withFakeTools(t)
 
 	adapter := NewBVAdapter()
 	ctx := context.Background()
@@ -702,8 +692,7 @@ func TestAdapterTimeout(t *testing.T) {
 		t.Skip("Skipping timeout test in short mode")
 	}
 
-	cleanup := withFakeTools(t)
-	defer cleanup()
+	withFakeTools(t)
 
 	// Set timeout mode
 	os.Setenv("FAKE_TOOL_MODE", "timeout")
@@ -735,8 +724,7 @@ func TestAdapterTimeout(t *testing.T) {
 
 // TestAdapterErrorMode tests error handling
 func TestAdapterErrorMode(t *testing.T) {
-	cleanup := withFakeTools(t)
-	defer cleanup()
+	withFakeTools(t)
 
 	// Set error mode
 	os.Setenv("FAKE_TOOL_MODE", "error")
@@ -753,8 +741,7 @@ func TestAdapterErrorMode(t *testing.T) {
 
 // TestBDAdapterWithFakeTools tests the BD adapter
 func TestBDAdapterWithFakeTools(t *testing.T) {
-	cleanup := withFakeTools(t)
-	defer cleanup()
+	withFakeTools(t)
 
 	fakePath := fakeToolsPath(t)
 	if fakePath == "" {
@@ -874,8 +861,7 @@ func TestBDAdapterFallsBackToBdWhenBrVersionFails(t *testing.T) {
 
 // TestCASSAdapterWithFakeTools tests the CASS adapter
 func TestCASSAdapterWithFakeTools(t *testing.T) {
-	cleanup := withFakeTools(t)
-	defer cleanup()
+	withFakeTools(t)
 
 	adapter := NewCASSAdapter()
 	ctx := context.Background()
@@ -910,8 +896,7 @@ func TestCASSAdapterWithFakeTools(t *testing.T) {
 
 // TestAllAdaptersHaveConsistentInterface verifies all adapters implement Adapter correctly
 func TestAllAdaptersHaveConsistentInterface(t *testing.T) {
-	cleanup := withFakeTools(t)
-	defer cleanup()
+	withFakeTools(t)
 
 	adapters := []struct {
 		name    string
