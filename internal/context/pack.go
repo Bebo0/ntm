@@ -377,77 +377,33 @@ func (b *ContextPackBuilder) buildCASSComponent(ctx context.Context, query strin
 	return component
 }
 
-func extractTopMSSkills(data json.RawMessage, limit int) ([]map[string]interface{}, error) {
+// msPackSkill is one skill carried by the ms context component.
+type msPackSkill struct {
+	ID        string  `json:"id"`
+	Name      string  `json:"name,omitempty"`
+	Summary   string  `json:"summary,omitempty"`
+	Relevance float64 `json:"relevance,omitempty"`
+}
+
+// topMSSkills keeps the first limit ms search matches that carry an ID; ms
+// returns matches best first.
+func topMSSkills(matches []tools.MSSkillMatch, limit int) ([]msPackSkill, error) {
 	if limit <= 0 {
 		limit = 5
 	}
 
-	normalize := func(skill map[string]interface{}) map[string]interface{} {
-		getString := func(keys ...string) string {
-			for _, key := range keys {
-				val, ok := skill[key]
-				if !ok {
-					continue
-				}
-				s, ok := val.(string)
-				if ok && strings.TrimSpace(s) != "" {
-					return strings.TrimSpace(s)
-				}
-			}
-			return ""
-		}
-
-		entry := map[string]interface{}{}
-		if id := getString("id", "skill_id", "key"); id != "" {
-			entry["id"] = id
-		}
-		if name := getString("name", "title"); name != "" {
-			entry["name"] = name
-		}
-		if summary := getString("summary", "description"); summary != "" {
-			entry["summary"] = summary
-		}
-		if relevance, ok := skill["relevance"].(float64); ok {
-			entry["relevance"] = relevance
-		}
-		return entry
-	}
-
-	var rawArray []map[string]interface{}
-	if err := json.Unmarshal(data, &rawArray); err == nil {
-		out := make([]map[string]interface{}, 0, limit)
-		for _, skill := range rawArray {
-			entry := normalize(skill)
-			if _, ok := entry["id"]; !ok {
-				continue
-			}
-			out = append(out, entry)
-			if len(out) >= limit {
-				break
-			}
-		}
-		if len(out) == 0 {
-			return nil, fmt.Errorf("ms search returned no skills with IDs")
-		}
-		return out, nil
-	}
-
-	var envelope struct {
-		Skills []map[string]interface{} `json:"skills"`
-	}
-	if err := json.Unmarshal(data, &envelope); err != nil {
-		return nil, fmt.Errorf("unexpected ms search response format")
-	}
-	if len(envelope.Skills) == 0 {
-		return nil, fmt.Errorf("ms search returned an empty skills list")
-	}
-	out := make([]map[string]interface{}, 0, limit)
-	for _, skill := range envelope.Skills {
-		entry := normalize(skill)
-		if _, ok := entry["id"]; !ok {
+	out := make([]msPackSkill, 0, limit)
+	for _, m := range matches {
+		id := strings.TrimSpace(m.ID)
+		if id == "" {
 			continue
 		}
-		out = append(out, entry)
+		out = append(out, msPackSkill{
+			ID:        id,
+			Name:      strings.TrimSpace(m.Name),
+			Summary:   strings.TrimSpace(m.Description),
+			Relevance: m.Score,
+		})
 		if len(out) >= limit {
 			break
 		}
@@ -477,13 +433,13 @@ func (b *ContextPackBuilder) buildMSComponent(ctx context.Context, query string,
 		return component
 	}
 
-	data, err := b.msAdapter.Search(ctx, query)
+	matches, err := b.msAdapter.Search(ctx, query)
 	if err != nil {
 		component.Error = err.Error()
 		return component
 	}
 
-	topSkills, err := extractTopMSSkills(data, 5)
+	topSkills, err := topMSSkills(matches, 5)
 	if err != nil {
 		component.Error = err.Error()
 		return component

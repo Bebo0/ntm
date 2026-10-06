@@ -1369,10 +1369,10 @@ func PrintJFPUpdate() error {
 // MSSearchOutput represents the output for --robot-ms-search
 type MSSearchOutput struct {
 	RobotResponse
-	Query  string          `json:"query"`
-	Count  int             `json:"count"`
-	Skills json.RawMessage `json:"skills"`
-	Source string          `json:"source,omitempty"`
+	Query  string               `json:"query"`
+	Count  int                  `json:"count"`
+	Skills []tools.MSSkillMatch `json:"skills"`
+	Source string               `json:"source,omitempty"`
 }
 
 // MSShowOutput represents the output for --robot-ms-show
@@ -1391,6 +1391,7 @@ func GetMSSearch(query string) (*MSSearchOutput, error) {
 	output := &MSSearchOutput{
 		RobotResponse: NewRobotResponse(true),
 		Query:         query,
+		Skills:        []tools.MSSkillMatch{},
 		Source:        "ms",
 	}
 
@@ -1415,7 +1416,7 @@ func GetMSSearch(query string) (*MSSearchOutput, error) {
 	}
 
 	ctx := context.Background()
-	data, err := adapter.Search(ctx, query)
+	matches, err := adapter.Search(ctx, query)
 	if err != nil {
 		output.RobotResponse = NewErrorResponse(
 			err,
@@ -1425,14 +1426,8 @@ func GetMSSearch(query string) (*MSSearchOutput, error) {
 		return output, nil
 	}
 
-	output.Skills = data
-
-	// Try to count items
-	var items []interface{}
-	if json.Unmarshal(data, &items) == nil {
-		output.Count = len(items)
-	}
-
+	output.Skills = matches
+	output.Count = len(matches)
 	return output, nil
 }
 

@@ -81,9 +81,9 @@ func parseMSVersion(output string) (Version, error) {
 // Capabilities returns the list of ms capabilities
 func (a *MSAdapter) Capabilities(ctx context.Context) ([]Capability, error) {
 	caps := []Capability{
-		CapRobotMode, // ms supports --json output
+		CapRobotMode, // ms -O json
 		CapSearch,    // ms search <query>
-		"suggest",    // ms suggest <task>
+		"suggest",    // ms suggest (context-aware, no task argument)
 		"list",       // ms list
 		"show",       // ms show <id>
 	}
@@ -147,31 +147,60 @@ func (a *MSAdapter) Info(ctx context.Context) (*ToolInfo, error) {
 
 // MS-specific methods
 
-// Search searches for skills matching a query
-func (a *MSAdapter) Search(ctx context.Context, query string) (json.RawMessage, error) {
-	return a.runCommand(ctx, "search", query, "--json")
+// MSSkillMatch is one entry of the results array printed by
+// `ms -O json search`.
+type MSSkillMatch struct {
+	ID           string  `json:"id"`
+	Name         string  `json:"name"`
+	Description  string  `json:"description,omitempty"`
+	Layer        string  `json:"layer,omitempty"`
+	Score        float64 `json:"score"`
+	Quality      float64 `json:"quality,omitempty"`
+	IsDeprecated bool    `json:"is_deprecated,omitempty"`
 }
 
-// Suggest returns skill suggestions for a task
-func (a *MSAdapter) Suggest(ctx context.Context, task string) (json.RawMessage, error) {
-	return a.runCommand(ctx, "suggest", task, "--json")
+// Search searches for skills matching a query, best match first.
+func (a *MSAdapter) Search(ctx context.Context, query string) ([]MSSkillMatch, error) {
+	raw, err := a.runCommand(ctx, "search", "--", query)
+	if err != nil {
+		return nil, err
+	}
+	var resp struct {
+		Results []MSSkillMatch `json:"results"`
+	}
+	if err := json.Unmarshal(raw, &resp); err != nil {
+		return nil, fmt.Errorf("%w: ms search: %v", ErrSchemaValidation, err)
+	}
+	if resp.Results == nil {
+		return nil, fmt.Errorf("%w: ms search response has no results array", ErrSchemaValidation)
+	}
+	return resp.Results, nil
 }
 
-// List returns all available skills
-func (a *MSAdapter) List(ctx context.Context) (json.RawMessage, error) {
-	return a.runCommand(ctx, "list", "--json")
-}
-
-// Show returns details for a specific skill
+// Show returns the skill object from `ms -O json show`.
 func (a *MSAdapter) Show(ctx context.Context, id string) (json.RawMessage, error) {
-	return a.runCommand(ctx, "show", id, "--json")
+	raw, err := a.runCommand(ctx, "show", "--", id)
+	if err != nil {
+		return nil, err
+	}
+	var resp struct {
+		Skill json.RawMessage `json:"skill"`
+	}
+	if err := json.Unmarshal(raw, &resp); err != nil {
+		return nil, fmt.Errorf("%w: ms show: %v", ErrSchemaValidation, err)
+	}
+	if len(resp.Skill) == 0 || string(resp.Skill) == "null" {
+		return nil, fmt.Errorf("%w: ms show response has no skill", ErrSchemaValidation)
+	}
+	return resp.Skill, nil
 }
 
-// runCommand executes an ms command and returns raw JSON
+// runCommand executes an ms subcommand with JSON output and returns stdout.
 func (a *MSAdapter) runCommand(ctx context.Context, args ...string) (json.RawMessage, error) {
 	ctx, cancel := context.WithTimeout(ctx, a.Timeout())
 	defer cancel()
 
+	args = append([]string{"-O", "json"}, args...)
 	cmd := exec.CommandContext(ctx, a.BinaryName(), args...)
 	cmd.WaitDelay = time.Second
 	stdout := NewLimitedBuffer(10 * 1024 * 1024)
@@ -186,7 +215,7 @@ func (a *MSAdapter) runCommand(ctx context.Context, args ...string) (json.RawMes
 		if strings.Contains(err.Error(), ErrOutputLimitExceeded.Error()) {
 			return nil, fmt.Errorf("ms output exceeded 10MB limit")
 		}
-		return nil, fmt.Errorf("ms %s failed: %w: %s", strings.Join(args, " "), err, stderr.String())
+		return nil, fmt.Errorf("ms %s failed: %w: %s", strings.Join(args, " "), err, msErrorDetail(stderr.String()))
 	}
 
 	output := stdout.Bytes()
@@ -195,4 +224,15 @@ func (a *MSAdapter) runCommand(ctx context.Context, args ...string) (json.RawMes
 	}
 
 	return output, nil
+}
+
+// msErrorDetail picks ms's "Error: ..." line out of stderr, which also carries
+// tracing log lines from its storage layer.
+func msErrorDetail(stderr string) string {
+	for _, line := range strings.Split(stderr, "\n") {
+		if line = strings.TrimSpace(line); strings.HasPrefix(line, "Error:") {
+			return line
+		}
+	}
+	return strings.TrimSpace(stderr)
 }

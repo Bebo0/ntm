@@ -460,8 +460,6 @@ internal/tools/giil.go:GIILAdapter.HasCapability	bd-ld4j2	reachable only through
 internal/tools/jfp.go:JFPAdapter.Bundle	bd-ld4j2	reachable only through RTA's reflection rule at the 2026-10-05 baseline; wire it (surface + behavioral test) or delete it
 internal/tools/jfp.go:JFPAdapter.HasCapability	bd-ld4j2	reachable only through RTA's reflection rule at the 2026-10-05 baseline; wire it (surface + behavioral test) or delete it
 internal/tools/ms.go:MSAdapter.HasCapability	bd-ld4j2	reachable only through RTA's reflection rule at the 2026-10-05 baseline; wire it (surface + behavioral test) or delete it
-internal/tools/ms.go:MSAdapter.List	bd-ld4j2	reachable only through RTA's reflection rule at the 2026-10-05 baseline; wire it (surface + behavioral test) or delete it
-internal/tools/ms.go:MSAdapter.Suggest	bd-ld4j2	reachable only through RTA's reflection rule at the 2026-10-05 baseline; wire it (surface + behavioral test) or delete it
 internal/tools/proxy.go:ProxyAdapter.HasCapability	bd-ld4j2	reachable only through RTA's reflection rule at the 2026-10-05 baseline; wire it (surface + behavioral test) or delete it
 internal/tools/proxy.go:ProxyAdapter.InvalidateAvailabilityCache	bd-ld4j2	reachable only through RTA's reflection rule at the 2026-10-05 baseline; wire it (surface + behavioral test) or delete it
 internal/tools/proxy.go:ProxyAdapter.IsAvailable	bd-ld4j2	reachable only through RTA's reflection rule at the 2026-10-05 baseline; wire it (surface + behavioral test) or delete it

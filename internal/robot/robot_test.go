@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -588,6 +589,62 @@ func TestGetMSShow_EmptyID(t *testing.T) {
 	}
 	if output.ErrorCode != ErrCodeInvalidFlag {
 		t.Fatalf("expected %s, got %s", ErrCodeInvalidFlag, output.ErrorCode)
+	}
+}
+
+// TestRobotMSSearchAndShowReadInstalledMS indexes one skill into an isolated
+// ms root and drives --robot-ms-search / --robot-ms-show through the real ms.
+func TestRobotMSSearchAndShowReadInstalledMS(t *testing.T) {
+	if _, err := exec.LookPath("ms"); err != nil {
+		t.Skip("ms not installed")
+	}
+	root := t.TempDir()
+	skillDir := filepath.Join(root, "skills", "commit-workflow")
+	if err := os.MkdirAll(skillDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	skill := "---\nname: commit-workflow\n---\n\n# Commit Workflow\n\n" +
+		"Stage related changes together and write a commit message that explains why.\n"
+	if err := os.WriteFile(filepath.Join(skillDir, "SKILL.md"), []byte(skill), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("HOME", root)
+	t.Setenv("MS_ROOT", filepath.Join(root, ".ms"))
+	t.Setenv("MS_CONFIG", filepath.Join(root, ".ms", "config.toml"))
+	for _, args := range [][]string{{"--robot", "init"}, {"--robot", "index"}} {
+		cmd := exec.Command("ms", args...)
+		cmd.Dir = root
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("ms %s: %v\n%s", strings.Join(args, " "), err, out)
+		}
+	}
+
+	search, err := GetMSSearch("commit")
+	if err != nil {
+		t.Fatalf("GetMSSearch returned error: %v", err)
+	}
+	if !search.Success || search.Count != 1 || len(search.Skills) != 1 || search.Skills[0].ID != "commit-workflow" {
+		t.Fatalf("GetMSSearch = success:%t count:%d skills:%+v err:%q", search.Success, search.Count, search.Skills, search.Error)
+	}
+
+	show, err := GetMSShow("commit-workflow")
+	if err != nil {
+		t.Fatalf("GetMSShow returned error: %v", err)
+	}
+	var shown struct {
+		ID     string `json:"id"`
+		Status string `json:"status"`
+	}
+	if !show.Success || json.Unmarshal(show.Skill, &shown) != nil || shown.ID != "commit-workflow" || shown.Status != "" {
+		t.Fatalf("GetMSShow = success:%t skill:%s err:%q, want the bare skill object", show.Success, show.Skill, show.Error)
+	}
+
+	missing, err := GetMSShow("no-such-skill")
+	if err != nil {
+		t.Fatalf("GetMSShow returned error: %v", err)
+	}
+	if missing.Success || missing.ErrorCode != "NOT_FOUND" {
+		t.Fatalf("GetMSShow(missing) = success:%t code:%q err:%q, want NOT_FOUND", missing.Success, missing.ErrorCode, missing.Error)
 	}
 }
 

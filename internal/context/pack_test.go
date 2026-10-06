@@ -3,10 +3,15 @@ package context
 import (
 	stdcontext "context"
 	"encoding/json"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 
 	"github.com/Dicklesworthstone/ntm/internal/state"
+	"github.com/Dicklesworthstone/ntm/internal/tools"
 )
 
 func TestDefaultBudgetAllocation(t *testing.T) {
@@ -248,61 +253,32 @@ func TestComponentTitle(t *testing.T) {
 	}
 }
 
-func TestExtractTopMSSkills_Array(t *testing.T) {
+func TestTopMSSkills_KeepsOrderAndMapsFields(t *testing.T) {
 	t.Parallel()
 
-	raw := json.RawMessage(`[
-		{"id":"commit-and-release","name":"Commit and Release","summary":"Batch commits"},
-		{"id":"codebase-archaeology","name":"Codebase Archaeology","summary":"Deep repo understanding"},
-		{"id":"agent-mail","name":"Agent Mail","summary":"Coordination"}
-	]`)
+	matches := []tools.MSSkillMatch{
+		{ID: "commit-and-release", Name: "Commit and Release", Description: "Batch commits", Score: 0.032},
+		{ID: "codebase-archaeology", Name: "Codebase Archaeology", Description: "Deep repo understanding", Score: 0.016},
+		{ID: "agent-mail", Name: "Agent Mail", Description: "Coordination", Score: 0.015},
+	}
 
-	skills, err := extractTopMSSkills(raw, 2)
+	skills, err := topMSSkills(matches, 2)
 	if err != nil {
-		t.Fatalf("extractTopMSSkills returned error: %v", err)
+		t.Fatalf("topMSSkills returned error: %v", err)
 	}
-	if len(skills) != 2 {
-		t.Fatalf("len(skills)=%d, want 2", len(skills))
+	want := []msPackSkill{
+		{ID: "commit-and-release", Name: "Commit and Release", Summary: "Batch commits", Relevance: 0.032},
+		{ID: "codebase-archaeology", Name: "Codebase Archaeology", Summary: "Deep repo understanding", Relevance: 0.016},
 	}
-	if skills[0]["id"] != "commit-and-release" {
-		t.Fatalf("skills[0].id=%v, want commit-and-release", skills[0]["id"])
-	}
-	if skills[1]["id"] != "codebase-archaeology" {
-		t.Fatalf("skills[1].id=%v, want codebase-archaeology", skills[1]["id"])
+	if !reflect.DeepEqual(skills, want) {
+		t.Fatalf("topMSSkills = %+v, want %+v", skills, want)
 	}
 }
 
-func TestExtractTopMSSkills_Envelope(t *testing.T) {
+func TestTopMSSkills_RequiresID(t *testing.T) {
 	t.Parallel()
 
-	raw := json.RawMessage(`{
-		"skills":[
-			{"id":"a","name":"A","description":"desc A"},
-			{"id":"b","name":"B","summary":"desc B"}
-		]
-	}`)
-
-	skills, err := extractTopMSSkills(raw, 5)
-	if err != nil {
-		t.Fatalf("extractTopMSSkills returned error: %v", err)
-	}
-	if len(skills) != 2 {
-		t.Fatalf("len(skills)=%d, want 2", len(skills))
-	}
-	if skills[0]["id"] != "a" {
-		t.Fatalf("skills[0].id=%v, want a", skills[0]["id"])
-	}
-	if skills[0]["summary"] != "desc A" {
-		t.Fatalf("skills[0].summary=%v, want desc A", skills[0]["summary"])
-	}
-}
-
-func TestExtractTopMSSkills_RequiresID(t *testing.T) {
-	t.Parallel()
-
-	raw := json.RawMessage(`[{"name":"no-id"}]`)
-	_, err := extractTopMSSkills(raw, 5)
-	if err == nil {
+	if _, err := topMSSkills([]tools.MSSkillMatch{{Name: "no-id"}}, 5); err == nil {
 		t.Fatal("expected error for missing IDs, got nil")
 	}
 }
@@ -728,81 +704,25 @@ func TestCacheStatsAndClear(t *testing.T) {
 }
 
 // =============================================================================
-// extractTopMSSkills: edge cases not covered by existing tests
+// topMSSkills: edge cases not covered by existing tests
 // =============================================================================
 
-func TestExtractTopMSSkills_InvalidJSON(t *testing.T) {
+func TestTopMSSkills_Empty(t *testing.T) {
 	t.Parallel()
-	_, err := extractTopMSSkills(json.RawMessage(`not valid json`), 5)
-	if err == nil {
-		t.Fatal("expected error for invalid JSON, got nil")
+	if _, err := topMSSkills(nil, 5); err == nil {
+		t.Fatal("expected error for no matches, got nil")
 	}
 }
 
-func TestExtractTopMSSkills_EmptyArray(t *testing.T) {
-	t.Parallel()
-	_, err := extractTopMSSkills(json.RawMessage(`[]`), 5)
-	if err == nil {
-		t.Fatal("expected error for empty array, got nil")
-	}
-}
-
-func TestExtractTopMSSkills_EmptyEnvelopeSkills(t *testing.T) {
-	t.Parallel()
-	_, err := extractTopMSSkills(json.RawMessage(`{"skills":[]}`), 5)
-	if err == nil {
-		t.Fatal("expected error for empty envelope skills, got nil")
-	}
-}
-
-func TestExtractTopMSSkills_AlternativeIDKeys(t *testing.T) {
-	t.Parallel()
-	// Test skill_id key
-	raw := json.RawMessage(`[{"skill_id":"s1","name":"Skill One"}]`)
-	skills, err := extractTopMSSkills(raw, 5)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if skills[0]["id"] != "s1" {
-		t.Errorf("expected id=s1 from skill_id key, got %v", skills[0]["id"])
-	}
-
-	// Test key field
-	raw2 := json.RawMessage(`[{"key":"k1","title":"Key Skill"}]`)
-	skills2, err := extractTopMSSkills(raw2, 5)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if skills2[0]["id"] != "k1" {
-		t.Errorf("expected id=k1 from key field, got %v", skills2[0]["id"])
-	}
-	if skills2[0]["name"] != "Key Skill" {
-		t.Errorf("expected name from title field, got %v", skills2[0]["name"])
-	}
-}
-
-func TestExtractTopMSSkills_RelevanceScore(t *testing.T) {
-	t.Parallel()
-	raw := json.RawMessage(`[{"id":"r1","name":"Relevant","relevance":0.95}]`)
-	skills, err := extractTopMSSkills(raw, 5)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if skills[0]["relevance"] != 0.95 {
-		t.Errorf("expected relevance=0.95, got %v", skills[0]["relevance"])
-	}
-}
-
-func TestExtractTopMSSkills_DefaultLimit(t *testing.T) {
+func TestTopMSSkills_DefaultLimit(t *testing.T) {
 	t.Parallel()
 	// When limit <= 0, it should default to 5
-	items := make([]string, 8)
-	for i := range items {
-		items[i] = `{"id":"` + string(rune('a'+i)) + `","name":"Skill"}`
+	matches := make([]tools.MSSkillMatch, 8)
+	for i := range matches {
+		matches[i] = tools.MSSkillMatch{ID: string(rune('a' + i)), Name: "Skill"}
 	}
-	raw := json.RawMessage(`[` + strings.Join(items, ",") + `]`)
 
-	skills, err := extractTopMSSkills(raw, 0)
+	skills, err := topMSSkills(matches, 0)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -811,30 +731,15 @@ func TestExtractTopMSSkills_DefaultLimit(t *testing.T) {
 	}
 }
 
-func TestExtractTopMSSkills_SkipsBlankIDs(t *testing.T) {
+func TestTopMSSkills_SkipsBlankIDs(t *testing.T) {
 	t.Parallel()
-	raw := json.RawMessage(`[{"id":"","name":"Blank ID"},{"id":"valid","name":"Valid"}]`)
-	skills, err := extractTopMSSkills(raw, 5)
+	matches := []tools.MSSkillMatch{{ID: " ", Name: "Blank ID"}, {ID: "valid", Name: "Valid"}}
+	skills, err := topMSSkills(matches, 5)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if len(skills) != 1 {
-		t.Errorf("expected 1 skill (blank ID skipped), got %d", len(skills))
-	}
-	if skills[0]["id"] != "valid" {
-		t.Errorf("expected id=valid, got %v", skills[0]["id"])
-	}
-}
-
-func TestExtractTopMSSkills_EnvelopeSkipsNoID(t *testing.T) {
-	t.Parallel()
-	raw := json.RawMessage(`{"skills":[{"name":"no-id"},{"id":"ok","name":"OK"}]}`)
-	skills, err := extractTopMSSkills(raw, 5)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if len(skills) != 1 {
-		t.Errorf("expected 1 skill from envelope, got %d", len(skills))
+	if len(skills) != 1 || skills[0].ID != "valid" {
+		t.Errorf("expected only the valid skill (blank ID skipped), got %+v", skills)
 	}
 }
 
@@ -886,14 +791,52 @@ func TestBuildMSComponent_WhitespaceQuery(t *testing.T) {
 }
 
 func TestBuildMSComponent_MSNotInstalled(t *testing.T) {
-	t.Parallel()
+	t.Setenv("PATH", t.TempDir())
 	ctx := stdcontext.Background()
 	b := NewContextPackBuilder(nil)
-	// ms tool is almost certainly not installed in the test environment
 	comp := b.buildMSComponent(ctx, "test query", 500)
 	if comp.Error != "ms not installed" {
-		// If ms IS installed, this test path won't trigger, but that's fine
-		t.Logf("ms detection returned: %q (ms may be installed)", comp.Error)
+		t.Errorf("expected 'ms not installed', got %q", comp.Error)
+	}
+}
+
+// TestBuildMSComponent_ReadsInstalledMS indexes one skill into an isolated ms
+// root and builds the component through the installed ms.
+func TestBuildMSComponent_ReadsInstalledMS(t *testing.T) {
+	if _, err := exec.LookPath("ms"); err != nil {
+		t.Skip("ms not installed")
+	}
+	root := t.TempDir()
+	skillDir := filepath.Join(root, "skills", "commit-workflow")
+	if err := os.MkdirAll(skillDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	skill := "---\nname: commit-workflow\n---\n\n# Commit Workflow\n\n" +
+		"Stage related changes together and write a commit message that explains why.\n"
+	if err := os.WriteFile(filepath.Join(skillDir, "SKILL.md"), []byte(skill), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("HOME", root)
+	t.Setenv("MS_ROOT", filepath.Join(root, ".ms"))
+	t.Setenv("MS_CONFIG", filepath.Join(root, ".ms", "config.toml"))
+	for _, args := range [][]string{{"--robot", "init"}, {"--robot", "index"}} {
+		cmd := exec.Command("ms", args...)
+		cmd.Dir = root
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("ms %s: %v\n%s", strings.Join(args, " "), err, out)
+		}
+	}
+
+	comp := NewContextPackBuilder(nil).buildMSComponent(stdcontext.Background(), "commit", 500)
+	if comp.Error != "" {
+		t.Fatalf("buildMSComponent error: %s", comp.Error)
+	}
+	var payload struct {
+		Skills []msPackSkill `json:"skills"`
+	}
+	if err := json.Unmarshal(comp.Data, &payload); err != nil || len(payload.Skills) == 0 ||
+		payload.Skills[0].ID != "commit-workflow" || payload.Skills[0].Summary == "" {
+		t.Fatalf("component data = %s (decode err %v), want the commit-workflow skill", comp.Data, err)
 	}
 }
 

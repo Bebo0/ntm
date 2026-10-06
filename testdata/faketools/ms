@@ -1,6 +1,8 @@
 #!/bin/bash
 # Fake ms tool for testing
 # Supports MODE environment variable: normal (default), timeout, error
+# Mirrors the real CLI: global output flags precede the subcommand
+# (ms -O json search -- QUERY) and JSON results come in status envelopes.
 
 MODE="${FAKE_TOOL_MODE:-normal}"
 
@@ -14,6 +16,23 @@ case "$MODE" in
         ;;
 esac
 
+JSON=0
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        -O|--output-format)
+            [[ "$2" == "json" ]] && JSON=1
+            shift 2
+            ;;
+        -m|--machine)
+            JSON=1
+            shift
+            ;;
+        *)
+            break
+            ;;
+    esac
+done
+
 # Normal mode - check arguments
 case "$1" in
     --version|-v|version)
@@ -21,32 +40,16 @@ case "$1" in
         exit 0
         ;;
     search)
-        if [[ "$*" == *"--json"* ]]; then
-            echo '[{"id": "test-skill", "name": "Test Skill", "score": 0.95}]'
+        if [[ "$JSON" == 1 ]]; then
+            echo '{"status":"ok","query":"test","search_type":"hybrid","count":1,"results":[{"id":"test-skill","name":"Test Skill","description":"A test skill","layer":"project","score":0.95,"quality":0.5,"is_deprecated":false}]}'
         else
             echo "test-skill  Test Skill (0.95)"
         fi
         exit 0
         ;;
-    suggest)
-        if [[ "$*" == *"--json"* ]]; then
-            echo '[{"id": "test-skill", "name": "Test Skill", "relevance": 0.9}]'
-        else
-            echo "Suggested: test-skill"
-        fi
-        exit 0
-        ;;
-    list)
-        if [[ "$*" == *"--json"* ]]; then
-            echo '[{"id": "test-skill", "name": "Test Skill", "category": "testing"}]'
-        else
-            echo "test-skill  Test Skill  testing"
-        fi
-        exit 0
-        ;;
     show)
-        if [[ "$*" == *"--json"* ]]; then
-            echo '{"id": "test-skill", "name": "Test Skill", "description": "A test skill"}'
+        if [[ "$JSON" == 1 ]]; then
+            echo '{"status":"ok","skill":{"id":"test-skill","name":"Test Skill","description":"A test skill"}}'
         else
             echo "# Test Skill"
             echo "A test skill"
@@ -55,11 +58,8 @@ case "$1" in
         ;;
     help|--help|-h|*)
         echo "ms - Meta Skill (fake for testing)"
-        echo "Usage: ms <command>"
-        echo "  version     Show version"
+        echo "Usage: ms [OPTIONS] <command>"
         echo "  search      Search for skills"
-        echo "  suggest     Suggest skills for a task"
-        echo "  list        List all skills"
         echo "  show        Show skill details"
         exit 0
         ;;
