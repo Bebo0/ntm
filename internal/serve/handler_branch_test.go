@@ -8454,8 +8454,28 @@ func TestHandleCASSInsights_WithRealCass(t *testing.T) {
 
 	s.handleCASSInsights(rec, req)
 
-	if rec.Code == http.StatusServiceUnavailable {
-		t.Fatal("cass is installed but got 503")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body %s", rec.Code, rec.Body.String())
+	}
+	var body struct {
+		TotalDocuments int                      `json:"total_documents"`
+		Agents         []cass.AggregationBucket `json:"agents"`
+		Workspaces     []cass.AggregationBucket `json:"workspaces"`
+		Warnings       []string                 `json:"warnings"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(body.Warnings) != 0 {
+		t.Fatalf("insights degraded: %v", body.Warnings)
+	}
+	if body.TotalDocuments > 0 && len(body.Agents) == 0 {
+		t.Fatalf("total_documents=%d but no agent buckets (aggregations not decoded)", body.TotalDocuments)
+	}
+	for _, b := range body.Agents {
+		if b.Key == "" || b.Count <= 0 {
+			t.Fatalf("bad agent bucket %+v", b)
+		}
 	}
 }
 

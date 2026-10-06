@@ -246,9 +246,10 @@ func newCassInsightsCmd() *cobra.Command {
 func runCassInsights(since string) error {
 	client := newCassClient()
 	resp, err := client.Search(context.Background(), cass.SearchOptions{
-		Query: "*",
-		Since: since,
-		Limit: 0,
+		Query:     "*",
+		Since:     since,
+		Limit:     0,
+		Aggregate: "agent,workspace",
 	})
 	if err != nil {
 		return handleCassError(err)
@@ -262,38 +263,30 @@ func runCassInsights(since string) error {
 	fmt.Printf("%sAgent Insights (Since %s)%s\n", "\033[1m", since, "\033[0m")
 
 	if resp.Aggregations != nil {
-		printAggregations("Top Agents", resp.Aggregations.Agents, t)
-		printAggregations("Top Workspaces", resp.Aggregations.Workspaces, t)
-		printAggregations("Common Tags", resp.Aggregations.Tags, t)
+		printAggregations("Top Agents", resp.Aggregations.Agent, t)
+		printAggregations("Top Workspaces", resp.Aggregations.Workspace, t)
 	}
 
 	return nil
 }
 
-type kv struct {
-	Key   string
-	Value int
-}
-
-func printAggregations(title string, counts map[string]int, t theme.Theme) {
-	if len(counts) == 0 {
+// printAggregations prints a field's top five cass buckets (cass already
+// orders them largest first).
+func printAggregations(title string, agg *cass.AggregationBuckets, t theme.Theme) {
+	if agg == nil || len(agg.Buckets) == 0 {
 		return
 	}
 	fmt.Printf("\n  %s%s%s\n", colorize(t.Info), title, "\033[0m")
 
-	var sorted []kv
-	for k, v := range counts {
-		sorted = append(sorted, kv{k, v})
-	}
-	sort.Slice(sorted, func(i, j int) bool {
-		return sorted[i].Value > sorted[j].Value
-	})
-
-	for i, item := range sorted {
+	for i, bucket := range agg.Buckets {
 		if i >= 5 {
 			break
 		}
-		fmt.Printf("    %-20s %d\n", item.Key, item.Value)
+		key := bucket.Key
+		if key == "" {
+			key = "(none)"
+		}
+		fmt.Printf("    %-20s %d\n", key, bucket.Count)
 	}
 }
 

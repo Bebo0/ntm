@@ -227,85 +227,64 @@ func PrintCASSSearch(query, agent, workspace, since string, limit int) error {
 // CASSInsightsOutput represents the output for --robot-cass-insights
 type CASSInsightsOutput struct {
 	RobotResponse
-	Period string                   `json:"period"`
-	Agents map[string]interface{}   `json:"agents"`
-	Topics []map[string]interface{} `json:"topics"`
-	Errors []map[string]interface{} `json:"errors"`
+	Period     string                   `json:"period"`
+	Agents     []cass.AggregationBucket `json:"agents"`
+	Workspaces []cass.AggregationBucket `json:"workspaces"`
 }
 
-// GetCASSInsights returns aggregated insights.
+// GetCASSInsights returns which agents and workspaces dominate the indexed
+// sessions since `since` (default 7d), from cass's server-side aggregations.
 // This function returns the data struct directly, enabling CLI/REST parity.
-func GetCASSInsights() (*CASSInsightsOutput, error) {
+func GetCASSInsights(since string) (*CASSInsightsOutput, error) {
+	if since == "" {
+		since = "7d"
+	}
+	output := &CASSInsightsOutput{
+		Period:     since,
+		Agents:     []cass.AggregationBucket{},
+		Workspaces: []cass.AggregationBucket{},
+	}
+
 	client := cass.NewClient()
 	if !client.IsInstalled() {
-		return &CASSInsightsOutput{
-			RobotResponse: NewErrorResponse(
-				fmt.Errorf("cass not installed"),
-				ErrCodeDependencyMissing,
-				"Install cass to enable insights",
-			),
-			Period: "7d",
-			Agents: map[string]interface{}{},
-			Topics: []map[string]interface{}{},
-			Errors: []map[string]interface{}{},
-		}, nil
+		output.RobotResponse = NewErrorResponse(
+			fmt.Errorf("cass not installed"),
+			ErrCodeDependencyMissing,
+			"Install cass to enable insights",
+		)
+		return output, nil
 	}
-	// Get aggregations for the last 7 days by default
 	resp, err := client.Search(context.Background(), cass.SearchOptions{
-		Query: "*",
-		Since: "7d",
-		Limit: 0,
+		Query:     "*",
+		Since:     output.Period,
+		Limit:     0,
+		Aggregate: "agent,workspace",
 	})
-
 	if err != nil {
-		return &CASSInsightsOutput{
-			RobotResponse: NewErrorResponse(
-				err,
-				ErrCodeInternalError,
-				"Check cass index health and configuration",
-			),
-			Period: "7d",
-			Agents: map[string]interface{}{},
-			Topics: []map[string]interface{}{},
-			Errors: []map[string]interface{}{},
-		}, nil
+		output.RobotResponse = NewErrorResponse(
+			err,
+			ErrCodeInternalError,
+			"Check cass index health and configuration",
+		)
+		return output, nil
 	}
 
-	output := &CASSInsightsOutput{
-		RobotResponse: NewRobotResponse(true),
-		Period:        "7d",
-		Agents:        map[string]interface{}{},
-		Topics:        []map[string]interface{}{},
-		Errors:        []map[string]interface{}{},
-	}
-
-	if resp.Aggregations != nil {
-		// Convert agent map to buckets list
-		var agentBuckets []map[string]interface{}
-		for k, v := range resp.Aggregations.Agents {
-			agentBuckets = append(agentBuckets, map[string]interface{}{
-				"key":   k,
-				"count": v,
-			})
+	output.RobotResponse = NewRobotResponse(true)
+	if agg := resp.Aggregations; agg != nil {
+		if agg.Agent != nil {
+			output.Agents = agg.Agent.Buckets
 		}
-		output.Agents["buckets"] = agentBuckets
-
-		// Convert tags/topics
-		for k, v := range resp.Aggregations.Tags {
-			output.Topics = append(output.Topics, map[string]interface{}{
-				"term":  k,
-				"count": v,
-			})
+		if agg.Workspace != nil {
+			output.Workspaces = agg.Workspace.Buckets
 		}
 	}
-
 	return output, nil
 }
 
 // PrintCASSInsights outputs aggregated insights as JSON.
 // This is a thin wrapper around GetCASSInsights() for CLI output.
-func PrintCASSInsights() error {
-	output, err := GetCASSInsights()
+func PrintCASSInsights(since string) error {
+	output, err := GetCASSInsights(since)
 	if err != nil {
 		return err
 	}

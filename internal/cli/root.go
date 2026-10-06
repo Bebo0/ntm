@@ -1342,7 +1342,7 @@ Shell Integration:
 			return
 		}
 		if robotCassInsights {
-			if err := robot.PrintCASSInsights(); err != nil {
+			if err := robot.PrintCASSInsights(resolveRobotSharedFlag(cmd, "cass-since", cassSince, "since", robotSince)); err != nil {
 				recordRobotProcessExit(err)
 			}
 			return
@@ -4741,7 +4741,7 @@ func init() {
 	// Robot-cass flags for CASS (Cross-Agent Semantic Search) integration
 	rootCmd.Flags().BoolVar(&robotCassStatus, "robot-cass-status", false, "Get CASS health: index status, message counts, freshness (JSON)")
 	rootCmd.Flags().StringVar(&robotCassSearch, "robot-cass-search", "", "Search past agent conversations. Required: QUERY. Example: ntm --robot-cass-search='authentication error'")
-	rootCmd.Flags().BoolVar(&robotCassInsights, "robot-cass-insights", false, "Get CASS aggregated insights: topics, patterns, agent activity (JSON)")
+	rootCmd.Flags().BoolVar(&robotCassInsights, "robot-cass-insights", false, "Get CASS aggregated insights: session counts per agent and workspace since --since (default 7d) (JSON)")
 	rootCmd.Flags().StringVar(&robotCassContext, "robot-cass-context", "", "Get relevant past context for a task. Example: ntm --robot-cass-context='how to implement auth'")
 
 	// CASS filters - work with --robot-cass-search and --robot-cass-context

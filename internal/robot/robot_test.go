@@ -24,6 +24,7 @@ import (
 	"github.com/Dicklesworthstone/ntm/internal/agentmail"
 	"github.com/Dicklesworthstone/ntm/internal/alerts"
 	"github.com/Dicklesworthstone/ntm/internal/bv"
+	"github.com/Dicklesworthstone/ntm/internal/cass"
 	"github.com/Dicklesworthstone/ntm/internal/config"
 	ntmctx "github.com/Dicklesworthstone/ntm/internal/context"
 	"github.com/Dicklesworthstone/ntm/internal/privacy"
@@ -645,6 +646,38 @@ func TestRobotMSSearchAndShowReadInstalledMS(t *testing.T) {
 	}
 	if missing.Success || missing.ErrorCode != "NOT_FOUND" {
 		t.Fatalf("GetMSShow(missing) = success:%t code:%q err:%q, want NOT_FOUND", missing.Success, missing.ErrorCode, missing.Error)
+	}
+}
+
+// TestRobotCASSInsightsMatchesInstalledCass compares --robot-cass-insights with
+// the installed cass's own aggregation over the same window.
+func TestRobotCASSInsightsMatchesInstalledCass(t *testing.T) {
+	if _, err := exec.LookPath("cass"); err != nil {
+		t.Skip("cass not installed")
+	}
+	raw, err := exec.Command("cass", "search", "*", "--json", "--limit", "0", "--since", "30d", "--aggregate", "agent,workspace").Output()
+	var direct struct {
+		Aggregations struct {
+			Agent struct {
+				Buckets []cass.AggregationBucket `json:"buckets"`
+			} `json:"agent"`
+		} `json:"aggregations"`
+	}
+	if err != nil || json.Unmarshal(raw, &direct) != nil {
+		t.Fatalf("cass search --aggregate: %v", err)
+	}
+
+	out, err := GetCASSInsights("30d")
+	if err != nil || !out.Success || out.Period != "30d" {
+		t.Fatalf("GetCASSInsights = %+v, %v", out, err)
+	}
+	if len(out.Agents) != len(direct.Aggregations.Agent.Buckets) {
+		t.Fatalf("agents = %+v, cass says %+v", out.Agents, direct.Aggregations.Agent.Buckets)
+	}
+	for i, b := range direct.Aggregations.Agent.Buckets {
+		if out.Agents[i] != b {
+			t.Fatalf("agents[%d] = %+v, cass says %+v", i, out.Agents[i], b)
+		}
 	}
 }
 

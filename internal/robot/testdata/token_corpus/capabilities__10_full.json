@@ -4400,8 +4400,8 @@
       "name": "cass-insights",
       "flag": "--robot-cass-insights",
       "category": "cass",
-      "summary": "Get aggregated CASS insights about topics, patterns, and agent activity.",
-      "description": "Get aggregated CASS insights about topics, patterns, and agent activity.",
+      "summary": "Get CASS session counts per agent and workspace over a recent window.",
+      "description": "Get CASS session counts per agent and workspace over a recent window.",
       "output_formats": [
         "json"
       ],
@@ -4412,8 +4412,19 @@
       "sections": [
         "events"
       ],
+      "parameters": [
+        {
+          "name": "since",
+          "flag": "--since",
+          "type": "string",
+          "required": false,
+          "default": "7d",
+          "description": "Window to aggregate, e.g. 7d, 30d"
+        }
+      ],
       "examples": [
-        "ntm --robot-cass-insights"
+        "ntm --robot-cass-insights",
+        "ntm --robot-cass-insights --since=30d"
       ],
       "transports": [
         {

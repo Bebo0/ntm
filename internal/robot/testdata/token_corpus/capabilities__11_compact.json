@@ -1082,7 +1082,7 @@
       "name": "cass-insights",
       "flag": "--robot-cass-insights",
       "category": "cass",
-      "summary": "Get aggregated CASS insights about topics, patterns, and agent activity.",
+      "summary": "Get CASS session counts per agent and workspace over a recent window.",
       "output_formats": [
         "json"
       ],

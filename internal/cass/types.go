@@ -104,11 +104,27 @@ func (m *Meta) HasMore() bool {
 	return m.NextCursor != ""
 }
 
-// Aggregations contains aggregated stats from search results
+// Aggregations is the aggregations object of
+// `cass search --aggregate=agent,workspace,date,match_type`: count buckets for
+// each requested field.
 type Aggregations struct {
-	Agents     map[string]int `json:"agents,omitempty"`
-	Workspaces map[string]int `json:"workspaces,omitempty"`
-	Tags       map[string]int `json:"tags,omitempty"`
+	Agent     *AggregationBuckets `json:"agent,omitempty"`
+	Workspace *AggregationBuckets `json:"workspace,omitempty"`
+	Date      *AggregationBuckets `json:"date,omitempty"`
+	MatchType *AggregationBuckets `json:"match_type,omitempty"`
+}
+
+// AggregationBuckets lists a field's most frequent values, largest first;
+// OtherCount counts the matches past cass's bucket cap.
+type AggregationBuckets struct {
+	Buckets    []AggregationBucket `json:"buckets"`
+	OtherCount int                 `json:"other_count"`
+}
+
+// AggregationBucket is one field value and how many matches carry it.
+type AggregationBucket struct {
+	Key   string `json:"key"`
+	Count int    `json:"count"`
 }
 
 // SearchResponse represents the full response from a CASS search

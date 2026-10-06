@@ -1601,9 +1601,11 @@ func buildCommandRegistry() []RobotCommandInfo {
 			Name:        "cass-insights",
 			Flag:        "--robot-cass-insights",
 			Category:    "cass",
-			Description: "Get aggregated CASS insights about topics, patterns, and agent activity.",
-			Parameters:  []RobotParameter{},
-			Examples:    []string{"ntm --robot-cass-insights"},
+			Description: "Get CASS session counts per agent and workspace over a recent window.",
+			Parameters: []RobotParameter{
+				{Name: "since", Flag: "--since", Type: "string", Required: false, Default: "7d", Description: "Window to aggregate, e.g. 7d, 30d"},
+			},
+			Examples: []string{"ntm --robot-cass-insights", "ntm --robot-cass-insights --since=30d"},
 		},
 
 		// === PIPELINE ===

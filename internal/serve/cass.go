@@ -460,11 +460,7 @@ func (s *Server) handleCASSSearch(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if result.Aggregations != nil {
-		response["aggregations"] = map[string]interface{}{
-			"agents":     result.Aggregations.Agents,
-			"workspaces": result.Aggregations.Workspaces,
-			"tags":       result.Aggregations.Tags,
-		}
+		response["aggregations"] = result.Aggregations
 	}
 
 	// Publish search event
@@ -501,25 +497,29 @@ func (s *Server) handleCASSInsights(w http.ResponseWriter, r *http.Request) {
 		slog.Warn("cass insights failed", "error", err, "request_id", reqID)
 		writeSuccessResponse(w, http.StatusOK, map[string]interface{}{
 			"total_documents": 0,
-			"agents":          map[string]int{},
-			"workspaces":      map[string]int{},
-			"tags":            map[string]int{},
+			"agents":          []cass.AggregationBucket{},
+			"workspaces":      []cass.AggregationBucket{},
 			"warnings":        []string{"cass insights unavailable; returning empty aggregates"},
 		}, reqID)
 		return
 	}
 
-	response := map[string]interface{}{
+	// cass returns each field's buckets largest first.
+	agents, workspaces := []cass.AggregationBucket{}, []cass.AggregationBucket{}
+	if agg := result.Aggregations; agg != nil {
+		if agg.Agent != nil {
+			agents = agg.Agent.Buckets
+		}
+		if agg.Workspace != nil {
+			workspaces = agg.Workspace.Buckets
+		}
+	}
+
+	writeSuccessResponse(w, http.StatusOK, map[string]interface{}{
 		"total_documents": result.TotalMatches,
-	}
-
-	if result.Aggregations != nil {
-		response["agents"] = result.Aggregations.Agents
-		response["workspaces"] = result.Aggregations.Workspaces
-		response["tags"] = result.Aggregations.Tags
-	}
-
-	writeSuccessResponse(w, http.StatusOK, response, reqID)
+		"agents":          agents,
+		"workspaces":      workspaces,
+	}, reqID)
 }
 
 // handleCASSTimeline returns a timeline of recent activity
