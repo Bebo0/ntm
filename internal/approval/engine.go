@@ -239,7 +239,66 @@ func (e *Engine) Check(ctx context.Context, id string) (*state.Approval, error) 
 		}
 	}
 
+	// An approval mirrored into slb takes slb's decision once a reviewer has
+	// made one there.
+	if approval.Status == state.ApprovalPending && e.syncSLBDecision(ctx, approval) {
+		synced, err := e.store.GetApproval(id)
+		if err != nil {
+			return nil, fmt.Errorf("get approval: %w", err)
+		}
+		if synced != nil {
+			approval = synced
+		}
+	}
+
 	return approval, nil
+}
+
+// syncSLBDecision applies the decision recorded in slb to a pending approval
+// correlated as "slb:<request_id>", through Approve/Deny so their checks
+// (approver list, two-person rule, concurrent decisions) still hold. It
+// reports whether the approval was decided. slb resolves the request in the
+// working directory's project, as when the request was filed.
+func (e *Engine) syncSLBDecision(ctx context.Context, approval *state.Approval) bool {
+	requestID, ok := strings.CutPrefix(approval.CorrelationID, "slb:")
+	if !ok || requestID == "" || !e.config.EnableSLB {
+		return false
+	}
+	adapter := tools.NewSLBAdapter()
+	if _, installed := adapter.Detect(); !installed {
+		return false
+	}
+	status, err := adapter.RequestStatus(ctx, requestID)
+	if err != nil {
+		slog.Debug("slb status unavailable; approval stays pending", "approval", approval.ID, "slb_request", requestID, "error", err)
+		return false
+	}
+
+	var decide func(review tools.SLBReview) error
+	switch status.Status {
+	case "approved":
+		decide = func(review tools.SLBReview) error {
+			return e.Approve(ctx, approval.ID, "slb:"+review.Reviewer)
+		}
+	case "rejected":
+		decide = func(review tools.SLBReview) error {
+			return e.Deny(ctx, approval.ID, "slb:"+review.Reviewer, review.Comments)
+		}
+	default:
+		return false
+	}
+	// The deciding review is the latest one whose decision matches.
+	var deciding tools.SLBReview
+	for _, review := range status.Reviews {
+		if (status.Status == "approved") == (review.Decision == "approve") {
+			deciding = review
+		}
+	}
+	if err := decide(deciding); err != nil {
+		slog.Warn("could not apply slb decision to approval", "approval", approval.ID, "slb_request", requestID, "slb_status", status.Status, "error", err)
+		return false
+	}
+	return true
 }
 
 // Approve grants an approval request.

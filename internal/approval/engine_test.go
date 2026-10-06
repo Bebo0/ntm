@@ -13,6 +13,7 @@ import (
 
 	"github.com/Dicklesworthstone/ntm/internal/events"
 	"github.com/Dicklesworthstone/ntm/internal/state"
+	"github.com/Dicklesworthstone/ntm/internal/tools"
 )
 
 func setupTestStore(t *testing.T) *state.Store {
@@ -94,6 +95,40 @@ func TestRequestMirrorsToInstalledSLB(t *testing.T) {
 	}
 	if len(pending) != 1 || pending[0].RequestID != requestID || pending[0].Command != "ntm approval: force_release internal/b.go" {
 		t.Fatalf("slb pending = %+v, want only request %s for internal/b.go", pending, requestID)
+	}
+
+	// A decision a reviewer makes in slb flows back into the ntm approval.
+	raw, err = exec.Command("slb", "session", "start", "--agent", "reviewer", "--program", "ntm-test", "--model", "test", "--json").Output()
+	var reviewer tools.SLBSession
+	var started map[string]any
+	if err != nil || json.Unmarshal(raw, &started) != nil {
+		t.Fatalf("slb session start (reviewer): %s, %v", raw, err)
+	}
+	reviewer.ID, _ = started["session_id"].(string)
+	reviewer.Key, _ = started["session_key"].(string)
+	review := func(verb, slbRequest string, extra ...string) {
+		t.Helper()
+		args := append([]string{verb, "--json", "--session-id", reviewer.ID, "--session-key", reviewer.Key}, extra...)
+		if out, err := exec.Command("slb", append(args, "--", slbRequest)...).CombinedOutput(); err != nil {
+			t.Fatalf("slb %s: %v\n%s", verb, err, out)
+		}
+	}
+
+	if checked, err := engine.Check(ctx, mirrored.ID); err != nil || checked.Status != state.ApprovalPending {
+		t.Fatalf("before any slb review: %+v, %v; want pending", checked, err)
+	}
+	review("approve", requestID)
+	approved, err := engine.Check(ctx, mirrored.ID)
+	if err != nil || approved.Status != state.ApprovalApproved || approved.ApprovedBy != "slb:reviewer" {
+		t.Fatalf("after slb approve: %+v, %v; want approved by slb:reviewer", approved, err)
+	}
+
+	rejected := request("internal/c.go")
+	rejectedRequest, _ := strings.CutPrefix(rejected.CorrelationID, "slb:")
+	review("reject", rejectedRequest, "--reason", "holder is still active")
+	denied, err := engine.Check(ctx, rejected.ID)
+	if err != nil || denied.Status != state.ApprovalDenied || denied.DeniedReason != "holder is still active" {
+		t.Fatalf("after slb reject: %+v, %v; want denied with the reviewer's reason", denied, err)
 	}
 }
 

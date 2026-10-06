@@ -199,6 +199,34 @@ func (a *SLBAdapter) Request(ctx context.Context, session SLBSession, command, r
 	return a.runCommand(ctx, append(args, "--", command)...)
 }
 
+// SLBRequestStatus is the part of `slb status <request-id> --json` ntm acts on.
+type SLBRequestStatus struct {
+	RequestID string      `json:"request_id"`
+	Status    string      `json:"status"` // pending, approved, rejected, ...
+	Reviews   []SLBReview `json:"reviews"`
+}
+
+// SLBReview is one reviewer's decision on a request.
+type SLBReview struct {
+	Reviewer string `json:"reviewer"`
+	Decision string `json:"decision"` // approve, reject
+	Comments string `json:"comments"`
+}
+
+// RequestStatus reports where an slb request stands and who reviewed it. slb
+// resolves the request in the project of the working directory.
+func (a *SLBAdapter) RequestStatus(ctx context.Context, requestID string) (*SLBRequestStatus, error) {
+	raw, err := a.runCommand(ctx, "status", "--json", "--", requestID)
+	if err != nil {
+		return nil, err
+	}
+	var status SLBRequestStatus
+	if err := json.Unmarshal(raw, &status); err != nil {
+		return nil, fmt.Errorf("%w: slb status: %v", ErrSchemaValidation, err)
+	}
+	return &status, nil
+}
+
 // Approve records an approving review of requestID signed by session.
 func (a *SLBAdapter) Approve(ctx context.Context, session SLBSession, requestID string) (json.RawMessage, error) {
 	if session.ID == "" || session.Key == "" {
