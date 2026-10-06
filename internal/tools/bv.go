@@ -209,8 +209,15 @@ func (a *BVAdapter) GetGroupedTriage(ctx context.Context, dir string, opts BVGro
 	return a.runRobotCommand(ctx, dir, "--robot-triage")
 }
 
-func (a *BVAdapter) GetHistory(ctx context.Context, dir string) (json.RawMessage, error) {
-	return a.runRobotCommand(ctx, dir, "--robot-history")
+// GetHistory returns `bv --robot-history`, limited to commits since `since`
+// (bv's relative "14d"/"2w"/"1m" or an ISO date; "" for all). A full history
+// of a large tracker can exceed the 10MB output cap.
+func (a *BVAdapter) GetHistory(ctx context.Context, dir, since string) (json.RawMessage, error) {
+	args := []string{"--robot-history"}
+	if since != "" {
+		args = append(args, "--history-since="+since)
+	}
+	return a.runRobotCommand(ctx, dir, args...)
 }
 
 func (a *BVAdapter) GetBurndown(ctx context.Context, dir string, sprint string) (json.RawMessage, error) {

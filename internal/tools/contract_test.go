@@ -583,12 +583,12 @@ func TestBVAdapterRobotModes(t *testing.T) {
 			name: "history",
 			key:  "stats",
 			call: func() (json.RawMessage, error) {
-				return adapter.GetHistory(ctx, projectRoot)
+				return adapter.GetHistory(ctx, projectRoot, "")
 			},
 		},
 		{
 			name: "burndown",
-			key:  "progress",
+			key:  "total_issues",
 			call: func() (json.RawMessage, error) {
 				return adapter.GetBurndown(ctx, projectRoot, "s1")
 			},

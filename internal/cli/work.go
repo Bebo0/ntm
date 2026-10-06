@@ -2515,6 +2515,7 @@ func queueDryIdeationMarkdown(report QueueDryIdeationReport) string {
 
 // newWorkHistoryCmd creates the history command
 func newWorkHistoryCmd() *cobra.Command {
+	var since string
 	cmd := &cobra.Command{
 		Use:   "history",
 		Args:  cobra.NoArgs,
@@ -2524,12 +2525,14 @@ func newWorkHistoryCmd() *cobra.Command {
 Shows bead events, commit milestones, and provides insights into development patterns.
 
 Examples:
-  ntm work history               # Full history analysis
+  ntm work history               # Last 30 days of history
+  ntm work history --since=2w    # Last two weeks
   ntm work history --json       # Output as JSON`,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return runWorkHistory()
+			return runWorkHistory(since)
 		},
 	}
+	cmd.Flags().StringVar(&since, "since", "30d", `History window: bv relative (14d, 2w, 1m) or an ISO date; "" for the whole history`)
 
 	return cmd
 }
@@ -2653,93 +2656,92 @@ Examples:
 
 // Response types for the new commands
 
-// HistoryResponse contains bead-to-commit correlation data
+// HistoryResponse is `bv --robot-history`: bead-to-commit correlation keyed by
+// bead ID.
 type HistoryResponse struct {
-	Stats       HistoryStats          `json:"stats"`
-	Histories   []BeadHistory         `json:"histories"`
-	CommitIndex map[string]CommitInfo `json:"commit_index"`
+	Stats     HistoryStats           `json:"stats"`
+	Histories map[string]BeadHistory `json:"histories"`
+	// CommitIndex maps a commit SHA to the beads it touched.
+	CommitIndex map[string][]string `json:"commit_index"`
 }
 
 // HistoryStats contains overall history statistics
 type HistoryStats struct {
-	TotalBeads      int `json:"total_beads"`
-	TotalCommits    int `json:"total_commits"`
-	CorrelatedCount int `json:"correlated_count"`
+	TotalBeads       int     `json:"total_beads"`
+	BeadsWithCommits int     `json:"beads_with_commits"`
+	TotalCommits     int     `json:"total_commits"`
+	AvgCycleTimeDays float64 `json:"avg_cycle_time_days"`
 }
 
 // BeadHistory contains history for a single bead
 type BeadHistory struct {
-	ID         string      `json:"id"`
-	Title      string      `json:"title"`
-	Events     []BeadEvent `json:"events"`
-	Commits    []string    `json:"commits"`
-	Milestones []string    `json:"milestones"`
+	BeadID     string               `json:"bead_id"`
+	Title      string               `json:"title"`
+	Status     string               `json:"status"`
+	Events     []BeadEvent          `json:"events"`
+	Commits    []BeadCommit         `json:"commits"`
+	Milestones map[string]BeadEvent `json:"milestones"` // created, claimed, closed, ...
 }
 
-// BeadEvent represents a bead state change
+// BeadEvent is one lifecycle event of a bead, found in a git commit.
 type BeadEvent struct {
+	EventType string    `json:"event_type"`
 	Timestamp time.Time `json:"timestamp"`
-	Event     string    `json:"event"`
-	Status    string    `json:"status,omitempty"`
+	CommitSHA string    `json:"commit_sha"`
+	Author    string    `json:"author"`
 }
 
-// CommitInfo contains commit details
-type CommitInfo struct {
-	Hash      string    `json:"hash"`
-	Timestamp time.Time `json:"timestamp"`
+// BeadCommit is a code commit correlated with a bead.
+type BeadCommit struct {
+	SHA       string    `json:"sha"`
+	ShortSHA  string    `json:"short_sha"`
 	Message   string    `json:"message"`
-	Beads     []string  `json:"beads,omitempty"`
-}
-
-// GraphResponse contains dependency graph data
-type GraphResponse struct {
-	Format string      `json:"format"`
-	Data   interface{} `json:"data"`
-}
-
-// BurndownResponse contains sprint burndown data
-type BurndownResponse struct {
-	Sprint       string           `json:"sprint"`
-	Progress     BurndownProgress `json:"progress"`
-	ScopeChanges []ScopeChange    `json:"scope_changes,omitempty"`
-	AtRisk       []AtRiskItem     `json:"at_risk,omitempty"`
-}
-
-// BurndownProgress contains progress metrics
-type BurndownProgress struct {
-	TotalPoints     int     `json:"total_points"`
-	CompletedPoints int     `json:"completed_points"`
-	PercentComplete float64 `json:"percent_complete"`
-	DaysRemaining   int     `json:"days_remaining"`
-}
-
-// ScopeChange represents a change in sprint scope
-type ScopeChange struct {
 	Timestamp time.Time `json:"timestamp"`
-	Action    string    `json:"action"` // added, removed, modified
-	IssueID   string    `json:"issue_id"`
-	Points    int       `json:"points"`
 }
 
-// AtRiskItem represents an at-risk sprint item
-type AtRiskItem struct {
-	ID      string   `json:"id"`
-	Title   string   `json:"title"`
-	Risk    string   `json:"risk"` // behind_schedule, blocked, scope_creep
-	Reasons []string `json:"reasons"`
+// BurndownResponse is `bv --robot-burndown <sprint>`: issue counts, not
+// points.
+type BurndownResponse struct {
+	SprintID        string             `json:"sprint_id"`
+	SprintName      string             `json:"sprint_name"`
+	TotalDays       int                `json:"total_days"`
+	ElapsedDays     int                `json:"elapsed_days"`
+	RemainingDays   int                `json:"remaining_days"`
+	TotalIssues     int                `json:"total_issues"`
+	CompletedIssues int                `json:"completed_issues"`
+	RemainingIssues int                `json:"remaining_issues"`
+	OnTrack         bool               `json:"on_track"`
+	ScopeChanges    []SprintScopeEvent `json:"scope_changes,omitempty"`
+	AtRisk          []SprintAtRiskItem `json:"at_risk"`
+}
+
+// SprintScopeEvent is an issue added to or removed from a sprint.
+type SprintScopeEvent struct {
+	Date       time.Time `json:"date"`
+	IssueID    string    `json:"issue_id"`
+	IssueTitle string    `json:"issue_title"`
+	Action     string    `json:"action"` // added, removed
+}
+
+// SprintAtRiskItem is a sprint bead bv flags as at risk.
+type SprintAtRiskItem struct {
+	ID     string `json:"id"`
+	Title  string `json:"title"`
+	Status string `json:"status"`
+	Detail string `json:"detail"` // human-readable reason for each signal
 }
 
 // Implementation functions for the new commands
 
 // runWorkHistory executes the history command
-func runWorkHistory() error {
+func runWorkHistory(since string) error {
 	dir, err := os.Getwd()
 	if err != nil {
 		return fmt.Errorf("getting working directory: %w", err)
 	}
 
 	adapter := tools.NewBVAdapter()
-	output, err := adapter.GetHistory(context.Background(), dir)
+	output, err := adapter.GetHistory(context.Background(), dir, since)
 	if err != nil {
 		return err
 	}
@@ -2772,31 +2774,64 @@ func renderHistory(resp HistoryResponse) error {
 
 	// Stats
 	stats := resp.Stats
-	fmt.Printf("  Total Beads: %d  Commits: %d  Correlated: %d\n\n",
-		stats.TotalBeads, stats.TotalCommits, stats.CorrelatedCount)
+	fmt.Printf("  Total Beads: %d  Commits: %d  With commits: %d  Avg cycle: %.1f days\n\n",
+		stats.TotalBeads, stats.TotalCommits, stats.BeadsWithCommits, stats.AvgCycleTimeDays)
 
-	// Recent bead histories (limit to first 10)
-	histories := resp.Histories
+	// The ten beads with the most recent activity.
+	histories := make([]BeadHistory, 0, len(resp.Histories))
+	for id, bead := range resp.Histories {
+		if bead.BeadID == "" {
+			bead.BeadID = id
+		}
+		histories = append(histories, bead)
+	}
+	sort.Slice(histories, func(i, j int) bool {
+		li, lj := lastBeadActivity(histories[i]), lastBeadActivity(histories[j])
+		if !li.Equal(lj) {
+			return li.After(lj)
+		}
+		return histories[i].BeadID < histories[j].BeadID
+	})
 	if len(histories) > 10 {
 		histories = histories[:10]
 	}
 
 	for _, bead := range histories {
-		fmt.Printf("  %s %s\n", idStyle.Render(bead.ID), bead.Title)
-
-		if len(bead.Events) > 0 {
-			fmt.Printf("    %s %d events, %d commits\n",
-				mutedStyle.Render("Events:"), len(bead.Events), len(bead.Commits))
-		}
+		fmt.Printf("  %s %s %s\n", idStyle.Render(bead.BeadID), bead.Title, mutedStyle.Render("("+bead.Status+")"))
+		fmt.Printf("    %s %d events, %d commits\n",
+			mutedStyle.Render("Events:"), len(bead.Events), len(bead.Commits))
 
 		if len(bead.Milestones) > 0 {
+			names := make([]string, 0, len(bead.Milestones))
+			for name := range bead.Milestones {
+				names = append(names, name)
+			}
+			sort.Slice(names, func(i, j int) bool {
+				return bead.Milestones[names[i]].Timestamp.Before(bead.Milestones[names[j]].Timestamp)
+			})
 			fmt.Printf("    %s %s\n",
-				mutedStyle.Render("Milestones:"), strings.Join(bead.Milestones, ", "))
+				mutedStyle.Render("Milestones:"), strings.Join(names, " → "))
 		}
 		fmt.Println()
 	}
 
 	return nil
+}
+
+// lastBeadActivity is the newest event or commit time of a bead's history.
+func lastBeadActivity(bead BeadHistory) time.Time {
+	var last time.Time
+	for _, event := range bead.Events {
+		if event.Timestamp.After(last) {
+			last = event.Timestamp
+		}
+	}
+	for _, commit := range bead.Commits {
+		if commit.Timestamp.After(last) {
+			last = commit.Timestamp
+		}
+	}
+	return last
 }
 
 // runWorkForecast executes the forecast command
@@ -2897,9 +2932,24 @@ func runWorkGraph(format string) error {
 		return nil
 	}
 
-	// For non-JSON formats like DOT or Mermaid, just print directly
-	fmt.Println(string(output))
+	text, err := bvGraphText(output, format)
+	if err != nil {
+		return err
+	}
+	fmt.Println(text)
 	return nil
+}
+
+// bvGraphText pulls the DOT or Mermaid text out of bv's JSON envelope, which
+// carries it in "graph".
+func bvGraphText(output []byte, format string) (string, error) {
+	var envelope struct {
+		Graph string `json:"graph"`
+	}
+	if err := json.Unmarshal(output, &envelope); err != nil || envelope.Graph == "" {
+		return "", fmt.Errorf("bv --robot-graph --graph-format=%s returned no graph text", format)
+	}
+	return envelope.Graph, nil
 }
 
 // runWorkLabelHealth executes the label-health command
@@ -3093,29 +3143,40 @@ func renderBurndown(resp BurndownResponse) error {
 	riskStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("196"))
 	mutedStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("240"))
 
+	name := resp.SprintName
+	if name == "" {
+		name = resp.SprintID
+	}
 	fmt.Println()
-	fmt.Printf("%s %s\n", titleStyle.Render("Sprint Burndown:"), resp.Sprint)
+	fmt.Printf("%s %s\n", titleStyle.Render("Sprint Burndown:"), name)
 	fmt.Println()
 
-	// Progress
-	progress := resp.Progress
-	fmt.Printf("  %s %d/%d points %s\n",
+	// Progress (bv counts issues, not points)
+	percent := 0.0
+	if resp.TotalIssues > 0 {
+		percent = 100 * float64(resp.CompletedIssues) / float64(resp.TotalIssues)
+	}
+	pace := progressStyle.Render("on track")
+	if !resp.OnTrack {
+		pace = riskStyle.Render("behind")
+	}
+	fmt.Printf("  %s %d/%d issues %s %s\n",
 		mutedStyle.Render("Progress:"),
-		progress.CompletedPoints,
-		progress.TotalPoints,
-		progressStyle.Render(fmt.Sprintf("(%.0f%%)", progress.PercentComplete)))
+		resp.CompletedIssues,
+		resp.TotalIssues,
+		progressStyle.Render(fmt.Sprintf("(%.0f%%)", percent)),
+		pace)
 
-	fmt.Printf("  %s %d days\n\n",
-		mutedStyle.Render("Remaining:"), progress.DaysRemaining)
+	fmt.Printf("  %s %d of %d days\n\n",
+		mutedStyle.Render("Remaining:"), resp.RemainingDays, resp.TotalDays)
 
 	// At-risk items
 	if len(resp.AtRisk) > 0 {
 		fmt.Printf("  %s\n", riskStyle.Render("At Risk:"))
 		for _, item := range resp.AtRisk {
 			fmt.Printf("    ⚠ %s - %s\n", item.ID, item.Title)
-			if len(item.Reasons) > 0 {
-				fmt.Printf("      %s %s\n",
-					mutedStyle.Render("Reason:"), strings.Join(item.Reasons, ", "))
+			if item.Detail != "" {
+				fmt.Printf("      %s %s\n", mutedStyle.Render("Reason:"), item.Detail)
 			}
 		}
 		fmt.Println()
@@ -3124,17 +3185,15 @@ func renderBurndown(resp BurndownResponse) error {
 	// Scope changes (show recent ones)
 	if len(resp.ScopeChanges) > 0 {
 		fmt.Printf("  %s\n", mutedStyle.Render("Recent Scope Changes:"))
-		count := 0
-		for _, change := range resp.ScopeChanges {
-			if count >= 5 { // Limit display
+		for i, change := range resp.ScopeChanges {
+			if i >= 5 { // Limit display
 				break
 			}
-			fmt.Printf("    %s %s %s (%d pts)\n",
-				change.Timestamp.Format("01/02"),
+			fmt.Printf("    %s %s %s %s\n",
+				change.Date.Format("01/02"),
 				change.Action,
 				change.IssueID,
-				change.Points)
-			count++
+				change.IssueTitle)
 		}
 	}
 

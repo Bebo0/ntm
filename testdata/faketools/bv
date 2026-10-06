@@ -66,11 +66,11 @@ case "$ARG" in
         exit 0
         ;;
     robot-history)
-        echo '{"stats":{"total_beads":1,"total_commits":0,"correlated_count":0},"histories":[{"id":"bd-1","title":"Test","events":[]}]}'
+        echo '{"stats":{"total_beads":1,"beads_with_commits":0,"total_commits":0},"histories":{"bd-1":{"bead_id":"bd-1","title":"Test","status":"open","events":[],"milestones":{},"commits":null}},"commit_index":{}}'
         exit 0
         ;;
     robot-burndown)
-        echo '{"sprint":"s1","progress":{"total_points":10,"completed_points":4,"percent_complete":40,"days_remaining":3},"scope_changes":[],"at_risk":[]}'
+        echo '{"sprint_id":"s1","sprint_name":"Sprint 1","total_days":8,"elapsed_days":4,"remaining_days":4,"total_issues":2,"completed_issues":1,"remaining_issues":1,"on_track":false,"daily_points":[],"ideal_line":[],"at_risk":[]}'
         exit 0
         ;;
     robot-forecast)

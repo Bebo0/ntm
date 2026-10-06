@@ -2,14 +2,144 @@ package cli
 
 import (
 	"bytes"
+	"context"
+	"encoding/json"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/Dicklesworthstone/ntm/internal/status"
+	"github.com/Dicklesworthstone/ntm/internal/tools"
 	"github.com/spf13/cobra"
 )
+
+// repoBeadsRoot is this repository's root when it carries a bead tracker.
+func repoBeadsRoot(t *testing.T) string {
+	t.Helper()
+	if _, err := exec.LookPath("bv"); err != nil {
+		t.Skip("bv not installed")
+	}
+	root, err := filepath.Abs(filepath.Join("..", ".."))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(root, ".beads")); err != nil {
+		t.Skip("repository has no .beads tracker")
+	}
+	return root
+}
+
+// TestWorkHistoryDecodesInstalledBV decodes this repository's bead history
+// from the installed bv: histories are keyed by bead ID and events carry
+// event_type.
+func TestWorkHistoryDecodesInstalledBV(t *testing.T) {
+	root := repoBeadsRoot(t)
+	out, err := tools.NewBVAdapter().GetHistory(context.Background(), root, "30d")
+	if err != nil {
+		t.Fatalf("GetHistory: %v", err)
+	}
+	var resp HistoryResponse
+	if err := json.Unmarshal(out, &resp); err != nil {
+		t.Fatalf("decode bv history: %v", err)
+	}
+	if resp.Stats.TotalBeads == 0 || len(resp.Histories) == 0 {
+		t.Fatalf("history stats=%+v histories=%d", resp.Stats, len(resp.Histories))
+	}
+	for id, bead := range resp.Histories {
+		if bead.BeadID != id {
+			t.Fatalf("history %q has bead_id %q", id, bead.BeadID)
+		}
+		for _, event := range bead.Events {
+			if event.EventType == "" || event.Timestamp.IsZero() {
+				t.Fatalf("history %q event missing type/time: %+v", id, event)
+			}
+		}
+	}
+}
+
+// TestWorkGraphTextFromInstalledBV extracts DOT and Mermaid from bv's JSON
+// envelope rather than printing the envelope.
+func TestWorkGraphTextFromInstalledBV(t *testing.T) {
+	root := repoBeadsRoot(t)
+	for format, prefix := range map[string]string{"dot": "digraph", "mermaid": "graph"} {
+		out, err := tools.NewBVAdapter().GetGraph(context.Background(), root, tools.BVGraphOptions{Format: format})
+		if err != nil {
+			t.Fatalf("GetGraph(%s): %v", format, err)
+		}
+		text, err := bvGraphText(out, format)
+		if err != nil || !strings.HasPrefix(strings.TrimSpace(text), prefix) {
+			t.Fatalf("bvGraphText(%s) = %.80q, %v; want %s text", format, text, err, prefix)
+		}
+	}
+}
+
+// TestWorkBurndownDecodesInstalledBV builds a two-issue sprint with the
+// installed br and git, and decodes bv's issue-based burndown for it.
+func TestWorkBurndownDecodesInstalledBV(t *testing.T) {
+	for _, tool := range []string{"bv", "br", "git"} {
+		if _, err := exec.LookPath(tool); err != nil {
+			t.Skipf("%s not installed", tool)
+		}
+	}
+	dir := t.TempDir()
+	run := func(name string, args ...string) []byte {
+		t.Helper()
+		cmd := exec.Command(name, args...)
+		cmd.Dir = dir
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			t.Fatalf("%s %s: %v\n%s", name, strings.Join(args, " "), err, out)
+		}
+		return out
+	}
+	create := func(title string) string {
+		t.Helper()
+		var created struct {
+			ID      string `json:"id"`
+			Created struct {
+				ID string `json:"id"`
+			} `json:"created"`
+		}
+		if err := json.Unmarshal(run("br", "create", "--title", title, "--type", "task", "--json"), &created); err != nil {
+			t.Fatalf("decode br create: %v", err)
+		}
+		if created.ID == "" {
+			created.ID = created.Created.ID
+		}
+		return created.ID
+	}
+	run("git", "init", "-q")
+	run("br", "init", "--prefix", "zz")
+	first, second := create("first task"), create("second task")
+	run("br", "close", first, "--reason", "done")
+	run("br", "sync", "--flush-only")
+	sprint, _ := json.Marshal(map[string]any{
+		"id": "sprint-1", "name": "Sprint 1",
+		"start_date": time.Now().UTC().AddDate(0, 0, -3).Format("2006-01-02T00:00:00Z"),
+		"end_date":   time.Now().UTC().AddDate(0, 0, 4).Format("2006-01-02T00:00:00Z"),
+		"bead_ids":   []string{first, second},
+	})
+	if err := os.WriteFile(filepath.Join(dir, ".beads", "sprints.jsonl"), append(sprint, '\n'), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	run("git", "add", "-A")
+	run("git", "-c", "user.email=t@example.com", "-c", "user.name=t", "commit", "-qm", "init")
+
+	out, err := tools.NewBVAdapter().GetBurndown(context.Background(), dir, "sprint-1")
+	if err != nil {
+		t.Fatalf("GetBurndown: %v", err)
+	}
+	var resp BurndownResponse
+	if err := json.Unmarshal(out, &resp); err != nil {
+		t.Fatalf("decode bv burndown: %v", err)
+	}
+	if resp.SprintName != "Sprint 1" || resp.TotalIssues != 2 || resp.CompletedIssues != 1 || resp.TotalDays == 0 {
+		t.Fatalf("burndown = %+v", resp)
+	}
+}
 
 func TestWorkCmd(t *testing.T) {
 	cmd := newWorkCmd()
