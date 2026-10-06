@@ -326,22 +326,6 @@ func TestPTAdapterCapabilities(t *testing.T) {
 	}
 }
 
-func TestPTAdapterHasCapability(t *testing.T) {
-	adapter := NewPTAdapter()
-
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-
-	// HasCapability should not panic
-	hasCap := adapter.HasCapability(ctx, CapRobotMode)
-
-	// If not installed, should return false
-	_, installed := adapter.Detect()
-	if !installed && hasCap {
-		t.Error("HasCapability returned true but pt is not installed")
-	}
-}
-
 func TestPTClassifyProcessWhenNotInstalled(t *testing.T) {
 	adapter := NewPTAdapter()
 

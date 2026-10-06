@@ -138,20 +138,6 @@ func (a *PTAdapter) Health(ctx context.Context) (*HealthStatus, error) {
 	}, nil
 }
 
-// HasCapability checks if pt has a specific capability
-func (a *PTAdapter) HasCapability(ctx context.Context, cap Capability) bool {
-	caps, err := a.Capabilities(ctx)
-	if err != nil {
-		return false
-	}
-	for _, c := range caps {
-		if c == cap {
-			return true
-		}
-	}
-	return false
-}
-
 // Info returns complete pt tool information
 func (a *PTAdapter) Info(ctx context.Context) (*ToolInfo, error) {
 	return a.BaseAdapter.Info(ctx, a)

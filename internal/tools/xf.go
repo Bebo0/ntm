@@ -129,20 +129,6 @@ func (a *XFAdapter) Health(ctx context.Context) (*HealthStatus, error) {
 	}, nil
 }
 
-// HasCapability checks if xf has a specific capability
-func (a *XFAdapter) HasCapability(ctx context.Context, cap Capability) bool {
-	caps, err := a.Capabilities(ctx)
-	if err != nil {
-		return false
-	}
-	for _, c := range caps {
-		if c == cap {
-			return true
-		}
-	}
-	return false
-}
-
 // Info returns complete xf tool information
 func (a *XFAdapter) Info(ctx context.Context) (*ToolInfo, error) {
 	return a.BaseAdapter.Info(ctx, a)

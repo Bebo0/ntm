@@ -43,8 +43,6 @@ func (a *probeCountingAdapter) Health(context.Context) (*HealthStatus, error) {
 	return &HealthStatus{Healthy: true, Message: "ok", LastChecked: time.Now()}, nil
 }
 
-func (a *probeCountingAdapter) HasCapability(context.Context, Capability) bool { return true }
-
 func (a *probeCountingAdapter) Info(ctx context.Context) (*ToolInfo, error) {
 	a.infos.Add(1)
 	path, installed := a.Detect()

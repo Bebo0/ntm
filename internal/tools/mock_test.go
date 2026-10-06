@@ -65,15 +65,6 @@ func (m *mockAdapter) Health(ctx context.Context) (*HealthStatus, error) {
 	}, nil
 }
 
-func (m *mockAdapter) HasCapability(ctx context.Context, cap Capability) bool {
-	for _, c := range m.caps {
-		if c == cap {
-			return true
-		}
-	}
-	return false
-}
-
 func (m *mockAdapter) Info(ctx context.Context) (*ToolInfo, error) {
 	health, _ := m.Health(ctx)
 	return &ToolInfo{

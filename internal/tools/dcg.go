@@ -104,20 +104,6 @@ func (a *DCGAdapter) Health(ctx context.Context) (*HealthStatus, error) {
 	}, nil
 }
 
-// HasCapability checks if dcg has a specific capability
-func (a *DCGAdapter) HasCapability(ctx context.Context, cap Capability) bool {
-	caps, err := a.Capabilities(ctx)
-	if err != nil {
-		return false
-	}
-	for _, c := range caps {
-		if c == cap {
-			return true
-		}
-	}
-	return false
-}
-
 // Info returns complete dcg tool information
 func (a *DCGAdapter) Info(ctx context.Context) (*ToolInfo, error) {
 	return a.BaseAdapter.Info(ctx, a)

@@ -149,20 +149,6 @@ func (a *CMAdapter) isDaemonRunning(ctx context.Context) bool {
 	return cm.NewPortClient(a.serverPort, "").Health(directCtx) == nil
 }
 
-// HasCapability checks if cm has a specific capability
-func (a *CMAdapter) HasCapability(ctx context.Context, cap Capability) bool {
-	caps, err := a.Capabilities(ctx)
-	if err != nil {
-		return false
-	}
-	for _, c := range caps {
-		if c == cap {
-			return true
-		}
-	}
-	return false
-}
-
 // Info returns complete cm tool information
 func (a *CMAdapter) Info(ctx context.Context) (*ToolInfo, error) {
 	return a.BaseAdapter.Info(ctx, a)

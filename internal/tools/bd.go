@@ -173,20 +173,6 @@ func (a *BDAdapter) Health(ctx context.Context) (*HealthStatus, error) {
 	}, nil
 }
 
-// HasCapability checks if bd has a specific capability
-func (a *BDAdapter) HasCapability(ctx context.Context, cap Capability) bool {
-	caps, err := a.Capabilities(ctx)
-	if err != nil {
-		return false
-	}
-	for _, c := range caps {
-		if c == cap {
-			return true
-		}
-	}
-	return false
-}
-
 // Info returns complete bd tool information
 func (a *BDAdapter) Info(ctx context.Context) (*ToolInfo, error) {
 	return a.BaseAdapter.Info(ctx, a)

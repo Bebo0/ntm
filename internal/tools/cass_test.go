@@ -8,20 +8,6 @@ import (
 	"testing"
 )
 
-func TestCASSAdapter_HasCapability(t *testing.T) {
-	t.Parallel()
-
-	a := NewCASSAdapter()
-	ctx := context.Background()
-
-	if !a.HasCapability(ctx, CapSearch) {
-		t.Fatalf("expected CapSearch capability")
-	}
-	if a.HasCapability(ctx, Capability("nope")) {
-		t.Fatalf("expected unknown capability to be false")
-	}
-}
-
 func TestCASSAdapter_HealthReportsStructuredUnhealthyDespiteNonZeroExit(t *testing.T) {
 	fakeDir := t.TempDir()
 	fakeCass := filepath.Join(fakeDir, "cass")

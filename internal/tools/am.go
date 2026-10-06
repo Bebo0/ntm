@@ -193,20 +193,6 @@ func (a *AMAdapter) isServerHealthy(ctx context.Context) bool {
 	return client.IsAvailableContext(ctx)
 }
 
-// HasCapability checks if Agent Mail has a specific capability
-func (a *AMAdapter) HasCapability(ctx context.Context, cap Capability) bool {
-	caps, err := a.Capabilities(ctx)
-	if err != nil {
-		return false
-	}
-	for _, c := range caps {
-		if c == cap {
-			return true
-		}
-	}
-	return false
-}
-
 // Info returns complete Agent Mail tool information
 func (a *AMAdapter) Info(ctx context.Context) (*ToolInfo, error) {
 	return a.BaseAdapter.Info(ctx, a)

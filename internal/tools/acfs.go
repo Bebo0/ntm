@@ -98,20 +98,6 @@ func (a *ACFSAdapter) Health(ctx context.Context) (*HealthStatus, error) {
 	}, nil
 }
 
-// HasCapability checks if acfs has a specific capability
-func (a *ACFSAdapter) HasCapability(ctx context.Context, cap Capability) bool {
-	caps, err := a.Capabilities(ctx)
-	if err != nil {
-		return false
-	}
-	for _, c := range caps {
-		if c == cap {
-			return true
-		}
-	}
-	return false
-}
-
 // Info returns complete acfs tool information
 func (a *ACFSAdapter) Info(ctx context.Context) (*ToolInfo, error) {
 	return a.BaseAdapter.Info(ctx, a)

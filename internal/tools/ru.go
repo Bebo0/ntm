@@ -65,11 +65,12 @@ func (a *RUAdapter) Capabilities(ctx context.Context) ([]Capability, error) {
 
 	cmd := exec.CommandContext(ctx, path, "--help")
 	cmd.WaitDelay = time.Second
-	var stdout bytes.Buffer
-	cmd.Stdout = &stdout
-	_ = cmd.Run() // Ignore error, just check output
+	var help bytes.Buffer
+	cmd.Stdout = &help
+	cmd.Stderr = &help // ru prints its help on stderr
+	_ = cmd.Run()      // Ignore error, just check output
 
-	output := stdout.String()
+	output := help.String()
 
 	// Check for known capabilities
 	if strings.Contains(output, "--json") {
@@ -115,20 +116,6 @@ func (a *RUAdapter) Health(ctx context.Context) (*HealthStatus, error) {
 		LastChecked: time.Now(),
 		Latency:     latency,
 	}, nil
-}
-
-// HasCapability checks if ru has a specific capability
-func (a *RUAdapter) HasCapability(ctx context.Context, cap Capability) bool {
-	caps, err := a.Capabilities(ctx)
-	if err != nil {
-		return false
-	}
-	for _, c := range caps {
-		if c == cap {
-			return true
-		}
-	}
-	return false
 }
 
 // Info returns complete ru tool information

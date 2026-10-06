@@ -962,9 +962,6 @@ func TestAllAdaptersHaveConsistentInterface(t *testing.T) {
 				t.Error("Health() returned nil")
 			}
 
-			// All adapters must implement HasCapability
-			_ = tc.adapter.HasCapability(ctx, CapRobotMode)
-
 			// All adapters must implement Info
 			info, err := tc.adapter.Info(ctx)
 			if err != nil {

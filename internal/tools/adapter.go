@@ -218,9 +218,6 @@ type Adapter interface {
 	// Health checks if the tool is functioning correctly
 	Health(ctx context.Context) (*HealthStatus, error)
 
-	// HasCapability checks if a specific capability is available
-	HasCapability(ctx context.Context, cap Capability) bool
-
 	// Info returns complete tool information
 	Info(ctx context.Context) (*ToolInfo, error)
 }

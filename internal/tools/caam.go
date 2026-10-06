@@ -183,20 +183,6 @@ func (a *CAAMAdapter) isResponsive(ctx context.Context) bool {
 	return stdout.Len() > 0 || stderr.Len() > 0
 }
 
-// HasCapability checks if caam has a specific capability
-func (a *CAAMAdapter) HasCapability(ctx context.Context, cap Capability) bool {
-	caps, err := a.Capabilities(ctx)
-	if err != nil {
-		return false
-	}
-	for _, c := range caps {
-		if c == cap {
-			return true
-		}
-	}
-	return false
-}
-
 // Info returns complete caam tool information
 func (a *CAAMAdapter) Info(ctx context.Context) (*ToolInfo, error) {
 	return a.BaseAdapter.Info(ctx, a)
