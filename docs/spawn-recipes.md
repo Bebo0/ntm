@@ -5,7 +5,7 @@ instead of merely recording its name. A preset supplies agent counts; do not
 combine it with explicit count flags.
 
 ```sh
-ntm --robot-spawn=myproject --spawn-preset=full-stack --spawn-dry-run
+ntm --robot-spawn=myproject --spawn-preset=full-stack --dry-run
 ```
 
 The same shared engine serves asynchronous jobs:

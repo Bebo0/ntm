@@ -569,7 +569,9 @@ func TestRecordAgentStatusRecordsTransitionsAndMarkers(t *testing.T) {
 	tracker := NewTimelineTracker(&TimelineConfig{PruneInterval: 0})
 	defer stopTrackerForTest(tracker)
 	pane := tmux.Pane{ID: "%3", Title: "proj__cc_2", Type: tmux.AgentClaude}
-	at := time.Date(2026, 10, 5, 4, 0, 0, 0, time.UTC)
+	// Inside the tracker's 24h retention window: a fixed date ages out of it
+	// and the zero-since reads below return nothing.
+	at := time.Now().UTC().Add(-time.Hour)
 	observe := func(s status.AgentState, offset time.Duration) bool {
 		return tracker.RecordAgentStatus("proj", pane, status.AgentStatus{PaneID: "%3", AgentType: "cc", State: s, UpdatedAt: at.Add(offset)})
 	}

@@ -23,7 +23,7 @@ Both checks apply when both are configured; unused capacity for one type does
 not override a configured limit for another.
 
 ```sh
-ntm --robot-spawn=myproject --spawn-cc=2 --spawn-cod=1 --spawn-dry-run
+ntm --robot-spawn=myproject --spawn-cc=2 --spawn-cod=1 --dry-run
 ```
 
 A mixed request is evaluated as one batch before session creation, pane splits,
