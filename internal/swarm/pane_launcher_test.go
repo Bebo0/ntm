@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Dicklesworthstone/ntm/internal/ratelimit"
 	"github.com/Dicklesworthstone/ntm/internal/tmux"
 )
 
@@ -465,5 +466,36 @@ func TestPaneLauncherChaining(t *testing.T) {
 	}
 	if launcher.CmdBuilder != builder {
 		t.Error("expected CmdBuilder to be set")
+	}
+}
+
+// Each pane's Codex cooldown comes from its own project's history: a swarm
+// spans projects, and one shared tracker gated on (and saved over) the wrong
+// project's state.
+func TestPaneLauncherCodexCooldownIsPerProject(t *testing.T) {
+	limited, clear := t.TempDir(), t.TempDir()
+	recorded := ratelimit.NewRateLimitTracker(limited)
+	recorded.RecordRateLimitWithCooldown("openai", "send", 60)
+	if err := recorded.SaveToDir(limited); err != nil {
+		t.Fatal(err)
+	}
+
+	launcher := NewPaneLauncher()
+	if got := launcher.codexCooldown(PaneSpec{AgentType: "cod", Project: limited}); got != 0 {
+		t.Fatalf("cooldown with RateLimitHistory off = %s, want 0", got)
+	}
+
+	launcher.RateLimitHistory = true
+	if got := launcher.codexCooldown(PaneSpec{AgentType: "cod", Project: limited}); got < 50*time.Second {
+		t.Fatalf("codex cooldown in the rate-limited project = %s, want the recorded ~60s", got)
+	}
+	if got := launcher.codexCooldown(PaneSpec{AgentType: "cod", Project: clear}); got != 0 {
+		t.Fatalf("codex cooldown in another project = %s, want 0", got)
+	}
+	if got := launcher.codexCooldown(PaneSpec{AgentType: "cc", Project: limited}); got != 0 {
+		t.Fatalf("claude cooldown = %s, want 0: only Codex is gated", got)
+	}
+	if _, err := os.Stat(filepath.Join(clear, ".ntm", "rate_limits.json")); !os.IsNotExist(err) {
+		t.Fatalf("checking a cooldown wrote history into the other project: %v", err)
 	}
 }

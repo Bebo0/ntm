@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/Dicklesworthstone/ntm/internal/agent"
@@ -45,8 +46,14 @@ type PaneLauncher struct {
 	// Logger for structured logging.
 	Logger *slog.Logger
 
-	// RateLimitTracker enables adaptive throttling for Codex.
-	RateLimitTracker *ratelimit.RateLimitTracker
+	// RateLimitHistory gates each Codex launch on its pane project's persisted
+	// OpenAI cooldown (<project>/.ntm/rate_limits.json, which that project's
+	// resilience monitor records) and counts the launch back into it, as ntm
+	// spawn and ntm add do for their project.
+	RateLimitHistory bool
+
+	trackersMu sync.Mutex
+	trackers   map[string]*ratelimit.RateLimitTracker
 }
 
 // NewPaneLauncher creates a new PaneLauncher with default settings.
@@ -58,7 +65,6 @@ func NewPaneLauncher() *PaneLauncher {
 		CDDelay:             100 * time.Millisecond,
 		ValidatePaths:       true,
 		Logger:              slog.Default(),
-		RateLimitTracker:    nil,
 	}
 }
 
@@ -71,7 +77,6 @@ func NewPaneLauncherWithClient(client *tmux.Client) *PaneLauncher {
 		CDDelay:             100 * time.Millisecond,
 		ValidatePaths:       true,
 		Logger:              slog.Default(),
-		RateLimitTracker:    nil,
 	}
 }
 
@@ -99,10 +104,45 @@ func (pl *PaneLauncher) WithLogger(logger *slog.Logger) *PaneLauncher {
 	return pl
 }
 
-// WithRateLimitTracker enables adaptive throttling based on rate limit history.
-func (pl *PaneLauncher) WithRateLimitTracker(tracker *ratelimit.RateLimitTracker) *PaneLauncher {
-	pl.RateLimitTracker = tracker
-	return pl
+// rateLimitTracker returns the persisted rate-limit tracker for a pane's
+// project, loading it on first use, or nil when RateLimitHistory is off. A
+// swarm spans projects and each keeps its own history: a single tracker would
+// gate on another project's cooldown and save its state over this one's.
+func (pl *PaneLauncher) rateLimitTracker(project string) *ratelimit.RateLimitTracker {
+	if !pl.RateLimitHistory || strings.TrimSpace(project) == "" {
+		return nil
+	}
+	pl.trackersMu.Lock()
+	defer pl.trackersMu.Unlock()
+	if tracker, ok := pl.trackers[project]; ok {
+		return tracker
+	}
+	tracker := ratelimit.NewRateLimitTracker(project)
+	if err := tracker.LoadFromDir(project); err != nil {
+		pl.logger().Warn("[PaneLauncher] rate_limit_history_unreadable",
+			"project", filepath.Base(project),
+			"error", err)
+	}
+	if pl.trackers == nil {
+		pl.trackers = make(map[string]*ratelimit.RateLimitTracker)
+	}
+	pl.trackers[project] = tracker
+	return tracker
+}
+
+// codexCooldown is how long a Codex launch into paneSpec's project must wait
+// for that project's recorded OpenAI cooldown; zero for other agents. The
+// cooldown is an absolute deadline, so once waited out it reads as zero and
+// later panes of the same project do not wait again.
+func (pl *PaneLauncher) codexCooldown(paneSpec PaneSpec) time.Duration {
+	if !isCodexProvider(paneSpec.AgentType) {
+		return 0
+	}
+	tracker := pl.rateLimitTracker(paneSpec.Project)
+	if tracker == nil {
+		return 0
+	}
+	return tracker.CooldownRemaining("openai")
 }
 
 // tmuxClient returns the configured tmux client or the default client.
@@ -335,13 +375,14 @@ func (pl *PaneLauncher) LaunchAgentInPane(ctx context.Context, sessionName strin
 		return result, fmt.Errorf("launch agent: %w", err)
 	}
 
-	if pl.RateLimitTracker != nil && isCodexProvider(paneSpec.AgentType) {
-		pl.RateLimitTracker.RecordSuccess("openai")
-		saveDir := paneSpec.Project
-		if err := pl.RateLimitTracker.SaveToDir(saveDir); err != nil {
-			pl.logger().Warn("[PaneLauncher] tracker_persist_failed",
-				"provider", "openai",
-				"error", err)
+	if isCodexProvider(paneSpec.AgentType) {
+		if tracker := pl.rateLimitTracker(paneSpec.Project); tracker != nil {
+			tracker.RecordSuccess("openai")
+			if err := tracker.SaveToDir(paneSpec.Project); err != nil {
+				pl.logger().Warn("[PaneLauncher] tracker_persist_failed",
+					"provider", "openai",
+					"error", err)
+			}
 		}
 	}
 
@@ -377,7 +418,6 @@ func (pl *PaneLauncher) LaunchSession(ctx context.Context, sessionSpec SessionSp
 		TotalPanes: len(sessionSpec.Panes),
 		Results:    make([]PaneLaunchResult, 0, len(sessionSpec.Panes)),
 	}
-	openAICooldownWaited := false
 
 	pl.logger().Info("[PaneLauncher] session_launch_start",
 		"session", sessionSpec.Name,
@@ -394,19 +434,16 @@ func (pl *PaneLauncher) LaunchSession(ctx context.Context, sessionSpec SessionSp
 			}
 		}
 
-		if pl.RateLimitTracker != nil && isCodexProvider(paneSpec.AgentType) && !openAICooldownWaited {
-			cooldown := pl.RateLimitTracker.CooldownRemaining("openai")
-			openAICooldownWaited = true
-			if cooldown > 0 {
-				pl.logger().Info("[PaneLauncher] codex_cooldown_wait",
-					"session", sessionSpec.Name,
-					"cooldown", ratelimit.FormatDelay(cooldown))
-				select {
-				case <-ctx.Done():
-					result.Duration = time.Since(start)
-					return result, ctx.Err()
-				case <-time.After(cooldown):
-				}
+		if cooldown := pl.codexCooldown(paneSpec); cooldown > 0 {
+			pl.logger().Info("[PaneLauncher] codex_cooldown_wait",
+				"session", sessionSpec.Name,
+				"project", filepath.Base(paneSpec.Project),
+				"cooldown", ratelimit.FormatDelay(cooldown))
+			select {
+			case <-ctx.Done():
+				result.Duration = time.Since(start)
+				return result, ctx.Err()
+			case <-time.After(cooldown):
 			}
 		}
 

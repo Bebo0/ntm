@@ -61,17 +61,3 @@ func TestNewPromptInjectorWithClient(t *testing.T) {
 // ReviewPromptGenerator.WithReviewLogger — 0% → 100%
 // ---------------------------------------------------------------------------
 
-// ---------------------------------------------------------------------------
-// PaneLauncher.WithRateLimitTracker — 0% → 100%
-// ---------------------------------------------------------------------------
-
-func TestPaneLauncher_WithRateLimitTracker(t *testing.T) {
-	t.Parallel()
-
-	pl := NewPaneLauncher()
-	result := pl.WithRateLimitTracker(nil)
-
-	if result != pl {
-		t.Error("expected WithRateLimitTracker to return same pointer for chaining")
-	}
-}

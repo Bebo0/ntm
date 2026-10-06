@@ -15,6 +15,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/Dicklesworthstone/ntm/internal/config"
+	"github.com/Dicklesworthstone/ntm/internal/ratelimit"
 	"github.com/Dicklesworthstone/ntm/internal/swarm"
 	"github.com/Dicklesworthstone/ntm/internal/tmux"
 )
@@ -156,6 +157,45 @@ func executeSwarmCommandJSON(t *testing.T, ctx context.Context, args ...string) 
 		t.Fatalf("stdout contains more than one JSON document: %q", raw)
 	}
 	return out, runErr
+}
+
+// ntm swarm must wait out a project's recorded OpenAI cooldown before it
+// launches Codex there, as spawn and add do. The launcher's gate was never
+// given a tracker, so a swarm launched Codex straight into an account the
+// project's resilience monitor had just seen rate-limited.
+func TestSwarmCommandWaitsOutProjectCodexCooldown(t *testing.T) {
+	project, dir := swarmCommandFixture(t)
+	// Record the cooldown the way the resilience monitor does.
+	monitorTracker := ratelimit.NewRateLimitTracker(project)
+	cooldown := monitorTracker.RecordRateLimitWithCooldown("openai", "send", 2)
+	deadline := time.Now().Add(cooldown)
+	if err := monitorTracker.SaveToDir(project); err != nil {
+		t.Fatal(err)
+	}
+
+	out, err := executeSwarmCommandJSON(t, context.Background(), "--projects", project, "--prompt", "implement the feature")
+	if err != nil || out.Execution == nil || out.Execution.Launch == nil || out.Execution.Launch.Successful != 2 {
+		t.Fatalf("launch failed: %v; response %+v", err, out)
+	}
+	codexLaunch, err := os.Stat(filepath.Join(dir, "%42-command"))
+	if err != nil {
+		t.Fatalf("codex was never launched: %v", err)
+	}
+	// File times come from the kernel's coarse clock; allow it a few ms.
+	if early := deadline.Sub(codexLaunch.ModTime()); early > 50*time.Millisecond {
+		t.Fatalf("codex launched %s before the recorded cooldown ended", early)
+	}
+
+	// The launch is counted into the same project's history without losing
+	// the recorded rate limit.
+	persisted := ratelimit.NewRateLimitTracker(project)
+	if err := persisted.LoadFromDir(project); err != nil {
+		t.Fatal(err)
+	}
+	state := persisted.GetProviderState("openai")
+	if state == nil || state.TotalRateLimits != 1 || state.TotalSuccesses != 1 {
+		t.Fatalf("persisted openai state = %+v, want the recorded rate limit plus one launch", state)
+	}
 }
 
 func TestSwarmCommandJSONLaunchExecutesAndReportsReadiness(t *testing.T) {

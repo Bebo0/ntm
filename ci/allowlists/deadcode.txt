@@ -392,7 +392,6 @@ internal/swarm/orchestrator.go:SessionOrchestrator.VerifyRemoteTmux	bd-ld4j2	rea
 internal/swarm/orchestrator.go:SessionOrchestrator.VerifyTmuxBinary	bd-ld4j2	reachable only through RTA's reflection rule at the 2026-10-05 baseline; wire it (surface + behavioral test) or delete it
 internal/swarm/pane_launcher.go:PaneLauncher.WithCDDelay	bd-ld4j2	reachable only through RTA's reflection rule at the 2026-10-05 baseline; wire it (surface + behavioral test) or delete it
 internal/swarm/pane_launcher.go:PaneLauncher.WithCmdBuilder	bd-ld4j2	reachable only through RTA's reflection rule at the 2026-10-05 baseline; wire it (surface + behavioral test) or delete it
-internal/swarm/pane_launcher.go:PaneLauncher.WithRateLimitTracker	bd-ld4j2	reachable only through RTA's reflection rule at the 2026-10-05 baseline; wire it (surface + behavioral test) or delete it
 internal/swarm/pane_launcher.go:PaneLauncher.WithValidatePaths	bd-ld4j2	reachable only through RTA's reflection rule at the 2026-10-05 baseline; wire it (surface + behavioral test) or delete it
 internal/swarm/prompt_injector.go:PromptInjector.GetTemplate	bd-ld4j2	reachable only through RTA's reflection rule at the 2026-10-05 baseline; wire it (surface + behavioral test) or delete it
 internal/swarm/prompt_injector.go:PromptInjector.InjectBatch	bd-ld4j2	reachable only through RTA's reflection rule at the 2026-10-05 baseline; wire it (surface + behavioral test) or delete it

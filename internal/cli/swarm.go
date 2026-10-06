@@ -542,6 +542,9 @@ func runSwarm(ctx context.Context, opts swarmOptions) (runErr error) {
 	}
 
 	paneLauncher := swarm.NewPaneLauncherWithClient(tmuxClient).WithLogger(logger)
+	// Honor each project's recorded OpenAI cooldown before launching Codex, as
+	// spawn and add do. Remote project paths do not name local history files.
+	paneLauncher.RateLimitHistory = opts.Remote == ""
 	if rotation != nil {
 		paneLauncher.BuildLaunchSpec = rotation.launchSpec
 	}
