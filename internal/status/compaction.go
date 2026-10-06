@@ -150,27 +150,6 @@ func compactionLineEvents(lines []string, agentType string) []compactionLineEven
 	return matches
 }
 
-// DetectCompaction is a stateless banner classifier. It cannot establish that a
-// banner is new; automatic recovery must use CompactionDetector.Check instead.
-func DetectCompaction(output string, agentType string) *CompactionEvent {
-	matches := compactionLineEvents(compactionLines(output), agentType)
-	if len(matches) == 0 {
-		return nil
-	}
-	event := matches[len(matches)-1].event
-	event.DetectedAt = time.Now()
-	return &event
-}
-
-// DetectCompactionWithPaneID classifies a capture and includes its pane identity.
-func DetectCompactionWithPaneID(output, agentType, paneID string) *CompactionEvent {
-	event := DetectCompaction(output, agentType)
-	if event != nil {
-		event.PaneID = paneID
-	}
-	return event
-}
-
 type compactionObservation struct {
 	agentType string
 	lines     []string

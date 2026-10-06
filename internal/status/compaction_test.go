@@ -8,6 +8,19 @@ import (
 	"time"
 )
 
+// DetectCompaction classifies one capture with no history: the banner patterns
+// alone. Production detection goes through CompactionDetector.Check, which
+// also establishes that a banner is new.
+func DetectCompaction(output string, agentType string) *CompactionEvent {
+	matches := compactionLineEvents(compactionLines(output), agentType)
+	if len(matches) == 0 {
+		return nil
+	}
+	event := matches[len(matches)-1].event
+	event.DetectedAt = time.Now()
+	return &event
+}
+
 func TestDetectCompaction_ClaudeExactMatch(t *testing.T) {
 	// Completion banners, not arbitrary prose about context management.
 	tests := []struct {
@@ -115,13 +128,6 @@ func TestDetectCompaction_NoFalsePositives(t *testing.T) {
 				}
 			}
 		})
-	}
-}
-
-func TestDetectCompactionWithPaneID(t *testing.T) {
-	event := DetectCompactionWithPaneID("Conversation compacted", "claude", "%5")
-	if event == nil || event.PaneID != "%5" {
-		t.Fatalf("event = %+v, want pane %%5", event)
 	}
 }
 
