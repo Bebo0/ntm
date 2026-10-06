@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 	"text/tabwriter"
@@ -12,6 +13,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/Dicklesworthstone/ntm/internal/cass"
+	"github.com/Dicklesworthstone/ntm/internal/config"
 	"github.com/Dicklesworthstone/ntm/internal/output"
 	"github.com/Dicklesworthstone/ntm/internal/robot"
 	"github.com/Dicklesworthstone/ntm/internal/tui/theme"
@@ -58,17 +60,32 @@ tuned for quick lookups.`,
   ntm search 'error handling' --limit=5 --json`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return runCassSearch(args[0], agent, session, since, limit, offset)
+			return runCassSearch(args[0], agent, sessionWorkspace(session), since, limit, offset)
 		},
 	}
 
-	cmd.Flags().StringVarP(&session, "session", "s", "", "Filter by session/project workspace")
+	cmd.Flags().StringVarP(&session, "session", "s", "", "Filter by ntm session (searches its project directory) or an absolute workspace path")
 	cmd.Flags().StringVarP(&agent, "agent", "a", "", "Filter by agent type (e.g. claude_code)")
 	cmd.Flags().StringVar(&since, "since", "", "Filter by time (e.g. 1h, 7d, 30d)")
 	cmd.Flags().IntVarP(&limit, "limit", "n", 20, "Max results to return")
 	cmd.Flags().IntVar(&offset, "offset", 0, "Result offset for pagination")
 
 	return cmd
+}
+
+// sessionWorkspace maps `ntm search --session` to the workspace path cass
+// filters on: cass matches --workspace against full project paths, so an ntm
+// session name becomes its project directory; an absolute path passes through.
+func sessionWorkspace(session string) string {
+	session = strings.TrimSpace(session)
+	if session == "" || filepath.IsAbs(session) {
+		return session
+	}
+	c := cfg
+	if c == nil {
+		c = config.Default()
+	}
+	return c.GetProjectDir(session)
 }
 
 func handleCassError(err error) error {

@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"testing"
@@ -139,6 +140,46 @@ func TestTruncateCassText_SmallMaxLenLoopFallthrough(t *testing.T) {
 	}
 	if !utf8.ValidString(got) {
 		t.Errorf("truncateCassText(emoji, 3) produced invalid UTF-8: %q", got)
+	}
+}
+
+// TestSessionWorkspaceMatchesCassWorkspaceFilter: cass filters --workspace by
+// full project path, so `ntm search --session=NAME` must pass the session's
+// project directory, not the bare name.
+func TestSessionWorkspaceMatchesCassWorkspaceFilter(t *testing.T) {
+	saved := cfg
+	t.Cleanup(func() { cfg = saved })
+	cfg = &config.Config{ProjectsBase: "/data/projects"}
+
+	for in, want := range map[string]string{
+		"frankentui":     "/data/projects/frankentui",
+		"frankentui--ui": "/data/projects/frankentui", // labels share the base project
+		"/abs/workspace": "/abs/workspace",
+		"":               "",
+	} {
+		if got := sessionWorkspace(in); got != want {
+			t.Errorf("sessionWorkspace(%q) = %q, want %q", in, got, want)
+		}
+	}
+
+	client := casspkg.NewClient()
+	if !client.IsInstalled() {
+		t.Skip("cass not installed")
+	}
+	matches := func(workspace string) int {
+		t.Helper()
+		resp, err := client.Search(context.Background(), casspkg.SearchOptions{Query: "*", Limit: 1, Since: "60d", Workspace: workspace})
+		if err != nil {
+			t.Fatalf("cass search --workspace=%q: %v", workspace, err)
+		}
+		return resp.TotalMatches
+	}
+	project := sessionWorkspace("frankentui")
+	if matches(project) == 0 {
+		t.Skipf("no sessions indexed under %s on this machine", project)
+	}
+	if n := matches("frankentui"); n != 0 {
+		t.Fatalf("cass matched %d hits for the bare name; the workspace contract changed", n)
 	}
 }
 
