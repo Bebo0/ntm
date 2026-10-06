@@ -510,9 +510,9 @@ func TestBuildInsightsFromResponse(t *testing.T) {
 		t.Parallel()
 		client := NewBVClient()
 		resp := &InsightsResponse{
-			Cycles: []Cycle{
-				{Nodes: []string{"auth", "db", "auth"}},
-				{Nodes: []string{"ui", "api", "ui"}},
+			Cycles: [][]string{
+				{"auth", "db", "auth"},
+				{"ui", "api", "ui"},
 			},
 			Bottlenecks: []NodeScore{
 				{ID: "db-migration", Value: 0.85},

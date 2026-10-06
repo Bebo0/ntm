@@ -9,12 +9,10 @@ type InsightsResponse struct {
 	Keystones   []NodeScore `json:"Keystones,omitempty"`
 	Hubs        []NodeScore `json:"Hubs,omitempty"`
 	Authorities []NodeScore `json:"Authorities,omitempty"`
-	Cycles      []Cycle     `json:"Cycles,omitempty"`
-}
-
-// Cycle represents a dependency cycle
-type Cycle struct {
-	Nodes []string `json:"nodes"`
+	// Cycles is bv's analysis.Insights.Cycles: each cycle is its list of
+	// issue IDs. Decoding it as objects failed the whole response whenever
+	// the graph had a cycle.
+	Cycles [][]string `json:"Cycles,omitempty"`
 }
 
 // NodeScore represents a node with its metric score

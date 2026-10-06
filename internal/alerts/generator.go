@@ -468,7 +468,7 @@ func (g *Generator) checkDependencyCycles() *Alert {
 	if len(insights.Cycles) > 0 {
 		cycleNodes := make([]string, 0)
 		for _, cycle := range insights.Cycles {
-			cycleNodes = append(cycleNodes, strings.Join(cycle.Nodes, " -> "))
+			cycleNodes = append(cycleNodes, strings.Join(cycle, " -> "))
 		}
 
 		return &Alert{

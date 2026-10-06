@@ -1,6 +1,11 @@
 package bv
 
 import (
+	"encoding/json"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -184,8 +189,8 @@ func TestBVClientBuildInsightsFromResponse(t *testing.T) {
 	client := NewBVClient()
 
 	resp := &InsightsResponse{
-		Cycles: []Cycle{
-			{Nodes: []string{"A", "B", "C"}},
+		Cycles: [][]string{
+			{"A", "B", "C"},
 		},
 	}
 
@@ -193,6 +198,51 @@ func TestBVClientBuildInsightsFromResponse(t *testing.T) {
 
 	if insights == nil {
 		t.Fatal("expected non-nil insights")
+	}
+}
+
+// bvCycleInsights is from real `bv --robot-insights` output (bv v0.25.2) on a
+// two-issue graph where each issue blocks the other: bv's Insights.Cycles is
+// a list of ID lists.
+const bvCycleInsights = `{"Bottlenecks":[{"ID":"cy-a","Value":0}],"Cycles":[["cy-a","cy-b","cy-a"]]}`
+
+// ntm decoded Cycles as objects, so --robot-insights failed to parse whenever
+// the graph had a cycle: --robot-graph errored and the cycle alert never fired.
+func TestInsightsResponseDecodesBVCycles(t *testing.T) {
+	var resp InsightsResponse
+	if err := json.Unmarshal([]byte(bvCycleInsights), &resp); err != nil {
+		t.Fatalf("decode bv insights: %v", err)
+	}
+	if len(resp.Cycles) != 1 || strings.Join(resp.Cycles[0], ",") != "cy-a,cy-b,cy-a" {
+		t.Fatalf("Cycles = %v, want [[cy-a cy-b cy-a]]", resp.Cycles)
+	}
+	if insights := NewBVClient().buildInsightsFromResponse(&resp, ""); len(insights.Cycles) != 1 {
+		t.Fatalf("insights cycles = %v, want the bv cycle", insights.Cycles)
+	}
+}
+
+// The live contract: run the installed bv on a workspace with a cycle.
+func TestGetInsightsReadsCyclesFromInstalledBV(t *testing.T) {
+	if _, err := exec.LookPath("bv"); err != nil {
+		t.Skip("bv not installed")
+	}
+	dir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(dir, ".beads"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	issue := func(id, blockedBy string) string {
+		return `{"id":"` + id + `","title":"` + id + `","status":"open","priority":2,"issue_type":"task","created_at":"2026-10-01T00:00:00Z","updated_at":"2026-10-01T00:00:00Z","dependencies":[{"issue_id":"` + id + `","depends_on_id":"` + blockedBy + `","type":"blocks","created_at":"2026-10-01T00:00:00Z"}]}`
+	}
+	jsonl := issue("cy-a", "cy-b") + "\n" + issue("cy-b", "cy-a") + "\n"
+	if err := os.WriteFile(filepath.Join(dir, ".beads", "issues.jsonl"), []byte(jsonl), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	resp, err := GetInsights(dir)
+	if err != nil {
+		t.Fatalf("GetInsights with a cyclic graph: %v", err)
+	}
+	if len(resp.Cycles) == 0 {
+		t.Fatalf("Cycles = %v, want the cy-a/cy-b cycle", resp.Cycles)
 	}
 }
 

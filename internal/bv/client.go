@@ -415,9 +415,7 @@ func (c *BVClient) buildInsightsFromResponse(resp *InsightsResponse, workDir str
 	insights := &Insights{}
 
 	// Extract cycles
-	for _, cycle := range resp.Cycles {
-		insights.Cycles = append(insights.Cycles, cycle.Nodes)
-	}
+	insights.Cycles = append(insights.Cycles, resp.Cycles...)
 
 	// Extract bottlenecks
 	for _, b := range resp.Bottlenecks {
