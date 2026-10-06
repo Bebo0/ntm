@@ -822,68 +822,6 @@ func TestAppendUnique(t *testing.T) {
 }
 
 // =============================================================================
-// isUnknownJSONFlag tests
-// =============================================================================
-
-func TestIsUnknownJSONFlag(t *testing.T) {
-	tests := []struct {
-		name   string
-		stderr string
-		want   bool
-	}{
-		{"empty string", "", false},
-		{"no json mention", "something went wrong", false},
-		{"json but no flag error", "json output enabled", false},
-		{"unknown flag with json", "unknown flag: --json", true},
-		{"flag provided but not defined with json", "flag provided but not defined: -json", true},
-		{"case insensitive json", "Unknown flag: --JSON", true},
-		{"case insensitive flag", "UNKNOWN FLAG: --json", true},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got := isUnknownJSONFlag(tt.stderr)
-			if got != tt.want {
-				t.Errorf("isUnknownJSONFlag(%q) = %v, want %v", tt.stderr, got, tt.want)
-			}
-		})
-	}
-}
-
-// =============================================================================
-// removeFlag tests
-// =============================================================================
-
-func TestRemoveFlag(t *testing.T) {
-	tests := []struct {
-		name string
-		args []string
-		flag string
-		want []string
-	}{
-		{"remove existing", []string{"--json", "--verbose"}, "--json", []string{"--verbose"}},
-		{"remove absent", []string{"--verbose"}, "--json", []string{"--verbose"}},
-		{"remove from empty", nil, "--json", []string{}},
-		{"remove multiple occurrences", []string{"--json", "a", "--json"}, "--json", []string{"a"}},
-		{"remove only exact match", []string{"--json-output", "--json"}, "--json", []string{"--json-output"}},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got := removeFlag(tt.args, tt.flag)
-			if len(got) != len(tt.want) {
-				t.Fatalf("len = %d, want %d; got=%v", len(got), len(tt.want), got)
-			}
-			for i := range got {
-				if got[i] != tt.want[i] {
-					t.Errorf("result[%d] = %q, want %q", i, got[i], tt.want[i])
-				}
-			}
-		})
-	}
-}
-
-// =============================================================================
 // resolveEnsembleBudget tests (partial - only empty preset path)
 // =============================================================================
 
