@@ -739,6 +739,16 @@ func TestHandleCASSStatus(t *testing.T) {
 	if _, ok := resp["installed"]; !ok {
 		t.Error("expected 'installed' field")
 	}
+	// cass status carries no version and no index byte size: the version comes
+	// from `cass --version` and the size from database.db_bytes.
+	if resp["installed"] == true {
+		if v, _ := resp["version"].(string); v == "" {
+			t.Errorf("version = %v, want the installed cass version", resp["version"])
+		}
+		if size, _ := resp["database_size"].(float64); size <= 0 {
+			t.Errorf("database_size = %v, want cass's database.db_bytes", resp["database_size"])
+		}
+	}
 }
 
 func TestHandleCASSCapabilities(t *testing.T) {

@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"slices"
 	"strings"
@@ -106,6 +107,34 @@ func TestTimelineReadsInstalledCass(t *testing.T) {
 	}
 	if byDay.TotalSessions != grouped {
 		t.Fatalf("Timeline(day): total=%d but groups hold %d sessions", byDay.TotalSessions, grouped)
+	}
+}
+
+// TestStatusAndVersionReadInstalledCass: `cass status --json` reports the
+// database size as database.db_bytes and has no version, which comes from
+// `cass --version`.
+func TestStatusAndVersionReadInstalledCass(t *testing.T) {
+	client := NewClient()
+	if !client.IsInstalled() {
+		t.Skip("cass not installed")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+	defer cancel()
+
+	version, err := client.Version(ctx)
+	if err != nil || !regexp.MustCompile(`^\d+\.\d+\.\d+`).MatchString(version) {
+		t.Fatalf("Version() = %q, %v; want a semver", version, err)
+	}
+
+	status, err := client.Status(ctx)
+	if err != nil {
+		t.Fatalf("Status() error: %v", err)
+	}
+	if status.Database.Exists && status.Database.SizeMB() <= 0 {
+		t.Fatalf("database exists but size is %v MB (db_bytes not read)", status.Database.SizeMB())
+	}
+	if status.Index.Exists && status.Index.IsReady() && status.Index.Documents <= 0 {
+		t.Fatalf("ready index reports %d documents", status.Index.Documents)
 	}
 }
 

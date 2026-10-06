@@ -90,7 +90,7 @@ func GetCASSStatus() (*CASSStatusOutput, error) {
 
 	if err == nil {
 		output.Healthy = status.Healthy
-		output.Index.Exists = true
+		output.Index.Exists = status.Index.Exists
 		output.Index.Fresh = status.Index.Healthy
 		output.Index.LastIndexedAt = status.LastIndexedAt.UnixMilli()
 		output.Index.CountsSkipped = status.Database.CountsSkipped

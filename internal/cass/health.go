@@ -4,8 +4,25 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"time"
 )
+
+// Version returns the installed cass version, e.g. "0.10.0" from
+// `cass --version`; `cass status` does not report it.
+func (c *Client) Version(ctx context.Context) (string, error) {
+	if !c.IsInstalled() {
+		return "", ErrNotInstalled
+	}
+	ctx, cancel := context.WithTimeout(ctx, c.timeout)
+	defer cancel()
+
+	output, err := c.executor.Run(ctx, "--version")
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(string(output)), "cass")), nil
+}
 
 // Health performs CASS's dedicated health check.
 func (c *Client) Health(ctx context.Context) (*StatusResponse, error) {

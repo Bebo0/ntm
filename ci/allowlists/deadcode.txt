@@ -57,7 +57,6 @@ internal/cass/search.go:Client.SearchForContext	bd-ld4j2	reachable only through 
 internal/cass/search.go:Client.SearchQuick	bd-ld4j2	reachable only through RTA's reflection rule at the 2026-10-05 baseline; wire it (surface + behavioral test) or delete it
 internal/cass/types.go:Capabilities.HasConnector	bd-ld4j2	reachable only through RTA's reflection rule at the 2026-10-05 baseline; wire it (surface + behavioral test) or delete it
 internal/cass/types.go:Capabilities.HasFeature	bd-ld4j2	reachable only through RTA's reflection rule at the 2026-10-05 baseline; wire it (surface + behavioral test) or delete it
-internal/cass/types.go:DBInfo.SizeMB	bd-ld4j2	reachable only through RTA's reflection rule at the 2026-10-05 baseline; wire it (surface + behavioral test) or delete it
 internal/cass/types.go:SearchResponse.HasResults	bd-ld4j2	reachable only through RTA's reflection rule at the 2026-10-05 baseline; wire it (surface + behavioral test) or delete it
 internal/caut/models.go:ProviderPayload.GetAccountEmail	bd-ld4j2	reachable only through RTA's reflection rule at the 2026-10-05 baseline; wire it (surface + behavioral test) or delete it
 internal/caut/models.go:ProviderPayload.GetWindowMinutes	bd-ld4j2	reachable only through RTA's reflection rule at the 2026-10-05 baseline; wire it (surface + behavioral test) or delete it

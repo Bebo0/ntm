@@ -155,12 +155,24 @@ func runCassStatus() error {
 	}
 
 	fmt.Printf("  Healthy:        %s\n", healthyMark)
-	fmt.Printf("  Conversations:  %d\n", status.Conversations)
-	fmt.Printf("  Messages:       %d\n", status.Messages)
+	if status.Database.CountsSkipped {
+		fmt.Printf("  Conversations:  not counted (cass skipped the database counts)\n")
+	} else {
+		fmt.Printf("  Conversations:  %d\n", status.Conversations)
+		fmt.Printf("  Messages:       %d\n", status.Messages)
+	}
 	fmt.Printf("  Last Indexed:   %s\n", formatAge(status.LastIndexedAt.Time))
-	fmt.Printf("  Index Size:     %.1f MB\n", status.Index.SizeMB())
+	fmt.Printf("  Documents:      %d\n", status.Index.Documents)
+	fmt.Printf("  Database Size:  %.1f MB\n", status.Database.SizeMB())
+	if status.Index.SizeBytes > 0 { // legacy cass reports the index size
+		fmt.Printf("  Index Size:     %.1f MB\n", status.Index.SizeMB())
+	}
 	if status.Pending.HasPending() {
-		fmt.Printf("  Pending:        %d sessions, %d files\n", status.Pending.Sessions, status.Pending.Files)
+		fmt.Printf("  Pending:        %d sessions", status.Pending.Sessions)
+		if status.Pending.Files > 0 {
+			fmt.Printf(", %d files", status.Pending.Files)
+		}
+		fmt.Println()
 	}
 
 	return nil

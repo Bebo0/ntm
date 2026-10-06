@@ -195,7 +195,7 @@ type CASSStatusResponse struct {
 	Installed     bool   `json:"installed"`
 	Healthy       bool   `json:"healthy"`
 	Version       string `json:"version,omitempty"`
-	IndexSize     int64  `json:"index_size,omitempty"`
+	DatabaseSize  int64  `json:"database_size,omitempty"`
 	DocCount      int64  `json:"doc_count,omitempty"`
 	LastIndexed   string `json:"last_indexed,omitempty"`
 	NeedsReindex  bool   `json:"needs_reindex,omitempty"`
@@ -286,14 +286,13 @@ func (s *Server) handleCASSStatus(w http.ResponseWriter, r *http.Request) {
 		defer cancel()
 
 		// Get full status
+		if version, err := client.Version(ctx); err == nil {
+			status.Version = version
+		}
 		if statusResp, err := client.Status(ctx); err == nil {
 			status.Healthy = statusResp.IsHealthy()
-			status.Version = statusResp.Version
-			status.IndexSize = statusResp.Index.SizeBytes
-			status.DocCount = statusResp.Index.DocCount
-			if status.DocCount == 0 {
-				status.DocCount = statusResp.Index.Documents
-			}
+			status.DatabaseSize = statusResp.Database.SizeBytes
+			status.DocCount = statusResp.Index.Documents
 			lastIndexedAt := statusResp.Index.EffectiveLastIndexedAt(statusResp.LastIndexedAt)
 			if !lastIndexedAt.IsZero() {
 				status.LastIndexed = lastIndexedAt.Format(time.RFC3339)
@@ -310,7 +309,7 @@ func (s *Server) handleCASSStatus(w http.ResponseWriter, r *http.Request) {
 		"installed":      status.Installed,
 		"healthy":        status.Healthy,
 		"version":        status.Version,
-		"index_size":     status.IndexSize,
+		"database_size":  status.DatabaseSize,
 		"doc_count":      status.DocCount,
 		"last_indexed":   status.LastIndexed,
 		"needs_reindex":  status.NeedsReindex,
