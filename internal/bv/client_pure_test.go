@@ -296,6 +296,46 @@ func TestFileResponsesDecodeBVShapes(t *testing.T) {
 	}
 }
 
+// br blocked --json answers in an {"issues":[...]} envelope; decoding it as a
+// bare array left the recovery prompt's and --robot-health's Top Blockers
+// empty. Run the installed br on a workspace with one blocked issue.
+func TestGetDependencyContextReadsBrBlockedEnvelope(t *testing.T) {
+	if _, err := exec.LookPath("br"); err != nil {
+		t.Skip("br not installed")
+	}
+	dir := t.TempDir()
+	brRun := func(args ...string) string {
+		t.Helper()
+		cmd := exec.Command("br", args...)
+		cmd.Dir = dir
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			t.Fatalf("br %v: %v: %s", args, err, out)
+		}
+		return strings.TrimSpace(string(out))
+	}
+	brRun("init", "--prefix", "zz")
+	newID := func(title string) string {
+		var created struct {
+			ID string `json:"id"`
+		}
+		if err := json.Unmarshal([]byte(brRun("create", "--title", title, "--type", "task", "--json")), &created); err != nil || created.ID == "" {
+			t.Fatalf("br create %q: %v", title, err)
+		}
+		return created.ID
+	}
+	blocked, blocker := newID("Blocked work"), newID("Blocker")
+	brRun("dep", "add", blocked, blocker)
+
+	ctx, err := GetDependencyContext(dir, 5)
+	if err != nil {
+		t.Fatalf("GetDependencyContext: %v", err)
+	}
+	if len(ctx.TopBlockers) != 1 || ctx.TopBlockers[0].ID != blocked || len(ctx.TopBlockers[0].BlockedBy) != 1 || ctx.TopBlockers[0].BlockedBy[0] != blocker {
+		t.Fatalf("TopBlockers = %+v, want %s blocked by %s", ctx.TopBlockers, blocked, blocker)
+	}
+}
+
 // The live contract: run the installed bv on a workspace with a cycle.
 func TestGetInsightsReadsCyclesFromInstalledBV(t *testing.T) {
 	if _, err := exec.LookPath("bv"); err != nil {

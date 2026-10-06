@@ -724,13 +724,15 @@ func GetDependencyContext(dir string, n int) (*DependencyContext, error) {
 	// Get blocked tasks (what is blocking progress)
 	blockedOutput, err := RunBd(dir, "blocked", "--json")
 	if err == nil {
-		var blocked []struct {
+		// br blocked --json answers {"issues":[...],"total":...}; decoding it
+		// as a bare array failed silently and left TopBlockers empty.
+		blocked, decodeErr := UnmarshalBdList[struct {
 			ID             string   `json:"id"`
 			Title          string   `json:"title"`
 			BlockedByCount int      `json:"blocked_by_count"`
 			BlockedBy      []string `json:"blocked_by"`
-		}
-		if json.Unmarshal([]byte(blockedOutput), &blocked) == nil {
+		}](blockedOutput)
+		if decodeErr == nil {
 			for _, task := range blocked {
 				if len(ctx.TopBlockers) >= n {
 					break
@@ -2202,13 +2204,23 @@ func beadClaimArgs(beadID, actor string) []string {
 }
 
 func parseBeadClaimOutput(output string) (BeadClaimResult, error) {
-	var rows []struct {
+	type claimRow struct {
 		ID     string `json:"id"`
 		Title  string `json:"title"`
 		Status string `json:"status"`
 	}
-	if err := json.Unmarshal([]byte(strings.TrimSpace(output)), &rows); err != nil {
-		return BeadClaimResult{}, fmt.Errorf("parse atomic claim output: %w", err)
+	var rows []claimRow
+	trimmed := strings.TrimSpace(output)
+	if err := json.Unmarshal([]byte(trimmed), &rows); err != nil {
+		// Under a workflow capacity soft limit br wraps the rows as
+		// {"updated":[...],"warnings":[...]}; the claim itself succeeded.
+		var envelope struct {
+			Updated []claimRow `json:"updated"`
+		}
+		if envErr := json.Unmarshal([]byte(trimmed), &envelope); envErr != nil || envelope.Updated == nil {
+			return BeadClaimResult{}, fmt.Errorf("parse atomic claim output: %w", err)
+		}
+		rows = envelope.Updated
 	}
 	if len(rows) != 1 {
 		return BeadClaimResult{}, fmt.Errorf("atomic claim returned %d rows, want 1", len(rows))
