@@ -369,6 +369,48 @@ func TestHandleCreateBeadFromFindingSuccess(t *testing.T) {
 	}
 }
 
+// br names IDs with a project-derived prefix ("zz-" for a project whose beads
+// prefix is zz). Its text output could not be parsed for such IDs, so the bead
+// was created, the request returned 500 and every retry made another bead.
+func TestHandleCreateBeadFromFindingReadsProjectPrefixedID(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("stub br uses sh")
+	}
+
+	resetScannerStoreForTest()
+	addTestFinding("scan-1", "finding-1", scanner.SeverityWarning, "main.go", "security", false, "")
+	writeStubBr(t, "zz-t9a")
+
+	srv, _ := setupTestServer(t)
+	srv.projectDir = t.TempDir()
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/scanner/findings/finding-1/create-bead", strings.NewReader(`{}`))
+	rctx := chi.NewRouteContext()
+	rctx.URLParams.Add("id", "finding-1")
+	req = req.WithContext(context.WithValue(req.Context(), chi.RouteCtxKey, rctx))
+	rec := httptest.NewRecorder()
+
+	srv.handleCreateBeadFromFinding(rec, req)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("status=%d body=%s, want %d", rec.Code, rec.Body.String(), http.StatusCreated)
+	}
+	if finding, ok := scannerStore.GetFinding("finding-1"); !ok || finding.BeadID != "zz-t9a" {
+		t.Fatalf("finding = %+v, want it linked to zz-t9a", finding)
+	}
+}
+
+func TestExtractBeadIDReadsBrJSONShapes(t *testing.T) {
+	// Real `br create --json` output (pretty-printed) for a zz-prefixed
+	// project, and br's capacity soft-limit envelope.
+	created := "{\n  \"id\": \"zz-t9a\",\n  \"title\": \"Scanner finding\",\n  \"status\": \"open\"\n}"
+	if got := extractBeadID(created); got != "zz-t9a" {
+		t.Fatalf("extractBeadID(created) = %q, want zz-t9a", got)
+	}
+	capacity := `{"created":{"id":"zz-t9a","title":"Scanner finding"},"warnings":["open issue soft limit reached"]}`
+	if got := extractBeadID(capacity); got != "zz-t9a" {
+		t.Fatalf("extractBeadID(capacity envelope) = %q, want zz-t9a", got)
+	}
+}
+
 func TestExtractBeadID(t *testing.T) {
 	t.Run("json object", func(t *testing.T) {
 		if got := extractBeadID(`{"id":"bd-123","title":"Created"}`); got != "bd-123" {
@@ -713,6 +755,11 @@ case "$cmd1" in
           ;;
       esac
     done
+    # Like real br: JSON only with --json, otherwise "✓ Created <id>: <title>".
+    case " $* " in
+      *" --json "*) ;;
+      *) echo "✓ Created ` + beadID + `: Created"; exit 0 ;;
+    esac
     echo "{\"id\":\"` + beadID + `\",\"title\":\"Created\",\"labels\":[\"api\",\"triaged\"],\"dependencies\":[{\"issue_id\":\"` + beadID + `\",\"depends_on_id\":\"bd-dep\",\"type\":\"blocks\"}]}"
     exit 0
     ;;

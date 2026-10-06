@@ -853,7 +853,10 @@ func (s *Server) handleCreateBeadFromFinding(w http.ResponseWriter, r *http.Requ
 
 	// Create bead via br CLI
 	labels := append([]string{"bug", "scanner"}, req.Labels...)
-	args := []string{"--title", title, "--priority", priority, "--type", "bug"}
+	// --json: br's text output ("✓ Created <id>: ...") names the ID with a
+	// project-derived prefix that cannot be recognized reliably, and an
+	// unrecognized ID left the created bead orphaned and duplicated on retry.
+	args := []string{"--title", title, "--priority", priority, "--type", "bug", "--json"}
 	if len(labels) > 0 {
 		args = append(args, "--labels", strings.Join(labels, ","))
 	}
@@ -1145,6 +1148,17 @@ func extractBeadID(output string) string {
 	}
 	if err := json.Unmarshal([]byte(output), &single); err == nil && single.ID != "" {
 		return single.ID
+	}
+
+	// Under a capacity soft limit br wraps the record:
+	// {"created":{...},"warnings":[...]}.
+	var envelope struct {
+		Created struct {
+			ID string `json:"id"`
+		} `json:"created"`
+	}
+	if err := json.Unmarshal([]byte(output), &envelope); err == nil && envelope.Created.ID != "" {
+		return envelope.Created.ID
 	}
 
 	var list []struct {
