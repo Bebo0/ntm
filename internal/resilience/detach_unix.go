@@ -3,6 +3,7 @@
 package resilience
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -12,18 +13,37 @@ import (
 func monitorPlatformSupported() error { return nil }
 
 // Every caller opens its own descriptor. The lock is held until close and
-// released by the kernel on process exit; its path is never unlinked.
+// released by the kernel on process exit; its path is never unlinked. This
+// primitive also protects short manifest mutations, on a separate lock path.
 func tryMonitorLock(path string) (*os.File, error) {
-	file, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0600)
+	fd, err := syscall.Open(path, syscall.O_CREAT|syscall.O_RDWR|syscall.O_CLOEXEC|syscall.O_NOFOLLOW|syscall.O_NONBLOCK, 0600)
 	if err != nil {
 		return nil, err
 	}
-	if err := syscall.Flock(int(file.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+	file := os.NewFile(uintptr(fd), path)
+	info, err := file.Stat()
+	if err != nil {
 		_ = file.Close()
-		if err == syscall.EWOULDBLOCK || err == syscall.EAGAIN {
+		return nil, err
+	}
+	stat, ok := info.Sys().(*syscall.Stat_t)
+	if !info.Mode().IsRegular() || !ok || stat.Uid != uint32(os.Geteuid()) || stat.Nlink != 1 || info.Mode().Perm()&0077 != 0 {
+		_ = file.Close()
+		return nil, errors.New("monitor/manifest lock must be a private, owned regular file with one link")
+	}
+	if err := syscall.Flock(fd, syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+		_ = file.Close()
+		if errors.Is(err, syscall.EWOULDBLOCK) || errors.Is(err, syscall.EAGAIN) || errors.Is(err, syscall.EINTR) {
 			return nil, ErrSessionMonitorOwned
 		}
 		return nil, fmt.Errorf("lock session monitor: %w", err)
+	}
+	// A waiter must not acquire an unlinked/replaced inode and then mistake
+	// it for the rendezvous currently used by other processes.
+	current, err := os.Lstat(path)
+	if err != nil || !current.Mode().IsRegular() || !os.SameFile(info, current) {
+		_ = file.Close()
+		return nil, errors.New("monitor/manifest lock path changed while acquiring ownership")
 	}
 	return file, nil
 }

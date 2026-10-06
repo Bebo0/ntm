@@ -76,3 +76,44 @@ This change does not add durable exactly-once delivery, remote monitor support,
 provider quota handling, or an automatic retry of uncertain sends. The dashboard
 retains local compaction observations; it does not mirror the monitor's recovery
 history. Existing manual recovery APIs still use the shared delivery manager.
+
+## Durable restart metadata during fleet changes
+
+The session manifest also holds the per-agent command, model and account-profile
+binding used by crash recovery. `ntm add` (including scale-up) writes each agent
+through `UpsertAgentConfig`. Concurrent processes now serialize the complete
+read/modify/write, not merely the final rename. Each updater reads the latest
+manifest after taking ownership and preserves unrelated agents plus the session's
+project, auto-restart policy, monitor generation and account-rotation settings.
+A newly created manifest still leaves automatic restart disabled.
+
+Save, per-agent update and delete use the same per-session mutation fence:
+`<ManifestDir>/<session>.mutation.lock`, under the existing XDG data directory.
+This is separate from the monitor's lifetime lease and from fleet-admission locks.
+It works even when spawn count limits are disabled. An idle monitor does not block
+manifest edits, and different sessions do not serialize behind one global mutex.
+Readers remain lock-free and see complete versions through the existing atomic
+writer; successful writes continue to synchronize the file and parent directory.
+
+Lock acquisition waits at most five seconds; an unavailable or unsafe lock fails
+the operation rather than writing unlocked. The shared Unix lock primitive rejects
+symlinks, FIFOs, directories, hard links, foreign-owned files and group/world-accessible
+files, and marks descriptors close-on-exec. A process exit releases ownership.
+Delete removes the JSON manifest but keeps the lock inode, so later recreations
+still rendezvous with existing waiters. Do not remove or replace live lock files.
+These guarantees require cooperating Unix processes sharing a manifest directory;
+unsupported platforms reject mutations instead of claiming process-shared locking.
+
+Per-agent updates refuse malformed or null JSON, a manifest naming another session,
+and duplicate records for the target pane without replacing the evidence. Failures
+propagate through add's existing partial-mutation reporting: a launched pane may
+still exist, and an error is not permission to blindly repeat the launch.
+
+`SaveManifest` is intentionally a complete-snapshot replacement, not a merge or
+compare-and-swap for snapshots read earlier. A caller explicitly saving an old
+whole snapshot can still replace newer rows; individual-agent changes must use
+`UpsertAgentConfig`. A delete ordered before a new upsert may be followed by a new
+manifest. This fence does not establish tmux session identity or prevent manual
+filesystem edits, and it does not change the process-local compaction reminder
+history described above. File I/O after acquisition is synchronous; the five-second
+budget bounds lock waiting, not a stalled filesystem's write or fsync.

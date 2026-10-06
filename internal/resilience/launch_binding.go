@@ -10,7 +10,6 @@ import (
 	"os"
 	"os/exec"
 	"strings"
-	"sync"
 	"time"
 	"unicode"
 
@@ -343,44 +342,4 @@ func PrepareAgentLaunchSpec(ctx context.Context, cfg *config.Config, spec tmux.A
 		return "", err
 	}
 	return plan.Prepare(ctx, projectDir, session, paneIndex)
-}
-
-var manifestMutationMu sync.Mutex
-
-// UpsertAgentConfig persists restart metadata for an agent added to an existing
-// session. It updates only the typed manifest row and never reads pane
-// environment or process state.
-func UpsertAgentConfig(session, projectDir string, agent AgentConfig) error {
-	if strings.TrimSpace(agent.PaneID) == "" {
-		return errors.New("cannot persist agent restart metadata without a pane ID")
-	}
-	manifestMutationMu.Lock()
-	defer manifestMutationMu.Unlock()
-
-	manifest, err := LoadManifest(session)
-	if err != nil {
-		if !errors.Is(err, os.ErrNotExist) {
-			return err
-		}
-		manifest = &SpawnManifest{
-			Session:    session,
-			ProjectDir: projectDir,
-			Agents:     []AgentConfig{},
-		}
-	}
-	if strings.TrimSpace(manifest.Session) == "" {
-		manifest.Session = session
-	}
-	if strings.TrimSpace(manifest.ProjectDir) == "" {
-		manifest.ProjectDir = projectDir
-	}
-	agent.LaunchBinding = CloneLaunchBinding(agent.LaunchBinding)
-	for i := range manifest.Agents {
-		if manifest.Agents[i].PaneID == agent.PaneID {
-			manifest.Agents[i] = agent
-			return SaveManifest(manifest)
-		}
-	}
-	manifest.Agents = append(manifest.Agents, agent)
-	return SaveManifest(manifest)
 }
