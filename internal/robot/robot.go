@@ -7100,6 +7100,62 @@ func finalizeRobotSendDispatchStatus(output *SendOutput) {
 	}
 }
 
+// ErrSendCommandBlocked marks a send refused by the destructive-command guard.
+// Guards wrap it with the reason; any other guard error means the check itself
+// failed, and the send is refused fail-closed.
+var ErrSendCommandBlocked = errors.New("blocked by dcg")
+
+// sendCommandGuard vets the exact payload about to reach the selected panes for
+// destructive shell commands. The cli package installs its dcg check here
+// (robot cannot import cli without a cycle) so --robot-send, REST sends and
+// `ntm send` apply one guard rather than leaving the robot path unchecked.
+var sendCommandGuard func(ctx context.Context, message, session string, panes []tmux.Pane) error
+
+// SetSendCommandGuard registers the destructive-command guard GetSend applies
+// before delivery. Passing nil disables it.
+func SetSendCommandGuard(guard func(ctx context.Context, message, session string, panes []tmux.Pane) error) {
+	sendCommandGuard = guard
+}
+
+// checkSendCommandGuard runs the registered destructive-command guard on the
+// exact payload about to reach panes. A nil error allows delivery; otherwise
+// resp is the typed refusal and blocked reports a dcg verdict, as opposed to a
+// check that failed or did not finish (both refuse fail-closed).
+func checkSendCommandGuard(ctx context.Context, message, session string, panes []tmux.Pane) (resp RobotResponse, blocked bool, err error) {
+	if sendCommandGuard == nil {
+		return RobotResponse{}, false, nil
+	}
+	err = sendCommandGuard(ctx, message, session, panes)
+	switch {
+	case err == nil:
+		return RobotResponse{}, false, nil
+	case errors.Is(err, ErrSendCommandBlocked):
+		return NewErrorResponse(err, ErrCodeDestructiveCommandBlocked,
+			"Remove the destructive command from the message, or run it yourself after review"), true, err
+	case errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded):
+		return NewErrorResponse(fmt.Errorf("destructive-command check did not finish: %w", err),
+			ErrCodeTimeout, "The message was refused because the dcg check was interrupted; retry"), false, err
+	default:
+		return NewErrorResponse(fmt.Errorf("destructive-command check failed: %w", err),
+			ErrCodeInternalError, "Check the dcg installation; the message was refused fail-closed"), false, err
+	}
+}
+
+// guardSendCommand applies checkSendCommandGuard to a send. On refusal it
+// records the typed error on output and returns false; the caller must not
+// dispatch.
+func guardSendCommand(ctx context.Context, output *SendOutput, message, session string, panes []tmux.Pane, dryRun bool) bool {
+	resp, blocked, err := checkSendCommandGuard(ctx, message, session, panes)
+	if err == nil {
+		return true
+	}
+	output.DryRun = dryRun
+	output.Blocked = blocked
+	output.RobotResponse = resp
+	output.Failed = append(output.Failed, SendError{Pane: "guard", Error: err.Error()})
+	return false
+}
+
 // GetSend sends a message to multiple panes atomically and returns structured results.
 // This function returns the data struct directly, enabling CLI/REST parity.
 func GetSend(opts SendOptions) (*SendOutput, error) {
@@ -7317,6 +7373,12 @@ func GetSend(opts SendOptions) (*SendOutput, error) {
 			"Check --all, --panes, --type, and --exclude filters",
 		)
 		output.AgentHints = generateSendHints(output)
+		return finalizeTerminalSendActuation(trace, opts, &output), nil
+	}
+
+	// Destructive-command guard on the exact post-injection payload, before an
+	// operation ID is claimed or any keystroke is injected.
+	if !guardSendCommand(ctx, &output, messageToSend, opts.Session, targetPanes, opts.DryRun) {
 		return finalizeTerminalSendActuation(trace, opts, &output), nil
 	}
 

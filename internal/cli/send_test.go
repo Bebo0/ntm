@@ -2936,10 +2936,12 @@ func TestKillSurfacesReapOrphansAndEmitKillEvents(t *testing.T) {
 	}
 }
 
-// A dcg-blocked send must count toward the session's destructive_cmd_incidents
-// in `ntm metrics`. The metric's only feed used to be an event-bus type nothing
-// published, so it reported zero blocked commands and a met target forever.
-func TestMaybeBlockSendWithDCGRecordsBlockedCommandMetric(t *testing.T) {
+// installFakeDCG puts a stand-in dcg first on PATH and enables the dcg
+// integration under an isolated HOME/NTM_CONFIG. The stand-in blocks
+// "git reset --hard" (exit 1 with a verdict), fails "git push --force" with a
+// usage error (exit 2, an adapter error), and allows everything else.
+func installFakeDCG(t *testing.T) {
+	t.Helper()
 	root := t.TempDir()
 	t.Setenv("HOME", root)
 	t.Setenv("NTM_CONFIG", filepath.Join(root, "ntm", "config.toml"))
@@ -2951,8 +2953,14 @@ if [ "${1:-}" = "--version" ]; then
   exit 0
 fi
 if [ "${1:-}" = "--robot" ] && [ "${2:-}" = "test" ]; then
-  echo '{"command":"git reset --hard","reason":"destroys uncommitted work"}'
-  exit 1
+  case "${6:-}" in
+    "git reset --hard")
+      echo '{"command":"git reset --hard","reason":"destroys uncommitted work"}'
+      exit 1 ;;
+    "git push --force")
+      echo "error: unexpected argument" >&2
+      exit 2 ;;
+  esac
 fi
 exit 0
 `
@@ -2968,10 +2976,143 @@ exit 0
 	cfg = config.Default()
 	cfg.Integrations.DCG.Enabled = true
 	t.Cleanup(func() { cfg = oldCfg })
+}
+
+// dcgBlockedCommandCount reports the blocked_commands `ntm metrics` shows for
+// the session.
+func dcgBlockedCommandCount(t *testing.T, session string) int64 {
+	t.Helper()
+	store, collector, err := getMetricsCollector(session)
+	if err != nil {
+		t.Fatalf("getMetricsCollector: %v", err)
+	}
+	if store == nil {
+		t.Fatal("state store did not open under NTM_CONFIG")
+	}
+	defer store.Close()
+	report, err := collector.GenerateReport()
+	if err != nil {
+		t.Fatalf("GenerateReport: %v", err)
+	}
+	return report.BlockedCommands
+}
+
+// --robot-send (robot.GetSend, also behind REST sends) must apply the same dcg
+// guard as `ntm send`. It used to apply only redaction, so a destructive
+// command line reached non-Claude agents unchecked and uncounted (bd-bck5m).
+func TestRobotSendAppliesDCGGuard(t *testing.T) {
+	testutil.RequireTmuxThrottled(t)
+	installFakeDCG(t)
+
+	// cat stands in for the codex CLI: it echoes delivered input without
+	// executing it, and is not a bare shell dispatch would refuse.
+	session := fmt.Sprintf("ntm_dcgrobot_%d", time.Now().UnixNano())
+	paneID, err := tmux.DefaultClient.Run(
+		"new-session", "-d", "-s", session, "-c", t.TempDir(),
+		"-P", "-F", "#{pane_id}", "cat",
+	)
+	if err != nil {
+		t.Fatalf("create test session: %v", err)
+	}
+	paneID = strings.TrimSpace(paneID)
+	t.Cleanup(func() { _ = tmux.KillSession(session) })
+	if _, err := tmux.DefaultClient.Run("select-pane", "-t", paneID, "-T", session+"__cod_1"); err != nil {
+		t.Fatalf("title pane as codex: %v", err)
+	}
+
+	blocked, err := robot.GetSend(robot.SendOptions{Session: session, Message: "git reset --hard", Pane: paneID})
+	if err != nil {
+		t.Fatalf("GetSend: %v", err)
+	}
+	if blocked.Success || blocked.ErrorCode != robot.ErrCodeDestructiveCommandBlocked || !blocked.Blocked {
+		t.Fatalf("send = success %v code %q blocked %v error %q, want the dcg block",
+			blocked.Success, blocked.ErrorCode, blocked.Blocked, blocked.Error)
+	}
+	if !strings.Contains(blocked.Error, "destroys uncommitted work") || len(blocked.Successful) != 0 {
+		t.Fatalf("blocked send error %q successful %v, want the dcg reason and no delivery", blocked.Error, blocked.Successful)
+	}
+	if got := dcgBlockedCommandCount(t, session); got != 1 {
+		t.Fatalf("BlockedCommands = %d, want the one robot-blocked send", got)
+	}
+
+	// --robot-send --track resolves and dispatches on its own, so it must
+	// refuse the same payload rather than deliver it and wait for an ack.
+	tracked, err := robot.GetSendAndAck(robot.SendAndAckOptions{
+		SendOptions:  robot.SendOptions{Session: session, Message: "git reset --hard", Pane: paneID},
+		AckTimeoutMs: 200,
+	})
+	if err != nil {
+		t.Fatalf("GetSendAndAck: %v", err)
+	}
+	if tracked.Success || tracked.ErrorCode != robot.ErrCodeDestructiveCommandBlocked ||
+		tracked.Send.ErrorCode != robot.ErrCodeDestructiveCommandBlocked || len(tracked.Send.Successful) != 0 {
+		t.Fatalf("tracked send = success %v code %q send code %q successful %v, want the dcg block",
+			tracked.Success, tracked.ErrorCode, tracked.Send.ErrorCode, tracked.Send.Successful)
+	}
+	if got := dcgBlockedCommandCount(t, session); got != 2 {
+		t.Fatalf("BlockedCommands = %d, want both robot-blocked sends", got)
+	}
+
+	failed, err := robot.GetSend(robot.SendOptions{Session: session, Message: "git push --force", Pane: paneID})
+	if err != nil {
+		t.Fatalf("GetSend: %v", err)
+	}
+	if failed.Success || failed.ErrorCode != robot.ErrCodeInternalError || failed.Blocked || len(failed.Successful) != 0 {
+		t.Fatalf("send = success %v code %q blocked %v successful %v, want a fail-closed check error",
+			failed.Success, failed.ErrorCode, failed.Blocked, failed.Successful)
+	}
+
+	allowed, err := robot.GetSend(robot.SendOptions{Session: session, Message: "git status", Pane: paneID})
+	if err != nil {
+		t.Fatalf("GetSend: %v", err)
+	}
+	if allowed.ErrorCode == robot.ErrCodeDestructiveCommandBlocked || len(allowed.Successful) != 1 {
+		t.Fatalf("allowed send = code %q error %q successful %v failed %+v, want delivery",
+			allowed.ErrorCode, allowed.Error, allowed.Successful, allowed.Failed)
+	}
+
+	var output string
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		output, err = tmux.CapturePaneOutput(paneID, 50)
+		if err == nil && strings.Contains(output, "git status") {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("allowed send never rendered in the pane: output=%q err=%v", output, err)
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+	if strings.Contains(output, "git reset") || strings.Contains(output, "git push") {
+		t.Fatalf("a refused command reached the pane:\n%s", output)
+	}
+
+	// An --interrupt-msg follow-up is refused before any Ctrl+C is sent.
+	interrupted, err := robot.GetInterrupt(robot.InterruptOptions{
+		Session: session, Message: "git reset --hard", Force: true, NoWait: true,
+	})
+	if err != nil {
+		t.Fatalf("GetInterrupt: %v", err)
+	}
+	if interrupted.Success || interrupted.ErrorCode != robot.ErrCodeDestructiveCommandBlocked ||
+		len(interrupted.Interrupted) != 0 || interrupted.MessageSent {
+		t.Fatalf("interrupt = success %v code %q interrupted %v message_sent %v, want the dcg block before Ctrl+C",
+			interrupted.Success, interrupted.ErrorCode, interrupted.Interrupted, interrupted.MessageSent)
+	}
+	if got := dcgBlockedCommandCount(t, session); got != 3 {
+		t.Fatalf("BlockedCommands = %d, want all three robot-blocked messages", got)
+	}
+}
+
+// A dcg-blocked send must count toward the session's destructive_cmd_incidents
+// in `ntm metrics`. The metric's only feed used to be an event-bus type nothing
+// published, so it reported zero blocked commands and a met target forever.
+func TestMaybeBlockSendWithDCGRecordsBlockedCommandMetric(t *testing.T) {
+	installFakeDCG(t)
 
 	panes := []tmux.Pane{{ID: "%2", Index: 2, Title: "dcgmetric__cod_1", Type: tmux.AgentCodex}}
-	err := maybeBlockSendWithDCG("git reset --hard", "dcgmetric", panes)
-	if err == nil || !strings.Contains(err.Error(), "blocked by dcg: destroys uncommitted work") {
+	err := maybeBlockSendWithDCG(context.Background(), "git reset --hard", "dcgmetric", panes)
+	if !errors.Is(err, robot.ErrSendCommandBlocked) || !strings.Contains(err.Error(), "blocked by dcg: destroys uncommitted work") {
 		t.Fatalf("maybeBlockSendWithDCG error = %v, want the dcg block", err)
 	}
 

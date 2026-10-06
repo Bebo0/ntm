@@ -120,6 +120,10 @@ const (
 	// ErrCodeResourceBusy indicates a resource is locked or in use.
 	ErrCodeResourceBusy = "RESOURCE_BUSY"
 
+	// ErrCodeDestructiveCommandBlocked indicates dcg refused a destructive
+	// shell command in a message bound for a non-Claude agent.
+	ErrCodeDestructiveCommandBlocked = "DESTRUCTIVE_COMMAND_BLOCKED"
+
 	// ErrCodeStaleWorkCoordination indicates work could not be attributed to
 	// one verified source revision — the tracker or checkout changed while it
 	// was read, the canonical Beads JSONL is unavailable or invalid, or an

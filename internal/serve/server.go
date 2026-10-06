@@ -2183,6 +2183,10 @@ func robotErrorHTTPStatus(code string) int {
 		return http.StatusNotFound
 	case robot.ErrCodePermissionDenied:
 		return http.StatusForbidden
+	case robot.ErrCodeDestructiveCommandBlocked, "SENSITIVE_DATA_BLOCKED":
+		// A safety refusal of the caller's own message: not a server fault,
+		// and retrying the same body cannot succeed.
+		return http.StatusForbidden
 	case robot.ErrCodeResourceBusy, robot.ErrCodeStaleWorkCoordination:
 		return http.StatusConflict
 	case robot.ErrCodeTimeout:

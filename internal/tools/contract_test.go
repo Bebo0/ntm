@@ -196,6 +196,27 @@ func TestDCGAvailabilityWithFakeTool(t *testing.T) {
 	}
 }
 
+// A probe run under an already-ended context fails, but that failure must not
+// be cached: the send guard treats unavailable dcg as "no check", so a cached
+// miss let destructive commands through for the whole TTL.
+func TestDCGAvailabilityDoesNotCacheCanceledProbe(t *testing.T) {
+	cleanup := withFakeTools(t)
+	defer cleanup()
+
+	adapter := NewDCGAdapter()
+	adapter.InvalidateAvailabilityCache()
+	t.Cleanup(adapter.InvalidateAvailabilityCache)
+
+	canceled, cancel := context.WithCancel(context.Background())
+	cancel()
+	if adapter.IsAvailable(canceled) {
+		t.Fatal("IsAvailable under a canceled context = true, want the failed probe")
+	}
+	if !adapter.IsAvailable(context.Background()) {
+		t.Fatal("IsAvailable after a canceled probe = false, want a fresh probe to find dcg")
+	}
+}
+
 func TestDCGAvailabilityMissingBinary(t *testing.T) {
 	adapter := NewDCGAdapter()
 

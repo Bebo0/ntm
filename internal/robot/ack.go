@@ -716,7 +716,7 @@ func GetSendAndAck(opts SendAndAckOptions) (*SendAndAckOutput, error) {
 			ErrCodeInvalidFlag,
 			"Check --pane, --panes, --type, --exclude, and --all",
 		)
-	} else {
+	} else if guardSendCommand(ctx, &sendOutput, opts.Message, opts.Session, targetPanes, opts.DryRun) {
 		sendEnter := true
 		if opts.Enter != nil {
 			sendEnter = *opts.Enter

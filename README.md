@@ -587,6 +587,12 @@ ntm approve abc123
 ntm approve deny abc123 --reason "wrong target branch"
 ```
 
+With `[integrations.dcg] enabled = true`, command lines in messages bound for non-Claude
+agents are checked by dcg before delivery. `ntm send`, `--robot-send` (including `--track`)
+and REST sends all refuse a blocked command — robot callers get `DESTRUCTIVE_COMMAND_BLOCKED`
+— and each refusal counts toward `ntm metrics` destructive-command incidents. A missing dcg
+binary skips the check; a check that errors or is interrupted refuses the send instead.
+
 ### 6. Pipelines, Templates, Recipes, and Workflow Assets
 
 NTM supports several layers of reusable automation:

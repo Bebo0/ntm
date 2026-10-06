@@ -174,6 +174,21 @@ func GetInterrupt(opts InterruptOptions) (*InterruptOutput, error) {
 		output.CompletedAt = time.Now().UTC()
 		return finalizeTerminalInterruptActuation(trace, opts, targetKeys, output), nil
 	}
+	// The follow-up message is an arbitrary payload like any send: vet it
+	// before interrupting anything, against the agent types it will reach.
+	if opts.Message != "" {
+		guardPanes := make([]tmux.Pane, len(targetPanes))
+		for i, pane := range targetPanes {
+			guardPanes[i] = pane
+			guardPanes[i].Type = interruptPaneTMUXAgentType(pane)
+		}
+		if resp, _, err := checkSendCommandGuard(context.Background(), opts.Message, opts.Session, guardPanes); err != nil {
+			output.RobotResponse = resp
+			output.Failed = append(output.Failed, InterruptError{Pane: "guard", Reason: err.Error()})
+			output.CompletedAt = time.Now().UTC()
+			return finalizeTerminalInterruptActuation(trace, opts, targetKeys, output), nil
+		}
+	}
 
 	// Capture previous state for each pane before interrupting
 	for _, pane := range targetPanes {

@@ -2114,7 +2114,7 @@ func runSendInternal(opts SendOptions) (err error) {
 	}
 
 	// Apply DCG safety check for non-Claude agents
-	if err := maybeBlockSendWithDCG(prompt, session, selectedPanes); err != nil {
+	if err := maybeBlockSendWithDCG(ctx, prompt, session, selectedPanes); err != nil {
 		return outputError(err)
 	}
 
@@ -3468,7 +3468,14 @@ var dcgCommandPrefixes = map[string]struct{}{
 	"rch":       {},
 }
 
-func maybeBlockSendWithDCG(prompt, session string, panes []tmux.Pane) error {
+// init makes robot sends (--robot-send, REST sends) apply the same dcg guard
+// as `ntm send`; the guard lives here because it reads the cli config global
+// and metrics collector, and robot cannot import cli without a cycle.
+func init() {
+	robot.SetSendCommandGuard(maybeBlockSendWithDCG)
+}
+
+func maybeBlockSendWithDCG(ctx context.Context, prompt, session string, panes []tmux.Pane) error {
 	if cfg == nil || !cfg.Integrations.DCG.Enabled {
 		return nil
 	}
@@ -3483,11 +3490,16 @@ func maybeBlockSendWithDCG(prompt, session string, panes []tmux.Pane) error {
 		return nil
 	}
 
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	adapter := tools.NewDCGAdapter()
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
 	if !adapter.IsAvailable(ctx) {
-		return nil
+		// Missing dcg means no check; a probe cut short means unknown, and the
+		// send is refused rather than let through unchecked.
+		return ctx.Err()
 	}
 
 	for _, command := range commands {
@@ -3502,7 +3514,7 @@ func maybeBlockSendWithDCG(prompt, session string, panes []tmux.Pane) error {
 				reason = "blocked by dcg"
 			}
 			recordBlockedCommandMetric(session, command, reason, panes)
-			return fmt.Errorf("blocked by dcg: %s", reason)
+			return fmt.Errorf("%w: %s", robot.ErrSendCommandBlocked, reason)
 		}
 	}
 	return nil

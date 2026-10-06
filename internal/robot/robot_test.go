@@ -2545,6 +2545,13 @@ func TestStatusOutputWithGraphMetrics(t *testing.T) {
 
 func TestGetStatusWithProjectionStoreUsesRuntimeProjection(t *testing.T) {
 	tmpDir := t.TempDir()
+	// Live host alerts (under 1 GB free disk raises a critical one) must not
+	// decide the status this test derives from projected source health.
+	configPath := filepath.Join(tmpDir, "config.toml")
+	if err := os.WriteFile(configPath, []byte("[alerts]\nenabled = false\n"), 0o644); err != nil {
+		t.Fatalf("write hermetic config: %v", err)
+	}
+	t.Setenv("NTM_CONFIG", configPath)
 	store, err := state.Open(filepath.Join(tmpDir, "state.db"))
 	if err != nil {
 		t.Fatalf("Open store: %v", err)

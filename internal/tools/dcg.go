@@ -242,6 +242,12 @@ func (a *DCGAdapter) GetAvailability(ctx context.Context) (*DCGAvailability, err
 
 	availability := a.fetchAvailability(ctx)
 
+	// A probe cut short by the caller's cancellation or deadline says nothing
+	// about dcg; caching it would switch the send guard off for every caller
+	// until the TTL lapsed.
+	if ctx.Err() != nil {
+		return availability, nil
+	}
 	dcgAvailabilityCache = *availability
 	dcgAvailabilityExpiry = time.Now().Add(dcgAvailabilityTTL)
 

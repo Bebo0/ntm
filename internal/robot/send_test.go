@@ -1441,3 +1441,51 @@ func TestSelectSendTargetsPreservesDetectedTypeFilteringAndOriginalPane(t *testi
 		t.Fatalf("targets=%+v keys=%v", targets, keys)
 	}
 }
+
+// The send guard refuses fail-closed: a dcg verdict, an interrupted check and
+// a broken check each stop dispatch with a distinct typed code.
+func TestGuardSendCommandRefusalCodes(t *testing.T) {
+	oldGuard := sendCommandGuard
+	t.Cleanup(func() { SetSendCommandGuard(oldGuard) })
+	panes := []tmux.Pane{{ID: "%1", Type: tmux.AgentCodex}}
+
+	SetSendCommandGuard(nil)
+	output := SendOutput{RobotResponse: NewRobotResponse(true)}
+	if !guardSendCommand(context.Background(), &output, "git reset --hard", "s", panes, false) || !output.Success {
+		t.Fatalf("no guard refused the send: %+v", output)
+	}
+
+	tests := []struct {
+		name    string
+		err     error
+		code    string
+		blocked bool
+	}{
+		{"dcg verdict", errors.Join(ErrSendCommandBlocked, errors.New("destroys uncommitted work")), ErrCodeDestructiveCommandBlocked, true},
+		{"interrupted check", context.DeadlineExceeded, ErrCodeTimeout, false},
+		{"broken check", errors.New("dcg test failed: exit status 2"), ErrCodeInternalError, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var gotMessage string
+			SetSendCommandGuard(func(_ context.Context, message, _ string, _ []tmux.Pane) error {
+				gotMessage = message
+				return tt.err
+			})
+			output := SendOutput{RobotResponse: NewRobotResponse(true), Failed: []SendError{}}
+			if guardSendCommand(context.Background(), &output, "git reset --hard", "s", panes, true) {
+				t.Fatal("guard error did not refuse the send")
+			}
+			if gotMessage != "git reset --hard" {
+				t.Fatalf("guard saw %q, want the payload", gotMessage)
+			}
+			if output.Success || output.ErrorCode != tt.code || output.Blocked != tt.blocked || !output.DryRun {
+				t.Fatalf("output = success %v code %q blocked %v dry_run %v, want code %q blocked %v",
+					output.Success, output.ErrorCode, output.Blocked, output.DryRun, tt.code, tt.blocked)
+			}
+			if len(output.Failed) != 1 || output.Failed[0].Pane != "guard" {
+				t.Fatalf("failed = %+v, want one guard entry", output.Failed)
+			}
+		})
+	}
+}
