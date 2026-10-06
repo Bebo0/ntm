@@ -154,6 +154,9 @@ type SpawnAdmissionInput struct {
 // SpawnAdmission is the robot-stable explanation for a pre-spawn
 // admission check.
 type SpawnAdmission struct {
+	// Serialized is true only when the caller holds the local cross-process
+	// fence across observation and launch. A preview does not reserve capacity.
+	Serialized              bool                       `json:"serialized"`
 	Decision                SpawnAdmissionDecision     `json:"decision"`
 	Reason                  string                     `json:"reason"`
 	Hint                    string                     `json:"hint,omitempty"`

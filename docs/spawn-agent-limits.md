@@ -46,12 +46,57 @@ inconsistent count evidence. A successful empty inventory remains valid.
 Disabling spawn pacing disables both count-budget checks, but does not turn
 failed observations into successful inventory evidence.
 
+## Concurrent local spawning
+
+Count-capped local `GetSpawn` calls now acquire a cross-process admission fence
+**before** observing the fleet and retain it through the entire launch batch.
+A contender waits for the current batch and then reads the fleet again, so two
+cooperating processes cannot both spend the same observed headroom. This applies
+to the shared host budget and per-type-only budgets, including expanded recipes.
+The fence also survives the progress, launch-spacing, and per-agent readiness
+wrappers: it stays held while those wrappers finish each launch.
+
+The lock is released after the last launch, before starting the session monitor,
+the final fleet readiness pass, or work assignment. Early refusals, errors,
+cancellation, and panic unwinding release it too. Kernel file ownership is also
+released if the NTM process exits; spawned agents do not inherit the descriptor.
+Already launched panes retain their existing identities and are counted by the
+next owner. No agent or pane is killed, and a partially successful batch is not
+rolled back.
+
+Admission waits up to 30 seconds for ownership, bounded further by caller/job
+cancellation. Exhaustion returns `RESOURCE_BUSY` with admission reason
+`spawn_admission_busy`; an inaccessible or unsupported fence returns
+`spawn_admission_unavailable`. No fleet inventory is read or lifecycle mutation
+performed after these failures. The response marks inventory unavailable rather
+than claiming zero running agents. Caller cancellation retains `TIMEOUT`.
+There is no automatic retry, FIFO fairness guarantee, or detached queue.
+
+`admission.serialized` is true only for evaluations made while holding the fence.
+Dry runs neither acquire ownership nor create lock files; they remain advisory
+previews with `serialized: false`. Disabling pacing or configuring no positive
+count limits keeps the existing unfenced behavior.
+
 ## Scope
 
-This is a check of recognized agent panes at admission time, not an atomic
-capacity reservation, provider-seat discovery, or token-quota enforcement.
-Concurrent independent spawns can still race between observation and launch;
-this change does not introduce a cross-process lock or reserve future capacity.
+The fence covers Linux/macOS processes sharing the same user cache directory
+(`os.UserCacheDir`, normally `XDG_CACHE_HOME` on Linux). Its rendezvous is
+`ntm/spawn-admission/fleet.lock` under that root, independent of the working
+directory, selected NTM config, and session name. Even separate local tmux
+servers sharing that root serialize launches, conservatively. Keep the cache
+root consistent across participating processes and do not remove/replace the
+lock file while NTM is running. Symlinks and unsafe lock-file types fail closed.
+
+This is cooperating-launch serialization, not a durable capacity reservation,
+provider-seat discovery, or token-quota enforcement. Human `ntm spawn`, `ntm add`,
+unconfigured/disabled callers, older binaries, manual tmux launches, and processes
+using different cache roots do not participate. They can still change fleet
+counts concurrently. Different requests can also select different limits; this
+does not install one mandatory host-wide policy. Remote tmux and unsupported
+platforms refuse count-capped execution rather than claiming a local lock protects
+them; run the capped command on the target Linux/macOS host instead. Remote dry
+runs remain advisory.
+
 Agents outside the selected tmux server are not counted. An `omp` or OpenCode
 agent may use different providers internally; its type is not a subscription.
 

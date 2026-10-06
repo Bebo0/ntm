@@ -10,6 +10,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	agentpkg "github.com/Dicklesworthstone/ntm/internal/agent"
@@ -102,6 +103,9 @@ type SpawnOptions struct {
 // SpawnLifecycleDependencies exposes tmux lifecycle ports for deterministic
 // terminal-contract tests. Production callers leave this nil.
 type SpawnLifecycleDependencies struct {
+	// AcquireAdmission fences local count-capped spawns across processes. The
+	// release must tolerate repeated calls; GetSpawn also wraps injected ports.
+	AcquireAdmission func(context.Context) (func(), error)
 	IsTMUXInstalled  func() bool
 	GetAllPanes      func(context.Context) (map[string][]tmux.Pane, error)
 	SessionExists    func(context.Context, string) (bool, error)
@@ -322,6 +326,7 @@ func validateExistingSpawnPaneBaselines(ctx context.Context, panes []tmux.Pane, 
 
 func spawnLifecycleDeps(custom *SpawnLifecycleDependencies) SpawnLifecycleDependencies {
 	deps := SpawnLifecycleDependencies{
+		AcquireAdmission:    acquireLocalSpawnAdmission,
 		IsTMUXInstalled:     tmux.IsInstalled,
 		GetAllPanes:         tmux.GetAllPanesContext,
 		SessionExists:       tmux.SessionExistsContext,
@@ -335,6 +340,9 @@ func spawnLifecycleDeps(custom *SpawnLifecycleDependencies) SpawnLifecycleDepend
 	}
 	if custom == nil {
 		return deps
+	}
+	if custom.AcquireAdmission != nil {
+		deps.AcquireAdmission = custom.AcquireAdmission
 	}
 	if custom.IsTMUXInstalled != nil {
 		deps.IsTMUXInstalled = custom.IsTMUXInstalled
@@ -488,6 +496,80 @@ func spawnAdmissionAgentTypeLimits(cfg *config.Config) map[string]int {
 		limits[kind] = count
 	}
 	return limits
+}
+
+// needsSpawnAdmissionFence uses the final policy (including assignment policy)
+// and expanded recipe counts. Previews never acquire or create a lock file.
+func needsSpawnAdmissionFence(opts SpawnOptions, cfg *config.Config) bool {
+	if opts.DryRun || cfg == nil || !cfg.SpawnPacing.Enabled {
+		return false
+	}
+	if spawnAdmissionAgentLimit(cfg) > 0 {
+		return true
+	}
+	for _, limit := range cfg.SpawnPacing.AgentTypeLimits {
+		if limit > 0 {
+			return true
+		}
+	}
+	return false
+}
+
+func acquireLocalSpawnAdmission(ctx context.Context) (func(), error) {
+	if tmux.DefaultClient.Remote != "" {
+		return nil, errors.New("remote tmux requires host-side admission; a local fence cannot protect a remote fleet")
+	}
+	return pressure.AcquireSpawnAdmission(ctx)
+}
+
+func beginSpawnAdmission(ctx context.Context, opts SpawnOptions, cfg *config.Config,
+	deps SpawnLifecycleDependencies, output *SpawnOutput, totalAgents, totalPanes int,
+) (func(), bool) {
+	if !needsSpawnAdmissionFence(opts, cfg) {
+		return func() {}, true
+	}
+	var release func()
+	var err error
+	if deps.AcquireAdmission == nil {
+		err = errors.New("spawn admission ownership port is unavailable")
+	} else {
+		release, err = deps.AcquireAdmission(ctx)
+	}
+	if release != nil {
+		// Even a defective injected port must not cause a double unlock or
+		// leave an acquired fence behind when it returns an error.
+		release = sync.OnceFunc(release)
+	}
+	if err == nil && release == nil {
+		err = errors.New("spawn admission returned no ownership release")
+	}
+	if cancelErr := spawnCancellationError(ctx, err); cancelErr != nil {
+		if release != nil {
+			release()
+		}
+		setSpawnCancellation(output, cancelErr)
+		return nil, false
+	}
+	if err != nil {
+		if release != nil {
+			release()
+		}
+		reason := "spawn_admission_unavailable"
+		hint := "Restore local admission locking in the shared user cache directory before retrying"
+		if errors.Is(err, pressure.ErrSpawnAdmissionBusy) {
+			reason = "spawn_admission_busy"
+			hint = "Another local spawn is still launching; retry after it finishes"
+		}
+		output.Admission = &pressure.SpawnAdmission{
+			Decision: pressure.SpawnAdmissionDefer, Reason: reason, Hint: hint,
+			Session: opts.Session, RequestedAgents: totalAgents, RequestedPanes: totalPanes,
+			AgentInventoryAvailable: false, AgentInventoryError: "fleet was not read because admission ownership was not acquired",
+		}
+		output.Error = fmt.Sprintf("spawn admission unavailable: %v", err)
+		output.RobotResponse = NewErrorResponse(err, ErrCodeResourceBusy, hint)
+		return nil, false
+	}
+	return release, true
 }
 
 // spawnAdmissionAgentType translates tmux's canonical short identifiers into
@@ -789,6 +871,14 @@ func GetSpawn(ctx context.Context, opts SpawnOptions, cfg *config.Config) (*Spaw
 		totalPanes++
 	}
 
+	// Count and launch under ONE cross-process fence. Acquiring after the
+	// inventory read would still let concurrent requests spend the same seats.
+	releaseAdmission, admitted := beginSpawnAdmission(ctx, opts, cfg, deps, output, totalAgents, totalPanes)
+	if !admitted {
+		return output, nil
+	}
+	defer releaseAdmission()
+
 	var admissionTopologyErr error
 	admissionInput := collectSpawnAdmissionInputWithPanes(
 		ctx, opts, cfg, totalAgents, totalPanes,
@@ -803,6 +893,7 @@ func GetSpawn(ctx context.Context, opts SpawnOptions, cfg *config.Config) (*Spaw
 		return output, nil
 	}
 	admission := pressure.EvaluateSpawnAdmission(admissionInput)
+	admission.Serialized = needsSpawnAdmissionFence(opts, cfg)
 	output.Admission = &admission
 	if err := ctx.Err(); err != nil {
 		setSpawnCancellation(output, err)
@@ -1167,6 +1258,11 @@ func GetSpawn(ctx context.Context, opts SpawnOptions, cfg *config.Config) (*Spaw
 			launchErrors = append(launchErrors, fmt.Errorf("%s agent %d: %w", request.agentType, request.number, launchErr))
 		}
 	}
+
+	// Launched panes now carry durable agent identities. Later contenders
+	// recount them, including a partially successful batch. Readiness and
+	// assignment do not create capacity and must not hold the fleet fence.
+	releaseAdmission()
 
 	// Start the resilience session monitor through the shared spawn code path
 	// (same manifest writer + monitor launcher as CLI spawn; WS0-G6,
