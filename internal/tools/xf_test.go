@@ -78,7 +78,7 @@ func TestXFSearchReadsInstalledXF(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	results, err := adapter.Search(ctx, "rust", 2)
+	results, err := adapter.Search(ctx, "rust", XFSearchParams{Limit: 2})
 	if err != nil {
 		t.Fatalf("Search() error: %v", err)
 	}
@@ -97,8 +97,15 @@ func TestXFSearchReadsInstalledXF(t *testing.T) {
 	}
 
 	// A query starting with "-" is xf query syntax (exclusion), not a flag.
-	if _, err := adapter.Search(ctx, "-rust tantivy", 2); err != nil {
+	if _, err := adapter.Search(ctx, "-rust tantivy", XFSearchParams{Limit: 2}); err != nil {
 		t.Fatalf("Search() with a dash-leading query: %v", err)
+	}
+
+	// Lexical search with no match prints nothing on stdout; that is zero
+	// results, not a parse failure.
+	none, err := adapter.Search(ctx, "zzznomatch", XFSearchParams{Mode: "lexical"})
+	if err != nil || none == nil || len(none) != 0 {
+		t.Fatalf("Search(lexical, no match) = %+v, %v; want empty results", none, err)
 	}
 }
 

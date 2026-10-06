@@ -4081,7 +4081,7 @@ var (
 	robotProfileList    bool   // list session profiles (bd-29kr)
 	robotProfileShow    string // show session profile by name (bd-29kr)
 	xfLimit             int    // max search results
-	xfMode              string // search mode: semantic, keyword, fuzzy
+	xfMode              string // search mode: lexical, semantic, hybrid, two-tier
 	xfSort              string // sort: relevance, date
 
 	// Robot-tokens flags for token usage analysis
@@ -4778,8 +4778,8 @@ func init() {
 	rootCmd.Flags().StringVar(&robotXFSearch, "robot-xf-search", "", "Search X/Twitter archive via xf. Required: QUERY. Example: ntm --robot-xf-search='error handling patterns'")
 	rootCmd.Flags().BoolVar(&robotXFStatus, "robot-xf-status", false, "Get XF health: installation status, index validity (JSON)")
 	rootCmd.Flags().IntVar(&xfLimit, "xf-limit", 20, "Max XF search results. Optional with --robot-xf-search. Example: --xf-limit=50")
-	rootCmd.Flags().StringVar(&xfMode, "xf-mode", "", "XF search mode: semantic, keyword, fuzzy. Optional with --robot-xf-search")
-	rootCmd.Flags().StringVar(&xfSort, "xf-sort", "", "XF sort order: relevance, date. Optional with --robot-xf-search")
+	rootCmd.Flags().StringVar(&xfMode, "xf-mode", "", "XF search mode: lexical, semantic, hybrid (xf default), two-tier. Optional with --robot-xf-search")
+	rootCmd.Flags().StringVar(&xfSort, "xf-sort", "", "XF sort order: relevance (xf default), date, date-desc, engagement. Optional with --robot-xf-search")
 
 	// Default prompts robot flag (bd-2ywo)
 	rootCmd.Flags().BoolVar(&robotDefaultPrompts, "robot-default-prompts", false, "Get per-agent-type default prompts from config (JSON)")

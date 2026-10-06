@@ -65,13 +65,16 @@ func GetXFSearch(opts XFSearchOptions) (*XFSearchOutput, error) {
 	}
 
 	ctx := context.Background()
-	results, err := adapter.Search(ctx, query, limit)
+	results, err := adapter.Search(ctx, query, tools.XFSearchParams{Limit: limit, Mode: opts.Mode, Sort: opts.Sort})
 	if err != nil {
 		code := ErrCodeInternalError
 		hint := "Try a different query or run xf doctor"
 		if errors.Is(err, tools.ErrTimeout) {
 			code = ErrCodeTimeout
 			hint = "XF search timed out; try a shorter query or reduce --limit"
+		} else if strings.Contains(err.Error(), "invalid value") {
+			code = ErrCodeInvalidFlag
+			hint = "--xf-mode: lexical, semantic, hybrid, two-tier; --xf-sort: relevance, date, date-desc, engagement"
 		}
 		output.RobotResponse = NewErrorResponse(err, code, hint)
 		return output, nil

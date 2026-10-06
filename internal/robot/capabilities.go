@@ -2165,8 +2165,8 @@ func buildCommandRegistry() []RobotCommandInfo {
 			Parameters: []RobotParameter{
 				{Name: "query", Flag: "--robot-xf-search", Type: "string", Required: true, Description: "Search query"},
 				{Name: "xf-limit", Flag: "--xf-limit", Type: "int", Required: false, Default: "20", Description: "Max results to return"},
-				{Name: "xf-mode", Flag: "--xf-mode", Type: "string", Required: false, Description: "Search mode: semantic, keyword, fuzzy"},
-				{Name: "xf-sort", Flag: "--xf-sort", Type: "string", Required: false, Description: "Sort order: relevance or date"},
+				{Name: "xf-mode", Flag: "--xf-mode", Type: "string", Required: false, Description: "Search mode: lexical, semantic, hybrid (xf default), two-tier"},
+				{Name: "xf-sort", Flag: "--xf-sort", Type: "string", Required: false, Description: "Sort order: relevance (xf default), date, date-desc, engagement"},
 			},
 			Examples: []string{
 				"ntm --robot-xf-search='error handling patterns'",

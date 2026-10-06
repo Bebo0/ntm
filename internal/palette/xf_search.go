@@ -33,7 +33,7 @@ func xfSearchCmd(query string, limit int) tea.Cmd {
 			}
 		}
 		ctx := context.Background()
-		results, err := adapter.Search(ctx, query, limit)
+		results, err := adapter.Search(ctx, query, tools.XFSearchParams{Limit: limit})
 		return XFSearchResultsMsg{
 			Query:   query,
 			Results: results,

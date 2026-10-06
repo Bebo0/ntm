@@ -160,16 +160,29 @@ type XFSearchResult struct {
 	Score      float64 `json:"score,omitempty"`
 }
 
+// XFSearchParams narrows an xf search; zero values keep xf's defaults.
+type XFSearchParams struct {
+	Limit int
+	Mode  string // lexical, semantic, hybrid, two-tier
+	Sort  string // relevance, date, date-desc, engagement
+}
+
 // Search performs a full-text search on the indexed archive
-func (a *XFAdapter) Search(ctx context.Context, query string, limit int) ([]XFSearchResult, error) {
+func (a *XFAdapter) Search(ctx context.Context, query string, params XFSearchParams) ([]XFSearchResult, error) {
 	ctx, cancel := context.WithTimeout(ctx, a.Timeout())
 	defer cancel()
 
 	// --format is xf's global output selector; "--" keeps a query that starts
 	// with "-" from being parsed as a flag.
 	args := []string{"search", "--format", "json"}
-	if limit > 0 {
-		args = append(args, "--limit", fmt.Sprintf("%d", limit))
+	if params.Limit > 0 {
+		args = append(args, "--limit", fmt.Sprintf("%d", params.Limit))
+	}
+	if params.Mode != "" {
+		args = append(args, "--mode", params.Mode)
+	}
+	if params.Sort != "" {
+		args = append(args, "--sort", params.Sort)
 	}
 	args = append(args, "--", query)
 
@@ -187,10 +200,15 @@ func (a *XFAdapter) Search(ctx context.Context, query string, limit int) ([]XFSe
 		return nil, fmt.Errorf("xf search failed: %w: %s", err, stderr.String())
 	}
 
-	// xf prints "[]" for no matches, so output that is not a JSON array is a
-	// contract break, not an empty result.
+	// With no matches xf prints nothing on stdout (its "[]" goes through a
+	// message channel that is silent off a terminal). Any other output that is
+	// not a JSON array is a contract break, not an empty result.
+	output := bytes.TrimSpace(stdout.Bytes())
+	if len(output) == 0 {
+		return []XFSearchResult{}, nil
+	}
 	var results []XFSearchResult
-	if err := json.Unmarshal(stdout.Bytes(), &results); err != nil {
+	if err := json.Unmarshal(output, &results); err != nil {
 		return nil, fmt.Errorf("failed to parse xf search results: %w", err)
 	}
 	if results == nil {
