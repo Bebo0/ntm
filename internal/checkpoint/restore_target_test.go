@@ -71,6 +71,10 @@ func TestRestoreIntoTargetPreservesCheckpointAndSource(t *testing.T) {
 		t.Fatal(err)
 	}
 	cp.Session.Panes[0].ScrollbackFile = file
+	// As Capture does: save again so the integrity manifest covers the scrollback.
+	if err := storage.Save(cp); err != nil {
+		t.Fatal(err)
+	}
 	before, _ := json.Marshal(cp)
 	r := NewRestorerWithStorage(storage)
 	out, err := r.RestoreFromCheckpointContext(context.Background(), cp, RestoreOptions{

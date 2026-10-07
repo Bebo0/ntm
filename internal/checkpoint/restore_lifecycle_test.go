@@ -341,6 +341,11 @@ func saveLifecycleScrollback(t *testing.T, cp *Checkpoint, contents []string) *S
 		}
 		cp.Session.Panes[i].ScrollbackFile = path
 	}
+	// Capture saves again after writing scrollback so the artifact-integrity
+	// manifest covers it; restore refuses a referenced artifact without one.
+	if err := storage.Save(cp); err != nil {
+		t.Fatal(err)
+	}
 	return storage
 }
 
