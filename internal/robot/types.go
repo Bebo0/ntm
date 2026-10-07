@@ -164,6 +164,11 @@ const (
 	// ErrCodeDispatchUnknown means delivery may have occurred but no trustworthy
 	// final receipt was available, so blind retry could duplicate the prompt.
 	ErrCodeDispatchUnknown = "DISPATCH_UNKNOWN"
+
+	// ErrCodeReservationRequired means an assignment that must reserve its
+	// file scope was refused before its claim: the bead names no files, or
+	// Agent Mail is unavailable. `ntm assign --json` emits the same string.
+	ErrCodeReservationRequired = "RESERVATION_REQUIRED"
 )
 
 // ResponseMeta provides optional metadata about response generation.

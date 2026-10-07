@@ -268,9 +268,14 @@ func TestBuildCommandRegistry_CanonicalPaneContracts(t *testing.T) {
 	for _, parameter := range bulk.Parameters {
 		flags[parameter.Flag] = true
 	}
-	for _, canonical := range []string{"--skip", "--template", "--bulk-parallel", "--bulk-stagger"} {
+	for _, canonical := range []string{"--skip", "--template", "--bulk-parallel", "--bulk-stagger", "--reserve-files", "--reservation-paths"} {
 		if !flags[canonical] {
 			t.Errorf("bulk-assign missing canonical parameter %q", canonical)
+		}
+	}
+	for _, parameter := range bulk.Parameters {
+		if parameter.Flag == "--reserve-files" && parameter.Default != "true" {
+			t.Errorf("bulk-assign --reserve-files default = %q, want true (reserve by default, like ntm assign)", parameter.Default)
 		}
 	}
 	for _, deprecated := range []string{"--skip-panes", "--prompt-template"} {

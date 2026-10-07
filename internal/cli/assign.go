@@ -2732,14 +2732,18 @@ func executeAssignmentsEnhanced(ctx context.Context, session string, out *Assign
 		// coordinator only sees the title, so a bead whose paths live in its
 		// description used to be claimed and then fail its reservation. A
 		// bead with no discoverable paths now fails here, unclaimed.
-		requestedPaths, reservationErr := assignmentReservationPaths(liveDetails, opts.ReserveFiles)
-		if reservationErr != nil {
-			out.Errors = append(out.Errors, fmt.Sprintf("%s: reserve files: %v", item.BeadID, reservationErr))
-			if !opts.Quiet {
-				fmt.Printf("  Not assigning %s: %v\n", item.BeadID, reservationErr)
+		var requestedPaths []string
+		if opts.ReserveFiles {
+			var reservationErr error
+			requestedPaths, reservationErr = assign.ReservationPathsForAssignment(liveDetails.Title, liveDetails.Description)
+			if reservationErr != nil {
+				out.Errors = append(out.Errors, fmt.Sprintf("%s: reserve files: %v", item.BeadID, reservationErr))
+				if !opts.Quiet {
+					fmt.Printf("  Not assigning %s: %v\n", item.BeadID, reservationErr)
+				}
+				failCount++
+				continue
 			}
-			failCount++
-			continue
 		}
 
 		// Build the prompt using template
@@ -3016,60 +3020,9 @@ func normalizedAssignmentReleasePaths(paths []string) []string {
 	return normalized
 }
 
-// errNoReservationPaths rejects a reservation-required assignment whose bead
-// names no files, before the bead is claimed (ntm#336).
-var errNoReservationPaths = errors.New("no file paths to reserve in the bead title or description; " +
-	"list the files it will change (for example under an \"## Owned outputs\" heading) or pass --reserve-files=false")
-
-// errOwnedSectionHasNoPaths rejects a bead whose description declares an
-// owned-files section ("## Owned outputs", "## Deliverables", "Files to
-// modify:") that names no file. Paths elsewhere in the description are read
-// as inputs, so "no file paths" alone would be misleading.
-var errOwnedSectionHasNoPaths = errors.New("the bead description has an owned-files section " +
-	"(such as \"## Owned outputs\", \"## Deliverables\" or \"Files to modify:\") that names no file paths; " +
-	"paths elsewhere in the description are treated as inputs and are not reserved. " +
-	"List the files it will change in that section or pass --reserve-files=false")
-
-// assignmentReservationPaths resolves the files an assignment must reserve
-// from the live bead's title and description. It returns nil when
-// reservations are off, and an error when they are required but no path
-// qualifies: errOwnedSectionHasNoPaths when an owned-files section is
-// declared but empty, errNoReservationPaths when the bead names no files.
-func assignmentReservationPaths(details *bv.BeadAssignmentDetails, reserve bool) ([]string, error) {
-	if !reserve || details == nil {
-		return nil, nil
-	}
-	paths := assign.ReservationPathsForBead(details.Title, details.Description)
-	if len(paths) == 0 {
-		if assign.DeclaresOwnedPaths(details.Description) {
-			return nil, errOwnedSectionHasNoPaths
-		}
-		return nil, errNoReservationPaths
-	}
-	return paths, nil
-}
-
 type cliAtomicReservationPort struct {
 	manager    *assign.FileReservationManager
 	projectDir string
-}
-
-// discoverPaths finds the reservation surface for a request that names no
-// paths. It reads the live bead so paths listed only in the description
-// count, not just those in the title (ntm#336). Reserve and
-// ReconcileReservation share it so both see the same path set.
-func (p *cliAtomicReservationPort) discoverPaths(ctx context.Context, req assignment.ReservationRequest) []string {
-	title := req.BeadTitle
-	description := ""
-	if p.projectDir != "" {
-		if details, err := getBeadAssignmentDetailsForAssignment(ctx, p.projectDir, req.BeadID); err == nil && details != nil {
-			if strings.TrimSpace(title) == "" {
-				title = details.Title
-			}
-			description = details.Description
-		}
-	}
-	return assign.ReservationPathsForBead(title, description)
 }
 
 func (p *cliAtomicReservationPort) Reserve(ctx context.Context, req assignment.ReservationRequest) (assignment.LeaseReceipt, error) {
@@ -3078,7 +3031,7 @@ func (p *cliAtomicReservationPort) Reserve(ctx context.Context, req assignment.R
 	}
 	paths := req.RequestedPaths
 	if len(paths) == 0 {
-		paths = p.discoverPaths(ctx, req)
+		paths = assign.DiscoverReservationPaths(ctx, p.projectDir, req, bv.BeadTextReader(getBeadAssignmentDetailsForAssignment))
 	}
 	var result *assign.FileReservationResult
 	var err error
@@ -3093,7 +3046,7 @@ func (p *cliAtomicReservationPort) Reserve(ctx context.Context, req assignment.R
 func (p *cliAtomicReservationPort) ReconcileReservation(ctx context.Context, req assignment.ReservationRequest, _ assignment.LeaseReceipt) (assignment.ReservationReconciliation, error) {
 	requested := append([]string(nil), req.RequestedPaths...)
 	if len(requested) == 0 && p != nil {
-		requested = p.discoverPaths(ctx, req)
+		requested = assign.DiscoverReservationPaths(ctx, p.projectDir, req, bv.BeadTextReader(getBeadAssignmentDetailsForAssignment))
 	}
 	if p == nil || p.manager == nil {
 		return assignment.ReservationReconciliation{State: assignment.ReservationReconciliationUnknown}, errors.New("file reservation manager is not configured")
@@ -5776,7 +5729,7 @@ func runDirectPaneAssignment(ctx context.Context, opts *AssignCommandOptions) er
 		// details cannot be read, the coordinator's discovery decides.
 		if opts.ReserveFiles {
 			if details, detailsErr := getBeadAssignmentDetailsForAssignment(ctx, projectDir, beadID); detailsErr == nil && details != nil {
-				paths, pathsErr := assignmentReservationPaths(details, true)
+				paths, pathsErr := assign.ReservationPathsForAssignment(details.Title, details.Description)
 				if pathsErr != nil {
 					errMsg := fmt.Sprintf("not assigning %s: %v", beadID, pathsErr)
 					if IsJSONOutput() {

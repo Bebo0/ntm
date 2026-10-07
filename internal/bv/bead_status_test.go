@@ -152,6 +152,33 @@ func TestParseBeadAssignmentDetailsOutputRejectsAmbiguousOrMalformedRows(t *test
 	}
 }
 
+func TestBeadTextReaderNarrowsLiveDetails(t *testing.T) {
+	t.Parallel()
+
+	var gotDir, gotBead string
+	read := BeadTextReader(func(_ context.Context, dir, beadID string) (*BeadAssignmentDetails, error) {
+		gotDir, gotBead = dir, beadID
+		return &BeadAssignmentDetails{ID: beadID, Title: "Fix internal/a.go", Description: "## Owned outputs\n- internal/b.go\n"}, nil
+	})
+	title, description, err := read(t.Context(), "/project", "bd-1")
+	if err != nil || title != "Fix internal/a.go" || description != "## Owned outputs\n- internal/b.go\n" || gotDir != "/project" || gotBead != "bd-1" {
+		t.Fatalf("read = %q, %q, %v (dir %q bead %q)", title, description, err, gotDir, gotBead)
+	}
+
+	readErr := errors.New("br unavailable")
+	for name, reader := range map[string]func(context.Context, string, string) (string, string, error){
+		"read error": BeadTextReader(func(context.Context, string, string) (*BeadAssignmentDetails, error) { return nil, readErr }),
+		"nil details": BeadTextReader(func(context.Context, string, string) (*BeadAssignmentDetails, error) {
+			return nil, nil
+		}),
+		"no reader": BeadTextReader(nil),
+	} {
+		if _, _, err := reader(t.Context(), "/project", "bd-1"); err == nil {
+			t.Fatalf("%s: err = nil, want a failed read", name)
+		}
+	}
+}
+
 func TestBlockingDependencyStatesRetainsTerminalDependencies(t *testing.T) {
 	t.Parallel()
 

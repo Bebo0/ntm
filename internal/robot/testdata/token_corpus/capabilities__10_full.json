@@ -2472,6 +2472,21 @@
           "description": "Delay between sequential assignment attempts"
         },
         {
+          "name": "reserve-files",
+          "flag": "--reserve-files",
+          "type": "bool",
+          "required": false,
+          "default": "true",
+          "description": "Reserve each bead's file scope in Agent Mail after its claim and before dispatch, as ntm assign does: --reservation-paths when given, otherwise the paths named in the bead's title and description. A bead naming no files, or an unavailable Agent Mail, refuses that assignment unclaimed (RESERVATION_REQUIRED); assignments[].reservation reports the scope. --reserve-files=false opts out"
+        },
+        {
+          "name": "reservation-paths",
+          "flag": "--reservation-paths",
+          "type": "string",
+          "required": false,
+          "description": "Comma-separated project-relative globs reserved instead of the paths discovered from each bead"
+        },
+        {
           "name": "dry-run",
           "flag": "--dry-run",
           "type": "bool",

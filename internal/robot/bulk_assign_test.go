@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/Dicklesworthstone/ntm/internal/agentmail"
+	"github.com/Dicklesworthstone/ntm/internal/assign"
 	"github.com/Dicklesworthstone/ntm/internal/assignment"
 	"github.com/Dicklesworthstone/ntm/internal/bv"
 	"github.com/Dicklesworthstone/ntm/internal/config"
@@ -1060,9 +1061,9 @@ func TestBulkAssignAtomicOrderAndDurableReplay(t *testing.T) {
 
 	first := BulkAssignOutput{Session: "bulk-atomic"}
 	reservationPaths := []string{"internal/robot/**"}
-	applyBulkAssignPlan(t.Context(), BulkAssignOptions{RequireReservation: true, ReservationPaths: reservationPaths, operatorGatedLabels: policyLabels}, bulkAssignDeps(&deps), &first, plan)
+	applyBulkAssignPlan(t.Context(), BulkAssignOptions{ReserveFiles: true, ReservationPaths: reservationPaths, operatorGatedLabels: policyLabels}, bulkAssignDeps(&deps), &first, plan)
 	second := BulkAssignOutput{Session: "bulk-atomic"}
-	applyBulkAssignPlan(t.Context(), BulkAssignOptions{RequireReservation: true, ReservationPaths: reservationPaths, operatorGatedLabels: policyLabels}, bulkAssignDeps(&deps), &second, plan)
+	applyBulkAssignPlan(t.Context(), BulkAssignOptions{ReserveFiles: true, ReservationPaths: reservationPaths, operatorGatedLabels: policyLabels}, bulkAssignDeps(&deps), &second, plan)
 	if len(first.Assignments) != 1 || !first.Assignments[0].Claimed || !first.Assignments[0].PromptSent || first.Assignments[0].DispatchReceiptID == "" {
 		t.Fatalf("first assignments=%+v", first.Assignments)
 	}
@@ -1298,11 +1299,18 @@ func TestBulkAssignDryRunSanitizesTitlesAndBlocksSensitiveReservationPaths(t *te
 			Pane: "1", PaneID: "%31", Bead: "bd-path", BeadTitle: "Safe title", AgentType: "cod", Status: "planned",
 		}}}
 		applyBulkAssignPlan(t.Context(), BulkAssignOptions{
-			DryRun: true, RequireReservation: true, ReservationPaths: []string{"internal/" + secret + ".txt"}, projectDir: "/project",
+			DryRun: true, ReserveFiles: true, ReservationPaths: []string{"internal/" + secret + ".txt"}, projectDir: "/project",
 		}, deps, output, plan)
 		if output.Success || len(output.Assignments) != 1 || output.Assignments[0].Status != "failed" ||
 			!strings.Contains(output.Assignments[0].Error, "reservation path") || strings.Contains(fmt.Sprint(output), secret) {
 			t.Fatalf("sensitive path dry-run output=%+v", output)
+		}
+		encoded, err := json.Marshal(output)
+		if err != nil {
+			t.Fatalf("marshal dry-run output: %v", err)
+		}
+		if strings.Contains(string(encoded), secret) || !strings.Contains(string(encoded), "[REDACTED:") {
+			t.Fatalf("reported reservation paths must be redacted: %s", encoded)
 		}
 	})
 }
@@ -1360,7 +1368,7 @@ func TestBulkDurableSentReplayIgnoresCurrentPolicyAndExternalServices(t *testing
 		},
 	})
 	output := BulkAssignOutput{RobotResponse: NewRobotResponse(true), Session: session}
-	applyBulkAssignPlan(t.Context(), BulkAssignOptions{RequireReservation: true}, deps, &output, plan)
+	applyBulkAssignPlan(t.Context(), BulkAssignOptions{ReserveFiles: true}, deps, &output, plan)
 	if policyCalls != 0 || len(output.Assignments) != 1 {
 		t.Fatalf("policy calls=%d assignments=%+v", policyCalls, output.Assignments)
 	}
@@ -1732,7 +1740,7 @@ func TestBulkAssignClaimConflictNeverReservesOrDispatches(t *testing.T) {
 		LoadRedaction: func(string) (redaction.Config, error) { return redaction.Config{Mode: redaction.ModeOff}, nil },
 	}
 	output := BulkAssignOutput{Session: "bulk-conflict"}
-	applyBulkAssignPlan(t.Context(), BulkAssignOptions{RequireReservation: true, ReservationPaths: []string{"internal/robot/**"}}, bulkAssignDeps(&deps), &output, plan)
+	applyBulkAssignPlan(t.Context(), BulkAssignOptions{ReserveFiles: true, ReservationPaths: []string{"internal/robot/**"}}, bulkAssignDeps(&deps), &output, plan)
 	if len(output.Assignments) != 1 || output.Assignments[0].Status != "failed" || output.Assignments[0].PromptSent || output.Assignments[0].Claimed {
 		t.Fatalf("output=%+v", output.Assignments)
 	}
@@ -1779,7 +1787,7 @@ func TestBulkAssignDryRunHasNoAtomicOrPacingSideEffects(t *testing.T) {
 		Wait:              func(context.Context, time.Duration) error { calls++; return nil },
 	}
 	output := BulkAssignOutput{Session: "bulk-dry"}
-	applyBulkAssignPlan(t.Context(), BulkAssignOptions{DryRun: true, RequireReservation: true, ReservationPaths: []string{"internal/robot/**"}, Stagger: time.Hour}, bulkAssignDeps(&deps), &output, plan)
+	applyBulkAssignPlan(t.Context(), BulkAssignOptions{DryRun: true, ReserveFiles: true, ReservationPaths: []string{"internal/robot/**"}, Stagger: time.Hour}, bulkAssignDeps(&deps), &output, plan)
 	if calls != 0 || len(output.Assignments) != 1 || output.Assignments[0].Status != "planned" {
 		t.Fatalf("calls=%d output=%+v", calls, output.Assignments)
 	}
@@ -2084,10 +2092,14 @@ func TestBulkAssignLoadsAuthoritativePolicyBeforeParsingPlanningAndMutation(t *t
 		{
 			name: "valid explicit allocation cannot actuate first",
 			opts: BulkAssignOptions{
-				AllocationJSON:     `{"1":"bd-policy"}`,
-				RequireReservation: true,
-				ReservationPaths:   []string{"internal/robot/**"},
+				AllocationJSON:   `{"1":"bd-policy"}`,
+				ReserveFiles:     true,
+				ReservationPaths: []string{"internal/robot/**"},
 			},
+		},
+		{
+			name: "default reservation discovery cannot read the bead first",
+			opts: BulkAssignOptions{AllocationJSON: `{"1":"bd-policy"}`, ReserveFiles: true},
 		},
 	} {
 		t.Run(test.name, func(t *testing.T) {
@@ -2145,6 +2157,10 @@ func TestBulkAssignLoadsAuthoritativePolicyBeforeParsingPlanningAndMutation(t *t
 				ClaimStaleBead: func(context.Context, string, string, string, time.Time) (bv.BeadClaimResult, error) {
 					forbidden("stale Beads claim")
 					return bv.BeadClaimResult{}, nil
+				},
+				GetBeadAssignmentDetails: func(context.Context, string, string) (*bv.BeadAssignmentDetails, error) {
+					forbidden("reservation discovery bead read")
+					return nil, nil
 				},
 				ReservationPort: testReservationFunc(func(context.Context, assignment.ReservationRequest) (assignment.LeaseReceipt, error) {
 					forbidden("Agent Mail reservation")
@@ -3519,4 +3535,476 @@ func TestBulkAssignThreeWayWorkSource(t *testing.T) {
 			t.Fatalf("receipt = %+v, want the clean-checkout policy named", output.WorkSourceMismatch)
 		}
 	})
+}
+
+// reservingAgentMail is an in-memory Agent Mail behind the default bulk
+// reservation port (robotAgentMailReservationRuntime): it grants exclusive
+// leases, reports a conflict when another agent already holds a path, and can
+// be made unreachable.
+type reservingAgentMail struct {
+	mu           sync.Mutex
+	unreachable  error
+	agents       []string
+	events       *[]string
+	ensureCalls  int
+	reserveCalls []agentmail.FileReservationOptions
+	held         map[string]agentmail.FileReservation
+	nextID       int
+}
+
+func (m *reservingAgentMail) EnsureProject(_ context.Context, projectKey string) (*agentmail.Project, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.ensureCalls++
+	if m.unreachable != nil {
+		return nil, m.unreachable
+	}
+	return &agentmail.Project{ID: 7, HumanKey: projectKey}, nil
+}
+
+func (m *reservingAgentMail) ListAgents(context.Context, string) ([]agentmail.Agent, error) {
+	agents := make([]agentmail.Agent, 0, len(m.agents))
+	for _, name := range m.agents {
+		agents = append(agents, agentmail.Agent{Name: name, ProjectID: 7})
+	}
+	return agents, nil
+}
+
+func (m *reservingAgentMail) ListReservations(_ context.Context, _ string, agentName string, _ bool) ([]agentmail.FileReservation, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	var held []agentmail.FileReservation
+	for _, lease := range m.held {
+		if lease.AgentName == agentName {
+			held = append(held, lease)
+		}
+	}
+	return held, nil
+}
+
+func (m *reservingAgentMail) ReservePaths(_ context.Context, opts agentmail.FileReservationOptions) (*agentmail.ReservationResult, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.reserveCalls = append(m.reserveCalls, opts)
+	if m.events != nil {
+		*m.events = append(*m.events, "reserve:"+strings.TrimPrefix(opts.Reason, "bead assignment: "))
+	}
+	if m.held == nil {
+		m.held = make(map[string]agentmail.FileReservation)
+	}
+	result := &agentmail.ReservationResult{}
+	for _, path := range opts.Paths {
+		if lease, ok := m.held[path]; ok && lease.AgentName != opts.AgentName {
+			result.Conflicts = append(result.Conflicts, agentmail.ReservationConflict{Path: path, Holders: []string{lease.AgentName}})
+			continue
+		}
+		m.nextID++
+		lease := agentmail.FileReservation{
+			ID: m.nextID, ProjectID: 7, AgentName: opts.AgentName, PathPattern: path, Exclusive: opts.Exclusive,
+			Reason: opts.Reason, ExpiresTS: agentmail.FlexTime{Time: time.Now().UTC().Add(time.Duration(opts.TTLSeconds) * time.Second)},
+		}
+		m.held[path] = lease
+		result.Granted = append(result.Granted, lease)
+	}
+	return result, nil
+}
+
+// bulkReservationHarness drives --robot-bulk-assign end to end through
+// GetBulkAssign with fake br, tmux, and Agent Mail seams, recording the order
+// of external side effects.
+type bulkReservationHarness struct {
+	session string
+	project string
+	store   *assignment.AssignmentStore
+	mail    *reservingAgentMail
+	beads   map[string]*bv.BeadAssignmentDetails
+	events  []string
+	deps    BulkAssignDependencies
+}
+
+func newBulkReservationHarness(t *testing.T, session string, beads ...*bv.BeadAssignmentDetails) *bulkReservationHarness {
+	t.Helper()
+	t.Setenv("HOME", t.TempDir())
+	h := &bulkReservationHarness{
+		session: session,
+		project: t.TempDir(),
+		store:   assignment.NewStore(session),
+		beads:   make(map[string]*bv.BeadAssignmentDetails, len(beads)),
+	}
+	for _, bead := range beads {
+		h.beads[bead.ID] = bead
+	}
+	h.mail = &reservingAgentMail{agents: []string{"Agent1", "Agent2"}, events: &h.events}
+	panes := mockTmuxPanesForList([]int{1, 2})
+	readBead := func(_ context.Context, dir, beadID string) (*bv.BeadAssignmentDetails, error) {
+		if dir != h.project {
+			t.Errorf("bead %s read from %q, want the session project %q", beadID, dir, h.project)
+		}
+		bead, ok := h.beads[beadID]
+		if !ok {
+			return nil, fmt.Errorf("bead %s not found", beadID)
+		}
+		copied := *bead
+		return &copied, nil
+	}
+	keys := 0
+	h.deps = BulkAssignDependencies{
+		ListPanes:                func(context.Context, string) ([]tmux.Pane, error) { return panes, nil },
+		ResolveProject:           func(context.Context, string, []tmux.Pane) (string, error) { return h.project, nil },
+		LoadAssignmentPolicy:     func(string, string, bool) (*config.Config, error) { return config.Default(), nil },
+		ReadFile:                 func(string) ([]byte, error) { return []byte(defaultBulkAssignTemplate), nil },
+		LoadStore:                func(string) (*assignment.AssignmentStore, error) { return h.store, nil },
+		GetBeadAssignmentDetails: readBead,
+		GetBeadStatus: func(_ context.Context, _ string, beadID string) (string, error) {
+			return h.beads[beadID].Status, nil
+		},
+		FetchBeadTitle: func(_ context.Context, _ string, beadID string) (string, error) {
+			return h.beads[beadID].Title, nil
+		},
+		ClaimBeadWithOperatorGatedLabels: func(_ context.Context, _ string, beadID, actor string, _ []string) (bv.BeadClaimResult, error) {
+			h.events = append(h.events, "claim:"+beadID)
+			return bv.BeadClaimResult{ID: beadID, Actor: actor, Status: "in_progress", ClaimedAt: time.Now().UTC()}, nil
+		},
+		ClaimStaleBeadWithOperatorGatedLabels: func(_ context.Context, _ string, beadID, actor string, _ time.Time, _ []string) (bv.BeadClaimResult, error) {
+			h.events = append(h.events, "claim:"+beadID)
+			return bv.BeadClaimResult{ID: beadID, Actor: actor, Status: "in_progress", ClaimedAt: time.Now().UTC()}, nil
+		},
+		NewIdempotencyKey: func() (string, error) {
+			keys++
+			return fmt.Sprintf("%s-key-%d", session, keys), nil
+		},
+		AgentMailClient: h.mail,
+		ResolveAgentName: func(_ context.Context, _ string, _ string, paneID string, _ string) (string, error) {
+			return "Agent" + strings.TrimPrefix(paneID, "%"), nil
+		},
+		ObserveSession: bulkSafeObserver(panes),
+		DispatchDeliverer: bulkTestDeliverer(t, func(delivery dispatchsvc.Delivery) error {
+			h.events = append(h.events, "dispatch:"+delivery.Target.Ref.ID)
+			return nil
+		}),
+		LoadRedaction: func(string) (redaction.Config, error) { return redaction.Config{Mode: redaction.ModeOff}, nil },
+	}
+	return h
+}
+
+func (h *bulkReservationHarness) run(t *testing.T, opts BulkAssignOptions) *BulkAssignOutput {
+	t.Helper()
+	opts.Session = h.session
+	opts.Deps = &h.deps
+	output, err := GetBulkAssign(t.Context(), opts)
+	if err != nil {
+		t.Fatalf("GetBulkAssign: %v", err)
+	}
+	return output
+}
+
+func (h *bulkReservationHarness) sideEffects(prefix string) []string {
+	var matched []string
+	for _, event := range h.events {
+		if strings.HasPrefix(event, prefix) {
+			matched = append(matched, event)
+		}
+	}
+	return matched
+}
+
+// ownedOutputsDescription names two input files in prose and the files the
+// bead owns under an "## Owned outputs" heading, as ntm#336 beads do.
+func ownedOutputsDescription(owned ...string) string {
+	var builder strings.Builder
+	builder.WriteString("Read README.md and docs/research-status.md.\n\n## Owned outputs\n\n")
+	for _, path := range owned {
+		builder.WriteString("- `" + path + "`\n")
+	}
+	builder.WriteString("\n## Acceptance criteria\n\n- Tests pass.\n")
+	return builder.String()
+}
+
+// The robot surface reserves a bead's file scope by default, discovered from
+// the bead exactly as `ntm assign` discovers it, claims before it reserves,
+// reserves before it dispatches, and reports the scope in assignments[].
+func TestBulkAssignReservesDiscoveredBeadPathsByDefault(t *testing.T) {
+	owned := []string{"internal/api/server.go", "internal/api/server_test.go"}
+	h := newBulkReservationHarness(t, "bulk-discover", &bv.BeadAssignmentDetails{
+		ID: "bd-api", Title: "Harden the API server", Status: "open", Description: ownedOutputsDescription(owned...),
+	})
+
+	preview := h.run(t, BulkAssignOptions{AllocationJSON: `{"1":"bd-api"}`, ReserveFiles: true, DryRun: true})
+	if !preview.Success || len(preview.Assignments) != 1 || preview.Assignments[0].Status != "planned" {
+		t.Fatalf("dry-run output = %+v", preview)
+	}
+	if got := preview.Assignments[0].Reservation; got == nil || !got.Required || got.Source != "discovered" ||
+		!reflect.DeepEqual(got.Paths, owned) || len(got.Granted) != 0 || got.Error != "" {
+		t.Fatalf("dry-run reservation = %+v, want the discovered owned outputs %v", got, owned)
+	}
+	if h.mail.ensureCalls != 0 || len(h.events) != 0 {
+		t.Fatalf("dry run touched Agent Mail (%d) or side effects %v", h.mail.ensureCalls, h.events)
+	}
+
+	output := h.run(t, BulkAssignOptions{AllocationJSON: `{"1":"bd-api"}`, ReserveFiles: true})
+	if !output.Success || len(output.Assignments) != 1 || output.Assignments[0].Status != "assigned" || !output.Assignments[0].PromptSent {
+		t.Fatalf("bulk output = %+v", output)
+	}
+	if want := []string{"claim:bd-api", "reserve:bd-api", "dispatch:%1"}; !reflect.DeepEqual(h.events, want) {
+		t.Fatalf("side-effect order = %v, want %v", h.events, want)
+	}
+	if len(h.mail.reserveCalls) != 1 {
+		t.Fatalf("Agent Mail reserve calls = %+v, want one", h.mail.reserveCalls)
+	}
+	call := h.mail.reserveCalls[0]
+	if !reflect.DeepEqual(call.Paths, owned) || call.AgentName != "Agent1" || !call.Exclusive || call.ProjectKey != h.project || call.TTLSeconds < 3600 {
+		t.Fatalf("reserve call = %+v, want exclusive owned outputs %v for Agent1 in %s", call, owned, h.project)
+	}
+
+	assigned := output.Assignments[0]
+	if got := assigned.Reservation; got == nil || !got.Required || got.Source != "discovered" ||
+		!reflect.DeepEqual(got.Paths, owned) || !reflect.DeepEqual(got.Granted, owned) || got.Error != "" {
+		t.Fatalf("reported reservation = %+v, want %v granted", got, owned)
+	}
+	if len(assigned.ReservationIDs) != 2 {
+		t.Fatalf("reservation IDs = %v, want one per owned path", assigned.ReservationIDs)
+	}
+	encoded, err := json.Marshal(output)
+	if err != nil {
+		t.Fatalf("marshal output: %v", err)
+	}
+	if !strings.Contains(string(encoded), `"reservation":{"required":true,"source":"discovered","paths":["internal/api/server.go","internal/api/server_test.go"],"granted":["internal/api/server.go","internal/api/server_test.go"]}`) {
+		t.Fatalf("robot JSON lacks the per-assignment reservation report: %s", encoded)
+	}
+
+	durable := h.store.Get("bd-api")
+	if durable == nil || !durable.ReservationRequired || !durable.ReservationDiscovery ||
+		!reflect.DeepEqual(durable.ReservationInputPaths, owned) || !reflect.DeepEqual(durable.ReservedPaths, owned) {
+		t.Fatalf("durable intent = %+v, want discovery recorded with the owned outputs as its input paths", durable)
+	}
+}
+
+// Explicit --reservation-paths replace discovery, as `ntm assign` callers
+// that name their own surface expect.
+func TestBulkAssignExplicitReservationPathsWinOverDiscovery(t *testing.T) {
+	h := newBulkReservationHarness(t, "bulk-explicit", &bv.BeadAssignmentDetails{
+		ID: "bd-explicit", Title: "Fix internal/old/title.go", Status: "open", Description: ownedOutputsDescription("internal/discovered/file.go"),
+	})
+	explicit := []string{"internal/robot/**"}
+	output := h.run(t, BulkAssignOptions{AllocationJSON: `{"1":"bd-explicit"}`, ReserveFiles: true, ReservationPaths: explicit})
+	if !output.Success || output.Assignments[0].Status != "assigned" {
+		t.Fatalf("bulk output = %+v", output)
+	}
+	if len(h.mail.reserveCalls) != 1 || !reflect.DeepEqual(h.mail.reserveCalls[0].Paths, explicit) {
+		t.Fatalf("reserve calls = %+v, want exactly %v", h.mail.reserveCalls, explicit)
+	}
+	if got := output.Assignments[0].Reservation; got == nil || got.Source != "explicit" || !reflect.DeepEqual(got.Paths, explicit) || !reflect.DeepEqual(got.Granted, explicit) {
+		t.Fatalf("reported reservation = %+v", got)
+	}
+	durable := h.store.Get("bd-explicit")
+	if durable == nil || durable.ReservationDiscovery || !reflect.DeepEqual(durable.ReservationInputPaths, explicit) {
+		t.Fatalf("durable intent = %+v, want explicit paths without discovery", durable)
+	}
+}
+
+// --reserve-files=false opts out exactly as it does for `ntm assign`:
+// nothing is reserved and Agent Mail is never contacted.
+func TestBulkAssignReserveFilesFalseReservesNothing(t *testing.T) {
+	h := newBulkReservationHarness(t, "bulk-optout", &bv.BeadAssignmentDetails{
+		ID: "bd-optout", Title: "Think about architecture", Status: "open", Description: "No files named here.",
+	})
+	output := h.run(t, BulkAssignOptions{AllocationJSON: `{"1":"bd-optout"}`, ReserveFiles: false})
+	if !output.Success || output.Assignments[0].Status != "assigned" {
+		t.Fatalf("bulk output = %+v", output)
+	}
+	if h.mail.ensureCalls != 0 || len(h.mail.reserveCalls) != 0 || len(h.sideEffects("reserve:")) != 0 {
+		t.Fatalf("opt-out contacted Agent Mail: ensure=%d reserve=%+v", h.mail.ensureCalls, h.mail.reserveCalls)
+	}
+	if got := output.Assignments[0].Reservation; got == nil || got.Required || got.Source != "disabled" || len(got.Paths) != 0 ||
+		len(got.Granted) != 0 || len(output.Assignments[0].ReservationIDs) != 0 {
+		t.Fatalf("reported reservation = %+v, want disabled", got)
+	}
+	if durable := h.store.Get("bd-optout"); durable == nil || durable.ReservationRequired || len(durable.ReservationInputPaths) != 0 {
+		t.Fatalf("durable intent = %+v, want no reservation", durable)
+	}
+
+	conflicting := newBulkReservationHarness(t, "bulk-optout-conflict")
+	rejected := conflicting.run(t, BulkAssignOptions{AllocationJSON: `{"1":"bd-x"}`, ReserveFiles: false, ReservationPaths: []string{"internal/**"}})
+	if rejected.Success || rejected.ErrorCode != ErrCodeInvalidFlag || len(conflicting.events) != 0 {
+		t.Fatalf("--reservation-paths with --reserve-files=false = %+v, events %v; want INVALID_FLAG with no side effects", rejected.RobotResponse, conflicting.events)
+	}
+}
+
+// A bead that names no files is refused before its claim, with the same
+// errors `ntm assign` returns, and reported as RESERVATION_REQUIRED.
+func TestBulkAssignRefusesBeadsThatNameNoFilesUnclaimed(t *testing.T) {
+	h := newBulkReservationHarness(t, "bulk-pathless",
+		&bv.BeadAssignmentDetails{ID: "bd-none", Title: "Think about architecture", Status: "open", Description: "Consider how it should evolve."},
+		&bv.BeadAssignmentDetails{ID: "bd-empty", Title: "Write the report", Status: "open", Description: "Read internal/robot/robot.go.\n\n## Deliverables\n- A short written report\n"},
+	)
+	output := h.run(t, BulkAssignOptions{AllocationJSON: `{"1":"bd-none","2":"bd-empty"}`, ReserveFiles: true})
+	if output.Success || output.ErrorCode != ErrCodeReservationRequired || len(output.Assignments) != 2 {
+		t.Fatalf("bulk output = %+v, want RESERVATION_REQUIRED", output)
+	}
+	want := map[string]error{"bd-none": assign.ErrNoReservationPaths, "bd-empty": assign.ErrOwnedSectionHasNoPaths}
+	for _, item := range output.Assignments {
+		if item.Status != "failed" || item.Claimed || item.PromptSent || !errors.Is(item.failureCause, want[item.Bead]) {
+			t.Fatalf("assignment %s = %+v, want refused unclaimed with %v", item.Bead, item, want[item.Bead])
+		}
+		if item.Reservation == nil || !item.Reservation.Required || item.Reservation.Source != "discovered" ||
+			item.Reservation.Error != want[item.Bead].Error() || len(item.Reservation.Paths) != 0 {
+			t.Fatalf("assignment %s reservation = %+v", item.Bead, item.Reservation)
+		}
+	}
+	if len(h.events) != 0 || h.mail.ensureCalls != 0 || h.store.Get("bd-none") != nil || h.store.Get("bd-empty") != nil {
+		t.Fatalf("pathless beads reached side effects %v (Agent Mail %d) or the ledger", h.events, h.mail.ensureCalls)
+	}
+}
+
+// With Agent Mail unreachable, `ntm assign --reserve-files` refuses to run
+// (assignment.ErrReservationRequired); the robot surface refuses every
+// reserving assignment the same way, before anything is claimed.
+func TestBulkAssignRefusesUnclaimedWhenAgentMailIsUnavailable(t *testing.T) {
+	owned := []string{"internal/api/server.go"}
+	h := newBulkReservationHarness(t, "bulk-mail-down", &bv.BeadAssignmentDetails{
+		ID: "bd-down", Title: "Harden the API server", Status: "open", Description: ownedOutputsDescription(owned...),
+	})
+	h.mail.unreachable = errors.New("dial tcp 127.0.0.1:8765: connect: connection refused")
+	output := h.run(t, BulkAssignOptions{AllocationJSON: `{"1":"bd-down"}`, ReserveFiles: true})
+	if output.Success || output.ErrorCode != ErrCodeReservationRequired || len(output.Assignments) != 1 {
+		t.Fatalf("bulk output = %+v, want RESERVATION_REQUIRED", output)
+	}
+	item := output.Assignments[0]
+	if item.Status != "failed" || item.Claimed || item.PromptSent || !errors.Is(item.failureCause, assignment.ErrReservationRequired) {
+		t.Fatalf("assignment = %+v, want refused unclaimed with ErrReservationRequired", item)
+	}
+	if item.Reservation == nil || !reflect.DeepEqual(item.Reservation.Paths, owned) ||
+		!strings.Contains(item.Reservation.Error, "file reservation is required but unavailable") ||
+		!strings.Contains(item.Reservation.Error, "connection refused") {
+		t.Fatalf("reservation report = %+v", item.Reservation)
+	}
+	if len(h.events) != 0 || h.store.Get("bd-down") != nil {
+		t.Fatalf("unavailable Agent Mail still produced side effects %v or a ledger row", h.events)
+	}
+}
+
+// The conflict class reservations exist to prevent: two beads that own the
+// same file, assigned to two agents in one robot run. The second agent cannot
+// take the lock, so it is never dispatched onto a file the first one holds.
+func TestBulkAssignOverlappingBeadsCannotBothHoldTheirFiles(t *testing.T) {
+	shared := "internal/shared/state.go"
+	h := newBulkReservationHarness(t, "bulk-overlap",
+		&bv.BeadAssignmentDetails{ID: "bd-first", Title: "Refactor state", Status: "open", Description: ownedOutputsDescription(shared)},
+		&bv.BeadAssignmentDetails{ID: "bd-second", Title: "Extend state", Status: "open", Description: ownedOutputsDescription(shared)},
+	)
+	output := h.run(t, BulkAssignOptions{AllocationJSON: `{"1":"bd-first","2":"bd-second"}`, ReserveFiles: true})
+	if output.Success || len(output.Assignments) != 2 {
+		t.Fatalf("bulk output = %+v", output)
+	}
+	first, second := output.Assignments[0], output.Assignments[1]
+	if first.Bead != "bd-first" || first.Status != "assigned" || !reflect.DeepEqual(first.Reservation.Granted, []string{shared}) {
+		t.Fatalf("first assignment = %+v (reservation %+v)", first, first.Reservation)
+	}
+	if second.Bead != "bd-second" || second.Status != "failed" || second.PromptSent || len(second.Reservation.Granted) != 0 ||
+		!strings.Contains(second.Reservation.Error, "conflict") {
+		t.Fatalf("second assignment = %+v (reservation %+v), want a refused, undispatched conflict", second, second.Reservation)
+	}
+	if got := h.sideEffects("dispatch:"); !reflect.DeepEqual(got, []string{"dispatch:%1"}) {
+		t.Fatalf("dispatches = %v, want only the lock holder", got)
+	}
+	if lease := h.mail.held[shared]; lease.AgentName != "Agent1" {
+		t.Fatalf("lease on %s = %+v, want Agent1 alone", shared, lease)
+	}
+}
+
+// Scope discovered at reserve time never passed the dispatch redaction
+// preflight, so a durable replay reports the ledger's reservation paths
+// through the built-in secret patterns rather than echoing them.
+func TestBulkAssignReservationReportRedactsLedgerPaths(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	const secret = "sk-proj-FAKEtestkey1234567890123456789012345678901234"
+	const session = "bulk-ledger-redaction"
+	secretPath := "internal/" + secret + ".txt"
+	recovery := &assignment.Assignment{
+		BeadID: "bd-ledger", BeadTitle: "Ledger title", Pane: 1,
+		AgentType: "codex", AgentName: "LedgerAgent", Status: assignment.StatusAssigned,
+		IdempotencyKey: "ledger-key", ClaimActor: "LedgerAgent/ntm-ledger-key",
+		ClaimState: assignment.ClaimClaimed, ReservationRequired: true, ReservationDiscovery: true,
+		ReservationState: assignment.ReservationReserved, ReservationCompleted: true,
+		ReservationRequested: []string{secretPath}, ReservedPaths: []string{secretPath}, ReservationIDs: []int{5},
+		DispatchTarget: "%93", OccupancyKey: "%93",
+		DispatchState: assignment.DispatchSent, DispatchReceiptID: "receipt-ledger",
+		IntentSHA256: assignment.PromptSHA256("original prompt"), PromptSHA256: assignment.PromptSHA256("durable prompt"),
+		PromptSent: "durable prompt",
+	}
+	store := assignment.NewStore(session)
+	store.Assignments[recovery.BeadID] = recovery
+	if err := store.Save(); err != nil {
+		t.Fatalf("seed durable ledger: %v", err)
+	}
+	plan := bulkAssignPlan{Assignments: []BulkAssignAssignment{{
+		Pane: "1", PaneID: "%93", Bead: recovery.BeadID, BeadTitle: recovery.BeadTitle,
+		AgentType: recovery.AgentType, Status: "planned", recovery: recovery,
+	}}}
+	output := BulkAssignOutput{RobotResponse: NewRobotResponse(true), Session: session}
+	applyBulkAssignPlan(t.Context(), BulkAssignOptions{ReserveFiles: true}, bulkAssignDeps(nil), &output, plan)
+	if !output.Success || len(output.Assignments) != 1 || output.Assignments[0].Status != "assigned" {
+		t.Fatalf("durable replay output = %+v", output)
+	}
+	if got := output.Assignments[0].Reservation; got == nil || got.Source != "recorded" || !got.Required || len(got.Granted) != 1 || len(got.Paths) != 1 {
+		t.Fatalf("durable replay reservation = %+v", got)
+	}
+	encoded, err := json.Marshal(output)
+	if err != nil {
+		t.Fatalf("marshal output: %v", err)
+	}
+	if strings.Contains(string(encoded), secret) || !strings.Contains(string(encoded), "[REDACTED:") {
+		t.Fatalf("ledger reservation paths must be reported redacted: %s", encoded)
+	}
+}
+
+// Crash recovery replays the recorded intent, including discovery: a row
+// recorded with discovery and no input paths reserves the bead's discovered
+// scope at recovery time, whatever the current --reserve-files says.
+func TestBulkAssignRecoveryReplaysRecordedReservationDiscovery(t *testing.T) {
+	owned := []string{"internal/api/server.go"}
+	const beadID = "bd-recover"
+	const actor = "Agent1/ntm-recover-key"
+	const prompt = "persisted discovery recovery prompt"
+	h := newBulkReservationHarness(t, "bulk-recover-discovery", &bv.BeadAssignmentDetails{
+		ID: beadID, Title: "Harden the API server", Status: "in_progress", Assignee: actor, Description: ownedOutputsDescription(owned...),
+	})
+	now := time.Now().UTC()
+	claimedAt := now.Add(-time.Minute)
+	h.store.Assignments[beadID] = &assignment.Assignment{
+		BeadID: beadID, BeadTitle: "Harden the API server", Pane: 1,
+		AgentType: "claude", AgentName: "Agent1", Status: assignment.StatusClaimed,
+		AssignedAt: now.Add(-2 * time.Minute), IdempotencyKey: "recover-key", ClaimActor: actor,
+		ClaimState: assignment.ClaimClaimed, ClaimStatus: "in_progress", ClaimedAt: &claimedAt,
+		ReservationRequired: true, ReservationDiscovery: true, ReservationState: assignment.ReservationPending,
+		DispatchTarget: "%1", OccupancyKey: "%1", DispatchState: assignment.DispatchPending,
+		PendingPrompt: prompt, PromptSHA256: assignment.PromptSHA256(prompt), IntentSHA256: assignment.PromptSHA256(prompt),
+	}
+	if err := h.store.Save(); err != nil {
+		t.Fatalf("seed discovery recovery: %v", err)
+	}
+	h.deps.FetchTriage = func(context.Context, string) (*bv.TriageResponse, error) { return mockTriage(nil, nil), nil }
+	h.deps.FetchInProgress = func(context.Context, string, int) ([]bv.BeadInProgress, error) {
+		return []bv.BeadInProgress{{ID: beadID, Title: "Harden the API server", Assignee: actor, UpdatedAt: now}}, nil
+	}
+
+	output := h.run(t, BulkAssignOptions{FromBV: true, Strategy: "stale", ReserveFiles: false})
+	if !output.Success || len(output.Assignments) != 1 || output.Assignments[0].Status != "assigned" || output.Assignments[0].Reason != "stale_recovery" {
+		t.Fatalf("recovery output = %+v", output)
+	}
+	if len(h.mail.reserveCalls) != 1 || !reflect.DeepEqual(h.mail.reserveCalls[0].Paths, owned) {
+		t.Fatalf("recovery reserve calls = %+v, want the discovered scope %v", h.mail.reserveCalls, owned)
+	}
+	if got := output.Assignments[0].Reservation; got == nil || !got.Required || got.Source != "recorded" ||
+		!reflect.DeepEqual(got.Paths, owned) || !reflect.DeepEqual(got.Granted, owned) {
+		t.Fatalf("recovery reservation report = %+v", got)
+	}
+	durable := h.store.Get(beadID)
+	if durable == nil || !durable.ReservationDiscovery || len(durable.ReservationInputPaths) != 0 ||
+		!reflect.DeepEqual(durable.ReservationRequested, owned) || durable.DispatchState != assignment.DispatchSent {
+		t.Fatalf("durable recovery = %+v, want the recorded discovery intent replayed and sent", durable)
+	}
+	if got := h.sideEffects("dispatch:"); !reflect.DeepEqual(got, []string{"dispatch:%1"}) {
+		t.Fatalf("recovery dispatches = %v", got)
+	}
 }

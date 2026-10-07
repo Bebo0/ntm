@@ -178,6 +178,64 @@ func DeclaresOwnedPaths(description string) bool {
 	return declared
 }
 
+// ErrNoReservationPaths rejects a reservation-required assignment whose bead
+// names no files, before the bead is claimed (ntm#336). The opt-out it names
+// is spelled the same on `ntm assign` and `ntm --robot-bulk-assign`.
+var ErrNoReservationPaths = errors.New("no file paths to reserve in the bead title or description; " +
+	"list the files it will change (for example under an \"## Owned outputs\" heading) or pass --reserve-files=false")
+
+// ErrOwnedSectionHasNoPaths rejects a bead whose description declares an
+// owned-files section ("## Owned outputs", "## Deliverables", "Files to
+// modify:") that names no file. Paths elsewhere in the description are read
+// as inputs, so "no file paths" alone would be misleading.
+var ErrOwnedSectionHasNoPaths = errors.New("the bead description has an owned-files section " +
+	"(such as \"## Owned outputs\", \"## Deliverables\" or \"Files to modify:\") that names no file paths; " +
+	"paths elsewhere in the description are treated as inputs and are not reserved. " +
+	"List the files it will change in that section or pass --reserve-files=false")
+
+// ReservationPathsForAssignment resolves the files a reservation-required
+// assignment must reserve from the live bead's title and description, before
+// anything is claimed. It fails with ErrOwnedSectionHasNoPaths when an
+// owned-files section is declared but empty, and with ErrNoReservationPaths
+// when the bead names no files, so such a bead is refused unclaimed instead of
+// being claimed and then failing its reservation (ntm#336). Every assignment
+// surface that reserves by default (`ntm assign`, `--robot-bulk-assign`) uses
+// it so they agree on what a bead's file scope is.
+func ReservationPathsForAssignment(title, description string) ([]string, error) {
+	paths := ReservationPathsForBead(title, description)
+	if len(paths) == 0 {
+		if DeclaresOwnedPaths(description) {
+			return nil, ErrOwnedSectionHasNoPaths
+		}
+		return nil, ErrNoReservationPaths
+	}
+	return paths, nil
+}
+
+// BeadTextReader reads one bead's live title and description from a project.
+type BeadTextReader func(ctx context.Context, projectDir, beadID string) (title, description string, err error)
+
+// DiscoverReservationPaths finds the reservation surface for a reservation
+// request that names no paths: a durable intent recorded with discovery, or a
+// caller that defers path selection to the reservation port. It reads the live
+// bead so paths listed only in the description count, not just those in the
+// title (ntm#336); when the bead cannot be read, the request's title still
+// counts. Reservation ports call it from both Reserve and ReconcileReservation
+// so the two always see the same path set.
+func DiscoverReservationPaths(ctx context.Context, projectDir string, req assignmentstore.ReservationRequest, read BeadTextReader) []string {
+	title := req.BeadTitle
+	description := ""
+	if strings.TrimSpace(projectDir) != "" && read != nil {
+		if liveTitle, liveDescription, err := read(ctx, projectDir, req.BeadID); err == nil {
+			if strings.TrimSpace(title) == "" {
+				title = liveTitle
+			}
+			description = liveDescription
+		}
+	}
+	return ReservationPathsForBead(title, description)
+}
+
 // ownedPathsSection returns the text of every owned-files section in a
 // Markdown description, including the text of each opening heading so a path
 // written on it ("## Owned outputs: `a.go`") counts.

@@ -2,7 +2,6 @@ package cli
 
 import (
 	"context"
-	"errors"
 	"reflect"
 	"sort"
 	"testing"
@@ -23,29 +22,6 @@ const gh336Description = "Read README.md and docs/research-status.md.\n\n" +
 	"- Inventory the modules and cite evidence.\n"
 
 var gh336Outputs = []string{"docs/evidence/inventory.md", "docs/specification/work/inventory.md"}
-
-func TestAssignmentReservationPathsReadsTheDescription(t *testing.T) {
-	details := &bv.BeadAssignmentDetails{ID: "ntm-336", Title: "Inventory modules and entry points", Description: gh336Description}
-
-	paths, err := assignmentReservationPaths(details, true)
-	if err != nil {
-		t.Fatalf("assignmentReservationPaths: %v", err)
-	}
-	sort.Strings(paths)
-	if !reflect.DeepEqual(paths, gh336Outputs) {
-		t.Fatalf("paths = %v, want the owned outputs %v", paths, gh336Outputs)
-	}
-
-	if paths, err := assignmentReservationPaths(details, false); err != nil || paths != nil {
-		t.Fatalf("reservations off: paths=%v err=%v, want nothing", paths, err)
-	}
-
-	// No path anywhere: refuse before the bead is claimed, with a next step.
-	empty := &bv.BeadAssignmentDetails{ID: "ntm-empty", Title: "Think about architecture", Description: "Consider how it should evolve."}
-	if _, err := assignmentReservationPaths(empty, true); !errors.Is(err, errNoReservationPaths) {
-		t.Fatalf("pathless bead: err = %v, want errNoReservationPaths", err)
-	}
-}
 
 func TestCLIReservationPortDiscoversDescriptionPaths(t *testing.T) {
 	previous := getBeadAssignmentDetailsForAssignment
@@ -89,28 +65,5 @@ func TestCLIReservationPortDiscoversDescriptionPaths(t *testing.T) {
 	}
 	if recon.State != assignment.ReservationReconciliationReserved || !reflect.DeepEqual(recon.Lease.ReservationIDs, []int{71, 72}) {
 		t.Fatalf("ReconcileReservation = %+v, want reserved with IDs [71 72]", recon)
-	}
-}
-
-// Review of 89b32d9a: a declared-but-empty owned section must say so rather
-// than claim the description names no files, and a bead whose files appear
-// only in prose still reserves them.
-func TestAssignmentReservationPathsExplainsEmptyOwnedSection(t *testing.T) {
-	declared := &bv.BeadAssignmentDetails{
-		ID: "ntm-d", Title: "Write the report",
-		Description: "Read internal/robot/robot.go.\n\n## Deliverables\n- A short written report\n",
-	}
-	_, err := assignmentReservationPaths(declared, true)
-	if !errors.Is(err, errOwnedSectionHasNoPaths) {
-		t.Fatalf("declared-but-empty owned section: err = %v, want errOwnedSectionHasNoPaths", err)
-	}
-
-	prose := &bv.BeadAssignmentDetails{
-		ID: "ntm-p", Title: "Stop grading shells",
-		Description: "The stall detector in internal/robot/tmux_adapter.go grades shells; fix it there.",
-	}
-	paths, err := assignmentReservationPaths(prose, true)
-	if err != nil || !reflect.DeepEqual(paths, []string{"internal/robot/tmux_adapter.go"}) {
-		t.Fatalf("prose-only paths = %v, err = %v; want the prose path reserved", paths, err)
 	}
 }

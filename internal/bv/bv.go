@@ -2647,6 +2647,26 @@ func GetBeadAssignmentDetailsContext(ctx context.Context, dir, beadID string) (*
 	return details, nil
 }
 
+// BeadTextReader narrows a live assignment-details reader to a bead's title
+// and description, the shape reservation discovery reads
+// (assign.DiscoverReservationPaths), so `ntm assign` and the robot assignment
+// surfaces discover a bead's file scope from the same read.
+func BeadTextReader(read func(context.Context, string, string) (*BeadAssignmentDetails, error)) func(context.Context, string, string) (string, string, error) {
+	return func(ctx context.Context, dir, beadID string) (string, string, error) {
+		if read == nil {
+			return "", "", errors.New("bead reader is not configured")
+		}
+		details, err := read(ctx, dir, beadID)
+		if err != nil {
+			return "", "", err
+		}
+		if details == nil {
+			return "", "", errors.New("live work-item details are missing")
+		}
+		return details.Title, details.Description, nil
+	}
+}
+
 // GetBeadBlockingDependentsContext returns every local work item whose
 // readiness depends on beadID. The source is one uncapped br show response,
 // rather than a ranked triage list, so no dependent is dropped by a limit.

@@ -331,6 +331,7 @@ func resetFlags() {
 	robotBulkAssignTemplate = ""
 	robotBulkAssignParallel = false
 	robotBulkAssignStagger = 0
+	robotReserveFiles = true
 	robotRequireReservation = false
 	robotReservationPaths = ""
 	robotDiff = ""
@@ -3118,10 +3119,17 @@ func TestSmartRestartHardKillFlagsRegistered(t *testing.T) {
 }
 
 func TestAtomicRobotAssignmentReservationFlagsRegistered(t *testing.T) {
-	for _, name := range []string{"require-reservation", "reservation-paths"} {
+	for _, name := range []string{"require-reservation", "reservation-paths", "reserve-files"} {
 		if rootCmd.Flags().Lookup(name) == nil {
 			t.Fatalf("expected --%s flag to be registered", name)
 		}
+	}
+	// Bulk assignment reserves by default, mirroring `ntm assign --reserve-files`.
+	if reserve := rootCmd.Flags().Lookup("reserve-files"); reserve.DefValue != "true" {
+		t.Fatalf("--reserve-files default = %q, want true", reserve.DefValue)
+	}
+	if assignReserve := newAssignCmd().Flags().Lookup("reserve-files"); assignReserve == nil || assignReserve.DefValue != "true" {
+		t.Fatalf("ntm assign --reserve-files = %+v, want a flag defaulting to true", assignReserve)
 	}
 }
 

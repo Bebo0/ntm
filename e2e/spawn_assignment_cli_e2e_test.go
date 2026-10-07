@@ -950,6 +950,7 @@ func TestE2ESpawnGrokPhaseOneBuiltBinary(t *testing.T) {
 				"--robot-format=json",
 				"--robot-bulk-assign="+hardeningSession,
 				"--allocation="+string(allocation),
+				"--reserve-files=false",
 			)
 			fixture.requireUnavailableJSONFailure(t, bulk, agent.GrokPhaseOneCapabilityHint)
 			var bulkEnvelope struct {
@@ -4828,6 +4829,7 @@ func TestE2ESpawnAssignmentSignalCancellationMatrix(t *testing.T) {
 			"--from-bv",
 			"--bulk-strategy=ready",
 			"--bulk-parallel",
+			"--reserve-files=false",
 		)
 		assertSpawnSignalJSONFailure(t, result, "TIMEOUT")
 		for _, beadID := range []string{firstBead, secondBead} {

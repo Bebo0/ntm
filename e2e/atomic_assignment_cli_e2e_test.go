@@ -8311,6 +8311,7 @@ func TestE2EAtomicBulkAssignmentCanonicalMultiWindow(t *testing.T) {
 			"--robot-bulk-assign=" + fixture.session,
 			"--allocation=" + string(encoded),
 			"--template=" + templatePath,
+			"--reserve-files=false",
 		}
 		args = append(args, extra...)
 		result := fixture.runNTM(tb, nil, args...)
@@ -9073,6 +9074,7 @@ func TestE2EAtomicRobotBulkSecretSafety(t *testing.T) {
 			"--robot-bulk-assign="+fixture.session,
 			"--allocation="+string(allocation),
 			"--template="+templatePath,
+			"--reserve-files=false",
 		)
 		if result.exitCode != 0 || len(bytes.TrimSpace(result.stderr)) != 0 {
 			t.Fatalf("robot title-secret assignment exit=%d stdout=%s stderr=%s", result.exitCode, result.stdout, result.stderr)
@@ -9475,6 +9477,9 @@ func (f *atomicAssignmentCLIFixture) createClaimedPendingViaTmuxOutage(t *testin
 	return beadID, pending
 }
 
+// atomicBulkArgs opts out of the default file reservation, as the `ntm
+// assign` scenarios here pass --reserve-files=false: these beads name no
+// files and most scenarios run without Agent Mail.
 func atomicBulkArgs(f *atomicAssignmentCLIFixture, beadID, templatePath string) []string {
 	allocation, _ := json.Marshal(map[string]string{"1": beadID})
 	return []string{
@@ -9482,6 +9487,7 @@ func atomicBulkArgs(f *atomicAssignmentCLIFixture, beadID, templatePath string) 
 		"--robot-bulk-assign=" + f.session,
 		"--allocation=" + string(allocation),
 		"--template=" + templatePath,
+		"--reserve-files=false",
 	}
 }
 

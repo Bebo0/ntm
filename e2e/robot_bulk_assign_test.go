@@ -71,10 +71,13 @@ type BulkAssignSummary struct {
 
 // runBulkAssignCmd executes ntm --robot-bulk-assign with the given flags.
 // Uses the shared E2E command timeout to remain bounded on loaded hosts.
+// These planning/envelope scenarios run without Agent Mail and with beads
+// that name no files, so they opt out of the default file reservations the
+// way the `ntm assign` e2e scenarios pass --reserve-files=false.
 func runBulkAssignCmd(t *testing.T, suite *TestSuite, session string, flags ...string) (*BulkAssignOutput, []byte, error) {
 	t.Helper()
 
-	args := []string{fmt.Sprintf("--robot-bulk-assign=%s", session)}
+	args := []string{fmt.Sprintf("--robot-bulk-assign=%s", session), "--reserve-files=false"}
 	args = append(args, flags...)
 
 	// Use context with timeout to prevent indefinite hangs (bd-brzap fix)
@@ -233,9 +236,12 @@ func prepareBulkAssignBeads(t *testing.T, fixture *robotProcessFixture, total in
 	return beads
 }
 
+// runBulkAssignFixture runs one bulk assignment against a hermetic fixture.
+// Like runBulkAssignCmd, it opts out of the default file reservations: the
+// fixture has no Agent Mail and its beads name no files.
 func runBulkAssignFixture(t *testing.T, fixture *robotProcessFixture, flags ...string) (BulkAssignOutput, robotBoundaryProcessResult) {
 	t.Helper()
-	args := []string{"--robot-bulk-assign=" + fixture.session, "--robot-format=json"}
+	args := []string{"--robot-bulk-assign=" + fixture.session, "--robot-format=json", "--reserve-files=false"}
 	args = append(args, flags...)
 	process := runBuiltRobotProcessWithin(t, defaultRunTimeout, fixture.ntmPath, fixture.projectDir, fixture.env, args...)
 	if len(bytes.TrimSpace(process.stderr)) != 0 {
@@ -588,6 +594,7 @@ func TestE2E_RobotBulkAssign_Strategy(t *testing.T) {
 				"--allocation="+string(allocation),
 				"--strategy="+strategy,
 				"--dry-run",
+				"--reserve-files=false",
 				"--robot-format=json",
 			)
 			if process.exitCode != 0 || len(bytes.TrimSpace(process.stderr)) != 0 {
@@ -655,6 +662,7 @@ func TestE2E_RobotBulkAssign_StrategyFlagsBuiltProcess(t *testing.T) {
 				"--robot-bulk-assign=" + fixture.session,
 				"--allocation=" + string(allocation),
 				"--dry-run",
+				"--reserve-files=false",
 				"--robot-format=json",
 			}
 			args = append(args, test.flags...)
@@ -834,6 +842,7 @@ func TestE2E_RobotBulkAssign_JSONStructure(t *testing.T) {
 		"--robot-format=json",
 		"--allocation="+string(allocation),
 		"--dry-run",
+		"--reserve-files=false",
 	)
 	if process.exitCode != 0 || len(bytes.TrimSpace(process.stderr)) != 0 {
 		t.Fatalf("[E2E-BULK-ASSIGN] JSON-structure process exit=%d stdout=%s stderr=%s", process.exitCode, process.stdout, process.stderr)
@@ -994,6 +1003,7 @@ func TestE2E_RobotBulkAssign_UnassignedBeads(t *testing.T) {
 		"--from-bv",
 		"--strategy=impact",
 		"--dry-run",
+		"--reserve-files=false",
 		"--robot-format=json",
 	)
 	if process.exitCode != 0 || len(bytes.TrimSpace(process.stderr)) != 0 {
@@ -1087,6 +1097,7 @@ func TestE2E_RobotBulkAssign_WithFromBV(t *testing.T) {
 			"--from-bv",
 			"--strategy="+strategy,
 			"--dry-run",
+			"--reserve-files=false",
 			"--robot-format=json",
 		)
 		if process.exitCode != 0 || len(bytes.TrimSpace(process.stderr)) != 0 {
@@ -1159,7 +1170,9 @@ func TestE2E_RobotBulkAssign_WithFromBV(t *testing.T) {
 	}
 	runTool(t, fixture, brPath, "sync", "--flush-only", "--json", "--no-auto-import")
 
-	staleOutput := runBulk(t, fixture, "stale")
+	// The hermetic fixture has no Agent Mail and the bead names no files, so
+	// fresh adoption opts out of the default file reservation.
+	staleOutput := runBulk(t, fixture, "stale", "--reserve-files=false")
 	if len(staleOutput.Assignments) != 1 {
 		t.Fatalf("stale assignments=%+v, want one", staleOutput.Assignments)
 	}
@@ -1210,7 +1223,7 @@ func TestE2E_RobotBulkAssign_WithFromBV(t *testing.T) {
 		return ""
 	}
 	paneBeforeReplay := captureStable(t, fixture, 1)
-	replayOutput := runBulk(t, fixture, "stale")
+	replayOutput := runBulk(t, fixture, "stale", "--reserve-files=false")
 	if len(replayOutput.Assignments) != 1 {
 		t.Fatalf("stale replay assignments=%+v, want one", replayOutput.Assignments)
 	}
@@ -1278,6 +1291,8 @@ func TestE2E_RobotBulkAssign_WithFromBV(t *testing.T) {
 		t.Fatalf("seed crash-window assignment ledger: %v", err)
 	}
 
+	// Recovery replays the durable intent (recorded without a reservation), so
+	// neither the reserving default nor --require-reservation reaches Agent Mail.
 	recoveredOutput := runBulk(t, recoveryFixture, "stale",
 		"--prompt-template="+filepath.Join(recoveryFixture.root, "missing-recovery-template.txt"),
 		"--require-reservation",
@@ -1329,7 +1344,7 @@ func TestE2E_RobotBulkAssign_WithFromBV(t *testing.T) {
 		"create", mixedFreshTitle, "--type=task", "--priority=0", "--silent",
 	)))
 	mixedFreshBefore := mixedPaneFixture.mustTMUXOutput(t, "capture-pane", "-p", "-t", mixedPaneID, "-S", "-")
-	mixedOutput := runBulk(t, recoveryFixture, "balanced")
+	mixedOutput := runBulk(t, recoveryFixture, "balanced", "--reserve-files=false")
 	if len(mixedOutput.Assignments) != 2 || mixedOutput.Summary.Assigned != 2 || mixedOutput.Summary.Failed != 0 {
 		t.Fatalf("mixed replay/fresh output=%+v", mixedOutput)
 	}
@@ -1504,6 +1519,8 @@ exec "$real_br" "$@"
 			"--robot-bulk-assign=" + peer.session,
 			"--from-bv",
 			"--strategy=stale",
+			// The race is over the Beads claim; the fixture has no Agent Mail.
+			"--reserve-files=false",
 			"--robot-format=json",
 		}
 		launcherArgs := []string{

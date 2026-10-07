@@ -1258,6 +1258,8 @@ func buildCommandRegistry() []RobotCommandInfo {
 				{Name: "template", Flag: "--template", Type: "string", Required: false, Description: "Custom prompt template file"},
 				{Name: "bulk-parallel", Flag: "--bulk-parallel", Type: "bool", Required: false, Description: "Execute independent assignment attempts concurrently and join all workers before returning"},
 				{Name: "bulk-stagger", Flag: "--bulk-stagger", Type: "duration", Required: false, Default: "0s", Description: "Delay between sequential assignment attempts"},
+				{Name: "reserve-files", Flag: "--reserve-files", Type: "bool", Required: false, Default: "true", Description: "Reserve each bead's file scope in Agent Mail after its claim and before dispatch, as ntm assign does: --reservation-paths when given, otherwise the paths named in the bead's title and description. A bead naming no files, or an unavailable Agent Mail, refuses that assignment unclaimed (RESERVATION_REQUIRED); assignments[].reservation reports the scope. --reserve-files=false opts out"},
+				{Name: "reservation-paths", Flag: "--reservation-paths", Type: "string", Required: false, Description: "Comma-separated project-relative globs reserved instead of the paths discovered from each bead"},
 				{Name: "dry-run", Flag: "--dry-run", Type: "bool", Required: false, Description: "Preview assignments without sending prompts"},
 			},
 			Examples: []string{

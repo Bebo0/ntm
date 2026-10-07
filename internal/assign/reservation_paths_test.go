@@ -1,9 +1,14 @@
 package assign
 
 import (
+	"context"
+	"errors"
 	"reflect"
 	"sort"
+	"strings"
 	"testing"
+
+	"github.com/Dicklesworthstone/ntm/internal/assignment"
 )
 
 // The bead description from ntm#336, generalized: inputs in a prose
@@ -166,5 +171,72 @@ func TestDeclaresOwnedPaths(t *testing.T) {
 	}
 	if DeclaresOwnedPaths("Read a.go and edit b.go.\n```\n# Outputs\n```\n") {
 		t.Fatal("a heading inside a code fence is not an owned section")
+	}
+}
+
+// The pre-claim resolution every reserving assignment surface shares
+// (ntm#336): the description's owned outputs count, a pathless bead is refused
+// with a next step, and a declared-but-empty owned section says so rather
+// than claim the bead names no files.
+func TestReservationPathsForAssignment(t *testing.T) {
+	paths, err := ReservationPathsForAssignment("Inventory modules and entry points", issue336Description)
+	want := []string{"docs/evidence/inventory.md", "docs/specification/work/inventory.md"}
+	if err != nil || !reflect.DeepEqual(sortedPaths(paths), want) {
+		t.Fatalf("ReservationPathsForAssignment() = %v, %v; want the owned outputs %v", paths, err, want)
+	}
+
+	if _, err := ReservationPathsForAssignment("Think about architecture", "Consider how it should evolve."); !errors.Is(err, ErrNoReservationPaths) {
+		t.Fatalf("pathless bead: err = %v, want ErrNoReservationPaths", err)
+	}
+	if !strings.Contains(ErrNoReservationPaths.Error(), "--reserve-files=false") {
+		t.Fatalf("ErrNoReservationPaths names no opt-out: %v", ErrNoReservationPaths)
+	}
+
+	_, err = ReservationPathsForAssignment("Write the report", "Read internal/robot/robot.go.\n\n## Deliverables\n- A short written report\n")
+	if !errors.Is(err, ErrOwnedSectionHasNoPaths) {
+		t.Fatalf("declared-but-empty owned section: err = %v, want ErrOwnedSectionHasNoPaths", err)
+	}
+
+	prose, err := ReservationPathsForAssignment("Stop grading shells", "The stall detector in internal/robot/tmux_adapter.go grades shells; fix it there.")
+	if err != nil || !reflect.DeepEqual(prose, []string{"internal/robot/tmux_adapter.go"}) {
+		t.Fatalf("prose-only paths = %v, err = %v; want the prose path reserved", prose, err)
+	}
+}
+
+// Port-level discovery reads the live description, keeps the request title
+// when it has one, and still finds title paths when the bead is unreadable.
+func TestDiscoverReservationPaths(t *testing.T) {
+	var readDir, readBead string
+	read := func(_ context.Context, projectDir, beadID string) (string, string, error) {
+		readDir, readBead = projectDir, beadID
+		return "Live title in internal/live/title.go", issue336Description, nil
+	}
+	request := assignment.ReservationRequest{BeadID: "ntm-336", BeadTitle: "Inventory modules and entry points"}
+	got := DiscoverReservationPaths(t.Context(), "/project", request, read)
+	if want := []string{"docs/evidence/inventory.md", "docs/specification/work/inventory.md"}; !reflect.DeepEqual(sortedPaths(got), want) {
+		t.Fatalf("DiscoverReservationPaths() = %v, want the live owned outputs %v", got, want)
+	}
+	if readDir != "/project" || readBead != "ntm-336" {
+		t.Fatalf("read bead %q in %q, want ntm-336 in /project", readBead, readDir)
+	}
+
+	untitled := DiscoverReservationPaths(t.Context(), "/project", assignment.ReservationRequest{BeadID: "ntm-t"},
+		func(context.Context, string, string) (string, string, error) {
+			return "Fix internal/live/title.go", "", nil
+		})
+	if !reflect.DeepEqual(untitled, []string{"internal/live/title.go"}) {
+		t.Fatalf("untitled request discovered %v, want the live title path", untitled)
+	}
+
+	unreadable := DiscoverReservationPaths(t.Context(), "/project", assignment.ReservationRequest{BeadID: "ntm-u", BeadTitle: "Fix internal/req/title.go"},
+		func(context.Context, string, string) (string, string, error) {
+			return "Ignored internal/ignored/title.go", "Ignored internal/ignored/body.go", errors.New("br unavailable")
+		})
+	if !reflect.DeepEqual(unreadable, []string{"internal/req/title.go"}) {
+		t.Fatalf("unreadable bead discovered %v, want the request title path", unreadable)
+	}
+
+	if none := DiscoverReservationPaths(t.Context(), "", assignment.ReservationRequest{BeadID: "ntm-n", BeadTitle: "Think"}, read); len(none) != 0 {
+		t.Fatalf("no project and a pathless title discovered %v, want nothing", none)
 	}
 }

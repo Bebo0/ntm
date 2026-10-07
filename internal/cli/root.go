@@ -2411,6 +2411,10 @@ Shell Integration:
 				failRobotCommand(err, robot.ErrCodeInvalidFlag, "Use comma-separated non-empty project-relative path globs", "robot-bulk-assign")
 				return
 			}
+			if robotRequireReservation && !robotReserveFiles {
+				failRobotCommand(errors.New("--require-reservation conflicts with --reserve-files=false"), robot.ErrCodeInvalidFlag, "Bulk assignment reserves files by default; drop one of the two flags", "robot-bulk-assign")
+				return
+			}
 			strategy := resolveRobotBulkAssignStrategy(cmd)
 			opts := robot.BulkAssignOptions{
 				Session:            session,
@@ -2424,7 +2428,7 @@ Shell Integration:
 				Stagger:            robotBulkAssignStagger,
 				SkipPaneSelectors:  skipSelectors,
 				PromptTemplatePath: robotBulkAssignTemplate,
-				RequireReservation: robotRequireReservation,
+				ReserveFiles:       robotReserveFiles,
 				ReservationPaths:   reservationPaths,
 			}
 			// Project/user-level default dispatch template (#153). A per-invocation
@@ -3965,7 +3969,8 @@ var (
 	robotBulkAssignTemplate string        // prompt template file path
 	robotBulkAssignParallel bool          // execute independent bulk assignments concurrently
 	robotBulkAssignStagger  time.Duration // delay between sequential bulk assignments
-	robotRequireReservation bool          // fail closed unless assignment reservations succeed
+	robotReserveFiles       bool          // reserve each bulk assignment's file scope (default true)
+	robotRequireReservation bool          // fail closed unless spawn assignment reservations succeed
 	robotReservationPaths   string        // comma-separated reservation path globs
 
 	// Robot-health flag
@@ -4647,8 +4652,9 @@ func init() {
 	rootCmd.Flags().StringVar(&robotBulkAssignTemplate, "prompt-template", "", "Custom prompt template file. Use with --robot-bulk-assign")
 	rootCmd.Flags().BoolVar(&robotBulkAssignParallel, "bulk-parallel", false, "Execute independent bulk assignments concurrently")
 	rootCmd.Flags().DurationVar(&robotBulkAssignStagger, "bulk-stagger", 0, "Delay between sequential bulk assignments, for example 500ms")
-	rootCmd.Flags().BoolVar(&robotRequireReservation, "require-reservation", false, "Require exact Agent Mail file reservations before bulk/spawn work assignment")
-	rootCmd.Flags().StringVar(&robotReservationPaths, "reservation-paths", "", "Comma-separated project-relative file globs to reserve before bulk/spawn work assignment")
+	rootCmd.Flags().BoolVar(&robotReserveFiles, "reserve-files", true, "Reserve each --robot-bulk-assign bead's file scope in Agent Mail after its claim and before dispatch, as 'ntm assign' does: --reservation-paths when given, otherwise the paths named in the bead's title and description. A bead that names no files, or an unavailable Agent Mail, refuses that assignment unclaimed. --reserve-files=false opts out")
+	rootCmd.Flags().BoolVar(&robotRequireReservation, "require-reservation", false, "Require exact Agent Mail file reservations before --robot-spawn work assignment (--robot-bulk-assign reserves by default; see --reserve-files)")
+	rootCmd.Flags().StringVar(&robotReservationPaths, "reservation-paths", "", "Comma-separated project-relative file globs to reserve before bulk/spawn work assignment; for --robot-bulk-assign they replace the paths discovered from each bead")
 
 	// Robot-health flag for session/project health summary
 	rootCmd.Flags().StringVar(&robotHealth, "robot-health", "", "Get session or project health (JSON). SESSION for per-agent health, empty for project health. Example: ntm --robot-health=myproject")
