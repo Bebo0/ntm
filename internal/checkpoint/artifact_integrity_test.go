@@ -97,7 +97,9 @@ func TestArtifactIntegrityRejectsIncompleteOrInvalidManifest(t *testing.T) {
 		{"missing_map", func(cp *Checkpoint) { cp.ArtifactIntegrity.Files = nil }, "no files map"},
 		{"future_version", func(cp *Checkpoint) { cp.ArtifactIntegrity.Version++ }, "unsupported artifact integrity version"},
 		{"unexpected_path", func(cp *Checkpoint) { cp.ArtifactIntegrity.Files["../../outside"] = ArtifactChecksum{} }, "unreferenced artifact"},
-		{"invalid_digest", func(cp *Checkpoint) { cp.ArtifactIntegrity.Files[cp.Git.PatchFile] = ArtifactChecksum{SHA256: "invalid"} }, "invalid SHA-256"},
+		{"invalid_digest", func(cp *Checkpoint) {
+			cp.ArtifactIntegrity.Files[cp.Git.PatchFile] = ArtifactChecksum{SHA256: "invalid"}
+		}, "invalid SHA-256"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			storage, cp := newArtifactIntegrityFixture(t)
