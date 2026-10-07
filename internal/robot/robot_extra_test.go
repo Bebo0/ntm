@@ -532,3 +532,53 @@ func TestRenderMarkdownFromSnapshotRejectsUnknownSections(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 }
+
+// TestBVSurfacesWithoutBeadsWorkspace: run where the project has no .beads,
+// bv-backed analyses fail as DEPENDENCY_MISSING with a br init hint, not as
+// INTERNAL_ERROR; an unreadable workspace stays INTERNAL_ERROR. The fake bv
+// prints bv's real stderr for each case.
+func TestBVSurfacesWithoutBeadsWorkspace(t *testing.T) {
+	for _, tc := range []struct {
+		name, stderr, wantCode string
+	}{
+		{"no workspace", "Error loading beads: failed to read beads directory: open $PWD/.beads: no such file or directory", ErrCodeDependencyMissing},
+		{"unreadable workspace", "Error loading beads: failed to inspect redirect file $PWD/.beads/redirect: stat $PWD/.beads/redirect: permission denied", ErrCodeInternalError},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			bin := t.TempDir()
+			script := "#!/bin/sh\necho \"" + tc.stderr + "\" >&2\necho \"Make sure you are in a project initialized with 'br init'.\" >&2\nexit 1\n"
+			if err := os.WriteFile(filepath.Join(bin, "bv"), []byte(script), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+			t.Chdir(t.TempDir())
+			bv.InvalidateTriageCache()
+			t.Cleanup(bv.InvalidateTriageCache)
+
+			check := func(surface string, resp RobotResponse) {
+				t.Helper()
+				if resp.Success || resp.ErrorCode != tc.wantCode {
+					t.Errorf("%s: success=%v code=%q error=%q, want %s", surface, resp.Success, resp.ErrorCode, resp.Error, tc.wantCode)
+				}
+				if wantInit := tc.wantCode == ErrCodeDependencyMissing; wantInit != strings.Contains(resp.Hint, "br init") {
+					t.Errorf("%s: hint %q, br init hint wanted=%v", surface, resp.Hint, wantInit)
+				}
+			}
+			triage, err := GetTriage(TriageOptions{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			check("triage", triage.RobotResponse)
+			graph, err := GetGraph()
+			if err != nil {
+				t.Fatal(err)
+			}
+			check("graph", graph.RobotResponse)
+			labels, err := GetLabelAttention(LabelAttentionOptions{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			check("label-attention", labels.RobotResponse)
+		})
+	}
+}

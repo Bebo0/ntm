@@ -576,3 +576,33 @@ func TestHasLocalBeadsDBChildDoesNotInheritParent(t *testing.T) {
 		t.Errorf("HasLocalBeadsDB(%q) = false, want true (parent has .beads/)", parent)
 	}
 }
+
+func TestIsNotInitialized(t *testing.T) {
+	tests := []struct {
+		msg  string
+		want bool
+	}{
+		{"br list --json: exit status 1: no .beads directory found", true},
+		{"beads workspace not initialized", true},
+		{"br list: {\"error\":{\"code\":\"NOT_INITIALIZED\",\"message\":\"...\"}}", true},
+		{"No beads database found in this project", true},
+		{"exit status 1: run 'br init' to create a workspace", true},
+		// bv's stderr, verbatim, where no .beads directory exists.
+		{"bv --robot-insights: exit status 1: Error loading beads: failed to read beads directory: open /p/.beads: no such file or directory\nMake sure you are in a project initialized with 'br init'.", true},
+		// bv's stderr, verbatim, for an unreadable .beads: a fault, not an
+		// empty project, despite the same trailing br init hint.
+		{"bv --robot-insights: exit status 1: Error loading beads: failed to inspect redirect file /p/.beads/redirect: stat /p/.beads/redirect: permission denied\nMake sure you are in a project initialized with 'br init'.", false},
+		{"br list --json: exit status 1: database disk image is malformed", false},
+		{"exec: \"br\": executable file not found in $PATH", false},
+		{"", false},
+	}
+	for _, tt := range tests {
+		var err error
+		if tt.msg != "" {
+			err = errors.New(tt.msg)
+		}
+		if got := IsNotInitialized(err); got != tt.want {
+			t.Errorf("IsNotInitialized(%q) = %v, want %v", tt.msg, got, tt.want)
+		}
+	}
+}

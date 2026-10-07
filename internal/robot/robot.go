@@ -9509,11 +9509,7 @@ func GetGraph() (*GraphOutput, error) {
 		insights, err := bv.GetInsights(wd)
 		if err != nil {
 			output.Error = fmt.Sprintf("failed to get insights: %v", err)
-			output.RobotResponse = NewErrorResponse(
-				err,
-				ErrCodeInternalError,
-				"Check bv graph data and repository state",
-			)
+			output.RobotResponse = bvErrorResponse(err, "Check bv graph data and repository state")
 		} else {
 			output.Insights = insights
 		}
@@ -11563,11 +11559,7 @@ func GetTriage(opts TriageOptions) (*TriageOutput, error) {
 	triage, err := bv.GetTriage(wd)
 	if err != nil {
 		output.Error = fmt.Sprintf("failed to get triage: %v", err)
-		output.RobotResponse = NewErrorResponse(
-			err,
-			ErrCodeInternalError,
-			"Check bv triage cache and repository state",
-		)
+		output.RobotResponse = bvErrorResponse(err, "Check bv triage cache and repository state")
 		return output, nil
 	}
 
@@ -11642,10 +11634,26 @@ type FileRelationsOptions struct {
 
 func setBVRobotFailure(response *RobotResponse, message, code string) {
 	hint := "Check bv output and repository state"
-	if code == ErrCodeDependencyMissing {
+	switch {
+	case code == ErrCodeDependencyMissing:
 		hint = "Install bv to enable this analysis"
+	case code == ErrCodeInternalError && bv.IsNotInitialized(errors.New(message)):
+		code, hint = ErrCodeDependencyMissing, beadsInitHint
 	}
 	*response = NewErrorResponse(errors.New(message), code, hint)
+}
+
+// beadsInitHint answers a bv/br analysis run in a project with no beads
+// workspace: nothing is wrong, there is just no tracker to analyze yet.
+const beadsInitHint = "No beads workspace in this project: run 'br init' to start tracking work"
+
+// bvErrorResponse is the failure for a bv/br call: DEPENDENCY_MISSING with
+// beadsInitHint when the project has no beads workspace, else INTERNAL_ERROR.
+func bvErrorResponse(err error, hint string) RobotResponse {
+	if bv.IsNotInitialized(err) {
+		return NewErrorResponse(err, ErrCodeDependencyMissing, beadsInitHint)
+	}
+	return NewErrorResponse(err, ErrCodeInternalError, hint)
 }
 
 // ForecastOutput is the JSON output for --robot-forecast

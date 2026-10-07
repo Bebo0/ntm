@@ -34,6 +34,36 @@ var ErrNotInstalled = errors.New("bv is not installed")
 // ErrNoBaseline indicates no baseline exists for drift checking
 var ErrNoBaseline = errors.New("no baseline found")
 
+// IsNotInitialized reports whether a br or bv call failed only because the
+// project has no beads workspace (no .beads directory or database), a state
+// of the project rather than a fault. It matches the phrasings br has used
+// across versions, including its NOT_INITIALIZED JSON code, and bv's
+// "failed to read beads directory" for a directory that does not exist.
+func IsNotInitialized(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := strings.ToLower(err.Error())
+	if strings.Contains(msg, "error loading beads") {
+		// bv appends "initialized with 'br init'" to every load failure,
+		// permission errors included; only a missing directory means no
+		// workspace.
+		return strings.Contains(msg, "failed to read beads directory") && strings.Contains(msg, "no such file or directory")
+	}
+	for _, fragment := range []string{
+		"no .beads",
+		"not initialized",
+		"not_initialized",
+		"no beads database",
+		"br init",
+	} {
+		if strings.Contains(msg, fragment) {
+			return true
+		}
+	}
+	return false
+}
+
 // DefaultTimeout is the default timeout for external command execution
 const DefaultTimeout = 30 * time.Second
 

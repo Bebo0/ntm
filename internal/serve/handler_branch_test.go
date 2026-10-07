@@ -5109,6 +5109,67 @@ func TestHandleBeadsStats_BrInstalledBadDir(t *testing.T) {
 	}
 }
 
+// installFakeBeadsTools puts br and bv first on PATH. Uninitialized, they
+// answer like br 0.2 and bv in a project with no .beads (output captured
+// verbatim); otherwise they fail like a damaged workspace.
+func installFakeBeadsTools(t *testing.T, uninitialized bool) {
+	t.Helper()
+	bin := t.TempDir()
+	br := "#!/bin/sh\necho 'Error: database is unreadable: permission denied' >&2\nexit 1\n"
+	bvScript := "#!/bin/sh\necho \"Error loading beads: failed to inspect redirect file $PWD/.beads/redirect: stat $PWD/.beads/redirect: permission denied\" >&2\n" +
+		"echo \"Make sure you are in a project initialized with 'br init'.\" >&2\nexit 1\n"
+	if uninitialized {
+		br = "#!/bin/sh\ncat <<'EOF'\n{\"error\":{\"code\":\"NOT_INITIALIZED\",\"message\":\"Beads not initialized: run 'br init' first\",\"hint\":\"Run: br init\",\"retryable\":false,\"context\":null}}\nEOF\nexit 2\n"
+		bvScript = "#!/bin/sh\necho \"Error loading beads: failed to read beads directory: open $PWD/.beads: no such file or directory\" >&2\n" +
+			"echo \"Make sure you are in a project initialized with 'br init'.\" >&2\nexit 1\n"
+	}
+	for name, script := range map[string]string{"br": br, "bv": bvScript} {
+		if err := os.WriteFile(filepath.Join(bin, name), []byte(script), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	bv.InvalidateTriageCache()
+	t.Cleanup(bv.InvalidateTriageCache)
+}
+
+// TestBeadsEndpointsWithoutWorkspace: in a project with no beads workspace,
+// br- and bv-backed endpoints answer 404 BEADS_NOT_INITIALIZED with a br init
+// message instead of a 500; a damaged workspace is still a 500.
+func TestBeadsEndpointsWithoutWorkspace(t *testing.T) {
+	endpoints := []struct {
+		path    string
+		handler func(*Server, http.ResponseWriter, *http.Request)
+	}{
+		{"/api/v1/beads/", (*Server).handleListBeads},
+		{"/api/v1/beads/stats", (*Server).handleBeadsStats},
+		{"/api/v1/beads/ready", (*Server).handleBeadsReady},
+		{"/api/v1/beads/insights", (*Server).handleBeadsInsights},
+		{"/api/v1/beads/triage", (*Server).handleBeadsTriage},
+	}
+	for _, uninitialized := range []bool{true, false} {
+		installFakeBeadsTools(t, uninitialized)
+		s, _ := setupTestServer(t)
+		s.projectDir = t.TempDir()
+		for _, ep := range endpoints {
+			w := httptest.NewRecorder()
+			ep.handler(s, w, httptest.NewRequest(http.MethodGet, ep.path, nil))
+			var body struct {
+				ErrorCode string `json:"error_code"`
+				Error     string `json:"error"`
+			}
+			_ = json.Unmarshal(w.Body.Bytes(), &body)
+			if uninitialized {
+				if w.Code != http.StatusNotFound || body.ErrorCode != ErrCodeBeadsNotInit || !strings.Contains(body.Error, "br init") {
+					t.Errorf("%s without a workspace: %d %s %q, want 404 %s with a br init hint", ep.path, w.Code, body.ErrorCode, body.Error, ErrCodeBeadsNotInit)
+				}
+			} else if w.Code != http.StatusInternalServerError || body.ErrorCode != ErrCodeInternalError {
+				t.Errorf("%s with a damaged workspace: %d %s, want 500 %s", ep.path, w.Code, body.ErrorCode, ErrCodeInternalError)
+			}
+		}
+	}
+}
+
 // --- handleBeadsReady: br installed, temp dir ---
 
 func TestHandleBeadsReady_BrInstalledBadDir(t *testing.T) {

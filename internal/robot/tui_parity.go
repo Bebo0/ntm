@@ -3892,29 +3892,6 @@ type BeadsListSummary struct {
 	Ready      int `json:"ready"`
 }
 
-// isBeadsNotInitializedError reports whether a br invocation failed only
-// because no beads workspace exists (no .beads/ directory or database). It
-// matches the phrasings br has used across versions, including the
-// NOT_INITIALIZED JSON error code emitted by br 0.2.x.
-func isBeadsNotInitializedError(err error) bool {
-	if err == nil {
-		return false
-	}
-	msg := strings.ToLower(err.Error())
-	for _, fragment := range []string{
-		"no .beads",
-		"not initialized",
-		"not_initialized",
-		"no beads database",
-		"br init",
-	} {
-		if strings.Contains(msg, fragment) {
-			return true
-		}
-	}
-	return false
-}
-
 // GetBeadsList returns beads list with optional filtering.
 // This function returns the data struct directly, enabling CLI/REST parity.
 func GetBeadsList(opts BeadsListOptions) (*BeadsListOutput, error) {
@@ -3971,7 +3948,7 @@ func GetBeadsList(opts BeadsListOptions) (*BeadsListOutput, error) {
 		// several ways across versions (plain text and JSON envelopes), so
 		// match broadly — field evidence shows the narrow match leaked
 		// NOT_INITIALIZED failures out as INTERNAL_ERROR envelopes.
-		if isBeadsNotInitializedError(err) {
+		if bv.IsNotInitialized(err) {
 			output.AgentHints = &AgentHints{
 				Summary: "Beads not initialized in this project",
 				Notes:   []string{"Run 'br init' to initialize beads tracking"},

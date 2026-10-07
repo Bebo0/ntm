@@ -72,8 +72,21 @@ const (
 	ErrCodeBeadNotFound       = "BEAD_NOT_FOUND"
 	ErrCodeBeadAlreadyClaimed = "BEAD_ALREADY_CLAIMED"
 	ErrCodeBVUnavailable      = "BV_UNAVAILABLE"
+	ErrCodeBeadsNotInit       = "BEADS_NOT_INITIALIZED"
 	beadsUnavailableMessage   = "br (beads_rust) is not installed"
+	beadsNotInitMessage       = "no beads workspace in this project: run 'br init' to start tracking work"
 )
+
+// writeBeadsCommandError reports a failed br/bv call. A project with no beads
+// workspace has no beads resource (404 BEADS_NOT_INITIALIZED), which is
+// neither a missing br (503 BEADS_UNAVAILABLE) nor a server fault (500).
+func writeBeadsCommandError(w http.ResponseWriter, err error, reqID string) {
+	if bv.IsNotInitialized(err) {
+		writeErrorResponse(w, http.StatusNotFound, ErrCodeBeadsNotInit, beadsNotInitMessage, nil, reqID)
+		return
+	}
+	writeErrorResponse(w, http.StatusInternalServerError, ErrCodeInternalError, err.Error(), nil, reqID)
+}
 
 // Beads request/response types
 
@@ -182,7 +195,7 @@ func (s *Server) handleListBeads(w http.ResponseWriter, r *http.Request) {
 
 	output, err := bv.RunBd(s.projectDirSnapshot(), args...)
 	if err != nil {
-		writeErrorResponse(w, http.StatusInternalServerError, ErrCodeInternalError, err.Error(), nil, reqID)
+		writeBeadsCommandError(w, err, reqID)
 		return
 	}
 
@@ -251,7 +264,7 @@ func (s *Server) handleCreateBead(w http.ResponseWriter, r *http.Request) {
 
 	output, err := bv.RunBd(s.projectDirSnapshot(), args...)
 	if err != nil {
-		writeErrorResponse(w, http.StatusInternalServerError, ErrCodeInternalError, err.Error(), nil, reqID)
+		writeBeadsCommandError(w, err, reqID)
 		return
 	}
 
@@ -357,7 +370,7 @@ func (s *Server) handleUpdateBead(w http.ResponseWriter, r *http.Request) {
 
 	output, err := bv.RunBd(s.projectDirSnapshot(), args...)
 	if err != nil {
-		writeErrorResponse(w, http.StatusInternalServerError, ErrCodeInternalError, err.Error(), nil, reqID)
+		writeBeadsCommandError(w, err, reqID)
 		return
 	}
 
@@ -523,7 +536,7 @@ func (s *Server) handleClaimBead(w http.ResponseWriter, r *http.Request) {
 			writeErrorResponse(w, http.StatusConflict, ErrCodeBeadAlreadyClaimed, err.Error(), nil, reqID)
 			return
 		}
-		writeErrorResponse(w, http.StatusInternalServerError, ErrCodeInternalError, err.Error(), nil, reqID)
+		writeBeadsCommandError(w, err, reqID)
 		return
 	}
 
@@ -559,7 +572,7 @@ func (s *Server) handleBeadsStats(w http.ResponseWriter, r *http.Request) {
 
 	output, err := bv.RunBd(s.projectDirSnapshot(), "stats", "--json")
 	if err != nil {
-		writeErrorResponse(w, http.StatusInternalServerError, ErrCodeInternalError, err.Error(), nil, reqID)
+		writeBeadsCommandError(w, err, reqID)
 		return
 	}
 
@@ -586,7 +599,7 @@ func (s *Server) handleBeadsReady(w http.ResponseWriter, r *http.Request) {
 
 	output, err := bv.RunBd(s.projectDirSnapshot(), "ready", "--json")
 	if err != nil {
-		writeErrorResponse(w, http.StatusInternalServerError, ErrCodeInternalError, err.Error(), nil, reqID)
+		writeBeadsCommandError(w, err, reqID)
 		return
 	}
 
@@ -614,7 +627,7 @@ func (s *Server) handleBeadsBlocked(w http.ResponseWriter, r *http.Request) {
 
 	output, err := bv.RunBd(s.projectDirSnapshot(), "blocked", "--json")
 	if err != nil {
-		writeErrorResponse(w, http.StatusInternalServerError, ErrCodeInternalError, err.Error(), nil, reqID)
+		writeBeadsCommandError(w, err, reqID)
 		return
 	}
 
@@ -642,7 +655,7 @@ func (s *Server) handleBeadsInProgress(w http.ResponseWriter, r *http.Request) {
 
 	output, err := bv.RunBd(s.projectDirSnapshot(), "list", "--status", "in_progress", "--json")
 	if err != nil {
-		writeErrorResponse(w, http.StatusInternalServerError, ErrCodeInternalError, err.Error(), nil, reqID)
+		writeBeadsCommandError(w, err, reqID)
 		return
 	}
 
@@ -676,7 +689,7 @@ func (s *Server) handleListBeadDeps(w http.ResponseWriter, r *http.Request) {
 
 	output, err := bv.RunBd(s.projectDirSnapshot(), "dep", "list", beadID, "--json")
 	if err != nil {
-		writeErrorResponse(w, http.StatusInternalServerError, ErrCodeInternalError, err.Error(), nil, reqID)
+		writeBeadsCommandError(w, err, reqID)
 		return
 	}
 
@@ -728,7 +741,7 @@ func (s *Server) handleAddBeadDep(w http.ResponseWriter, r *http.Request) {
 
 	output, err := bv.RunBd(s.projectDirSnapshot(), "dep", "add", beadID, req.BlockedBy, "--json")
 	if err != nil {
-		writeErrorResponse(w, http.StatusInternalServerError, ErrCodeInternalError, err.Error(), nil, reqID)
+		writeBeadsCommandError(w, err, reqID)
 		return
 	}
 
@@ -767,7 +780,7 @@ func (s *Server) handleRemoveBeadDep(w http.ResponseWriter, r *http.Request) {
 
 	output, err := bv.RunBd(s.projectDirSnapshot(), "dep", "remove", beadID, depID, "--json")
 	if err != nil {
-		writeErrorResponse(w, http.StatusInternalServerError, ErrCodeInternalError, err.Error(), nil, reqID)
+		writeBeadsCommandError(w, err, reqID)
 		return
 	}
 
@@ -814,7 +827,7 @@ func (s *Server) handleBeadsTriage(w http.ResponseWriter, r *http.Request) {
 	client := bv.NewBVClientWithOptions(s.projectDirSnapshot(), 0, 0)
 	recs, err := client.GetRecommendations(bv.RecommendationOpts{Limit: limit})
 	if err != nil {
-		writeErrorResponse(w, http.StatusInternalServerError, ErrCodeInternalError, err.Error(), nil, reqID)
+		writeBeadsCommandError(w, err, reqID)
 		return
 	}
 
@@ -836,7 +849,7 @@ func (s *Server) handleBeadsInsights(w http.ResponseWriter, r *http.Request) {
 
 	insights, err := bv.GetInsights(s.projectDirSnapshot())
 	if err != nil {
-		writeErrorResponse(w, http.StatusInternalServerError, ErrCodeInternalError, err.Error(), nil, reqID)
+		writeBeadsCommandError(w, err, reqID)
 		return
 	}
 
@@ -857,7 +870,7 @@ func (s *Server) handleBeadsPlan(w http.ResponseWriter, r *http.Request) {
 
 	plan, err := bv.GetPlan(s.projectDirSnapshot())
 	if err != nil {
-		writeErrorResponse(w, http.StatusInternalServerError, ErrCodeInternalError, err.Error(), nil, reqID)
+		writeBeadsCommandError(w, err, reqID)
 		return
 	}
 
@@ -878,7 +891,7 @@ func (s *Server) handleBeadsPriority(w http.ResponseWriter, r *http.Request) {
 
 	priority, err := bv.GetPriority(s.projectDirSnapshot())
 	if err != nil {
-		writeErrorResponse(w, http.StatusInternalServerError, ErrCodeInternalError, err.Error(), nil, reqID)
+		writeBeadsCommandError(w, err, reqID)
 		return
 	}
 
@@ -899,7 +912,7 @@ func (s *Server) handleBeadsRecipes(w http.ResponseWriter, r *http.Request) {
 
 	recipes, err := bv.GetRecipes(s.projectDirSnapshot())
 	if err != nil {
-		writeErrorResponse(w, http.StatusInternalServerError, ErrCodeInternalError, err.Error(), nil, reqID)
+		writeBeadsCommandError(w, err, reqID)
 		return
 	}
 
@@ -924,7 +937,7 @@ func (s *Server) handleBeadsSync(w http.ResponseWriter, r *http.Request) {
 	// site in the tree pins the same flags (internal/bv/bv.go, internal/hooks).
 	output, err := bv.RunBd(s.projectDirSnapshot(), "sync", "--flush-only", "--json", "--no-auto-import")
 	if err != nil {
-		writeErrorResponse(w, http.StatusInternalServerError, ErrCodeInternalError, err.Error(), nil, reqID)
+		writeBeadsCommandError(w, err, reqID)
 		return
 	}
 
