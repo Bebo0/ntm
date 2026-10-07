@@ -3484,9 +3484,50 @@ const activityCommandName = "activity"
 // should also refresh the normalized bv/br projection. `ntm activity` only
 // needs the store's watermarks; the projection refresh is a bv/br round trip
 // with a 10s budget that would tax a command whose whole point is a fast pane
-// snapshot.
+// snapshot. The same holds for robot surfaces that never read the projection
+// (robotSurfacesWithoutProjection).
 func robotPersistenceRefreshesProjection(cmd *cobra.Command) bool {
-	return cmd == nil || cmd.Name() != activityCommandName
+	if cmd == nil {
+		return true
+	}
+	if cmd.Name() == activityCommandName {
+		return false
+	}
+	surfaces, exempt := 0, 0
+	cmd.Flags().Visit(func(f *pflag.Flag) {
+		if !strings.HasPrefix(f.Name, "robot-") || isRobotGlobalModifier(f.Name) {
+			return
+		}
+		surfaces++
+		if robotSurfacesWithoutProjection[f.Name] {
+			exempt++
+		}
+	})
+	return surfaces == 0 || exempt < surfaces
+}
+
+// robotSurfacesWithoutProjection are robot surfaces that answer from static
+// metadata or another tool (cass, jfp, ms, xf, slb, rch, caut, ru, dcg, rano,
+// giil, Agent Mail) and never read the normalized projection: an RTA call
+// graph from each Print function, over static calls and interface invokes,
+// does not reach currentProjectionStore. They skip the refresh, which on a
+// busy host cost 2.5-10s and ~60 subprocesses per call. An invocation that
+// also names any other robot surface still refreshes.
+var robotSurfacesWithoutProjection = map[string]bool{
+	"robot-capabilities": true, "robot-help": true, "robot-docs": true, "robot-schema": true,
+	"robot-palette": true, "robot-recipes": true, "robot-ensemble-modes": true, "robot-ensemble-presets": true,
+	"robot-default-prompts": true, "robot-profile-list": true, "robot-profile-show": true,
+	"robot-cass-search": true, "robot-cass-context": true, "robot-cass-insights": true, "robot-cass-status": true,
+	"robot-ms-search": true, "robot-ms-show": true, "robot-xf-search": true, "robot-xf-status": true,
+	"robot-jfp-status": true, "robot-jfp-list": true, "robot-jfp-search": true, "robot-jfp-show": true,
+	"robot-jfp-suggest": true, "robot-jfp-export": true, "robot-jfp-update": true,
+	"robot-jfp-categories": true, "robot-jfp-tags": true, "robot-jfp-bundles": true,
+	"robot-slb-pending": true, "robot-slb-approve": true, "robot-slb-deny": true,
+	"robot-rch-status": true, "robot-rch-workers": true, "robot-tools": true, "robot-acfs-status": true,
+	"robot-proxy-status": true, "robot-quota-status": true, "robot-quota-check": true,
+	"robot-account-status": true, "robot-accounts-list": true, "robot-switch-account": true,
+	"robot-ru-sync": true, "robot-dcg-status": true, "robot-dcg-check": true, "robot-guard": true,
+	"robot-mail": true, "robot-mail-check": true, "robot-rano-stats": true, "robot-giil-fetch": true,
 }
 
 func initializeRobotPersistence(ctx context.Context, refreshProjection bool) error {

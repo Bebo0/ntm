@@ -8003,6 +8003,46 @@ func TestShouldInitializeRobotPersistenceForActivity(t *testing.T) {
 	}
 }
 
+// TestRobotSurfacesWithoutProjectionSkipRefresh: a tool-bridge surface skips
+// the projection refresh, also with a global modifier, while any other robot
+// surface in the invocation keeps it. Every exempt name must be a real root
+// flag, so a renamed flag cannot silently fall out of the list.
+func TestRobotSurfacesWithoutProjectionSkipRefresh(t *testing.T) {
+	for name := range robotSurfacesWithoutProjection {
+		if rootCmd.Flags().Lookup(name) == nil {
+			t.Errorf("robotSurfacesWithoutProjection names %q, which is not a root flag", name)
+		}
+	}
+
+	refreshes := func(args ...string) bool {
+		t.Helper()
+		cmd := &cobra.Command{Use: "ntm"}
+		cmd.Flags().Bool("robot-mail", false, "")
+		cmd.Flags().Bool("robot-status", false, "")
+		cmd.Flags().String("robot-format", "", "")
+		cmd.Flags().String("jfp-category", "", "")
+		if err := cmd.ParseFlags(args); err != nil {
+			t.Fatal(err)
+		}
+		return robotPersistenceRefreshesProjection(cmd)
+	}
+	for _, tc := range []struct {
+		args []string
+		want bool
+	}{
+		{[]string{"--robot-mail"}, false},
+		{[]string{"--robot-mail", "--robot-format=toon", "--jfp-category=x"}, false},
+		{[]string{"--robot-status"}, true},
+		{[]string{"--robot-mail", "--robot-status"}, true},
+		{[]string{"--robot-format=toon"}, true},
+		{nil, true},
+	} {
+		if got := refreshes(tc.args...); got != tc.want {
+			t.Errorf("args %v: refreshes projection = %v, want %v", tc.args, got, tc.want)
+		}
+	}
+}
+
 // GH #333: --spawn-oc reaches the robot spawn engine with its count and model.
 func TestRobotSpawnOptionsFromFlagsCarriesOpencode(t *testing.T) {
 	resetFlags()
