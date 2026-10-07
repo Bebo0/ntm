@@ -184,6 +184,11 @@ func stubRobotWork(t *testing.T, collect func(ctx context.Context, store *state.
 	t.Cleanup(func() { collectRobotWork = previous })
 }
 
+// developerDataHome is XDG_DATA_HOME as the test binary inherited it, before
+// TestMain isolates it; read-only tests of installed tools that keep their
+// data there (cass) restore it.
+var developerDataHome string
+
 func TestMain(m *testing.M) {
 	cleanupTmux, err := testutil.IsolateTmuxTestProcess()
 	if err != nil {
@@ -196,6 +201,7 @@ func TestMain(m *testing.M) {
 	// Robot sends record prompt history (and spawns write manifests) under
 	// XDG_DATA_HOME; never let the package's real-tmux sends append to the
 	// developer's own history. Tests that inspect it set their own.
+	developerDataHome = os.Getenv("XDG_DATA_HOME")
 	dataHome, err := os.MkdirTemp("", "ntm-robot-test-data-")
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "create robot test data home: %v\n", err)
@@ -677,6 +683,8 @@ func TestRobotCASSInsightsMatchesInstalledCass(t *testing.T) {
 	if _, err := exec.LookPath("cass"); err != nil {
 		t.Skip("cass not installed")
 	}
+	// Both runs read the developer's real index, not TestMain's empty data home.
+	t.Setenv("XDG_DATA_HOME", developerDataHome)
 	raw, err := exec.Command("cass", "search", "*", "--json", "--limit", "0", "--since", "30d", "--aggregate", "agent,workspace").Output()
 	var direct struct {
 		Aggregations struct {
