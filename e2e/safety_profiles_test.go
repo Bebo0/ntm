@@ -465,25 +465,24 @@ func TestE2E_SafetyProfile_PrivacySessionLifecycle(t *testing.T) {
 
 	mgr := privacy.New(cfg)
 
-	// Register session
-	mgr.RegisterSession("test-session", true, false)
-	state := mgr.GetState("test-session")
-	if state == nil {
-		t.Fatal("[E2E-SAFETY-PROFILE] registered session should have state")
-	}
-	suite.Logger().Log("[E2E-SAFETY-PROFILE] Registered: privacyMode=%v allowPersist=%v", state.PrivacyMode, state.AllowPersist)
-
-	if !state.PrivacyMode {
+	// A session registered in privacy mode without --allow-persist refuses
+	// the persistence the privacy config disables; one registered with it
+	// may persist. (The manager's GetState/UnregisterSession accessors were
+	// removed as dead code; behavior is asserted through the live API.)
+	mgr.RegisterSession("private-session", true, false)
+	if !mgr.IsPrivacyEnabled("private-session") {
 		t.Error("[E2E-SAFETY-PROFILE] session should have privacy mode enabled")
 	}
-
-	// Unregister session
-	mgr.UnregisterSession("test-session")
-	state = mgr.GetState("test-session")
-	if state != nil {
-		t.Error("[E2E-SAFETY-PROFILE] unregistered session should have nil state")
+	err := mgr.CanPersist("private-session", privacy.OpPromptHistory)
+	suite.Logger().Log("[E2E-SAFETY-PROFILE] private session prompt-history persistence: %v", err)
+	if cfg.DisablePromptHistory && err == nil {
+		t.Error("[E2E-SAFETY-PROFILE] privacy-mode session persisted prompt history")
 	}
-	suite.Logger().Log("[E2E-SAFETY-PROFILE] Session unregistered, state is nil")
+
+	mgr.RegisterSession("persisting-session", true, true)
+	if err := mgr.CanPersist("persisting-session", privacy.OpPromptHistory); err != nil {
+		t.Errorf("[E2E-SAFETY-PROFILE] --allow-persist session refused persistence: %v", err)
+	}
 }
 
 // -------------------------------------------------------------------

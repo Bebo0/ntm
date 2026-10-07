@@ -2596,6 +2596,9 @@ func spawnAtomicRequest(item workItem, target string, pane int, agentType, agent
 		AgentType: agentType, AgentName: agentName, Actor: agentName, Prompt: prompt,
 		IdempotencyKey: key, RequireReservation: requireReservation, ReservationTTL: time.Hour,
 		RequestedPaths: append([]string(nil), reservationPaths...),
+		// Without explicit paths the shared Agent Mail port discovers the
+		// bead's file scope, as --robot-bulk-assign and ntm assign do.
+		AllowReservationDiscovery: requireReservation && len(reservationPaths) == 0,
 	}
 }
 
