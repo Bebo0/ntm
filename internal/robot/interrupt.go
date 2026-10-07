@@ -7,7 +7,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -555,7 +554,7 @@ func interruptOperationBindingHash(opts InterruptOptions) string {
 	b.list(opts.Panes)
 	b.field(strconv.FormatBool(opts.All))
 	b.field(strconv.FormatBool(opts.Force))
-	b.list(normalizedInterruptAgentTypes(opts.AgentTypes))
+	b.list(normalizedAgentTypeFilter(opts.AgentTypes))
 	inputSHA, _ := operationPayloadDigest(opts.Message)
 	b.field(inputSHA)
 	return b.sum()
@@ -778,32 +777,7 @@ func resolveInterruptTargets(panes []tmux.Pane, selectors []string, all bool, ag
 			targetPanes = append(targetPanes, pane)
 		}
 	}
-	wanted := normalizedInterruptAgentTypes(agentTypes)
-	if len(wanted) == 0 {
-		return targetPanes, nil
-	}
-	filtered := make([]tmux.Pane, 0, len(targetPanes))
-	for _, pane := range targetPanes {
-		if slices.Contains(wanted, normalizeAgentType(interruptPaneAgentType(pane))) {
-			filtered = append(filtered, pane)
-		}
-	}
-	return filtered, nil
-}
-
-// normalizedInterruptAgentTypes canonicalizes --type values (aliases
-// resolved, blanks dropped, sorted, deduplicated) for both target filtering
-// and the idempotency binding.
-func normalizedInterruptAgentTypes(agentTypes []string) []string {
-	out := make([]string, 0, len(agentTypes))
-	for _, t := range agentTypes {
-		if strings.TrimSpace(t) == "" {
-			continue
-		}
-		out = append(out, normalizeAgentType(t))
-	}
-	slices.Sort(out)
-	return slices.Compact(out)
+	return keepPanesOfAgentTypes(targetPanes, agentTypes, interruptPaneAgentType), nil
 }
 
 func unavailableRobotPaneObservation(pane tmux.Pane, observationError string, observedAt time.Time) status.PaneObservation {

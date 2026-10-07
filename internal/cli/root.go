@@ -2347,12 +2347,17 @@ Shell Integration:
 				}
 				ackPollMs = int(pollDur.Milliseconds())
 			}
+			var ackAgentTypes []string
+			if robotSendType != "" {
+				ackAgentTypes = strings.Split(robotSendType, ",")
+			}
 			opts := robot.AckOptions{
-				Session:   session,
-				Message:   robotSendMsg, // Reuse --msg flag for echo detection
-				Panes:     paneSelectors,
-				TimeoutMs: int(ackTimeout.Milliseconds()),
-				PollMs:    ackPollMs,
+				Session:    session,
+				Message:    robotSendMsg, // Reuse --msg flag for echo detection
+				Panes:      paneSelectors,
+				AgentTypes: ackAgentTypes,
+				TimeoutMs:  int(ackTimeout.Milliseconds()),
+				PollMs:     ackPollMs,
 			}
 			if err := robot.PrintAck(opts); err != nil {
 				recordRobotProcessExit(err)

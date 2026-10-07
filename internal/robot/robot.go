@@ -14,6 +14,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -11411,6 +11412,37 @@ func matchesAgentTypeFilter(agentType, filter string) bool {
 		return true
 	}
 	return normalizeAgentType(agentType) == normalizeAgentType(filter)
+}
+
+// normalizedAgentTypeFilter canonicalizes a --type list (aliases resolved,
+// blanks dropped, sorted, deduplicated) for target filtering and for
+// idempotency bindings.
+func normalizedAgentTypeFilter(agentTypes []string) []string {
+	out := make([]string, 0, len(agentTypes))
+	for _, t := range agentTypes {
+		if strings.TrimSpace(t) == "" {
+			continue
+		}
+		out = append(out, normalizeAgentType(t))
+	}
+	slices.Sort(out)
+	return slices.Compact(out)
+}
+
+// keepPanesOfAgentTypes narrows panes to those whose agent type (as typeOf
+// classifies it) is in the --type list; an empty list keeps every pane.
+func keepPanesOfAgentTypes(panes []tmux.Pane, agentTypes []string, typeOf func(tmux.Pane) string) []tmux.Pane {
+	wanted := normalizedAgentTypeFilter(agentTypes)
+	if len(wanted) == 0 {
+		return panes
+	}
+	kept := make([]tmux.Pane, 0, len(panes))
+	for _, pane := range panes {
+		if slices.Contains(wanted, normalizeAgentType(typeOf(pane))) {
+			kept = append(kept, pane)
+		}
+	}
+	return kept
 }
 
 // ============================================================================

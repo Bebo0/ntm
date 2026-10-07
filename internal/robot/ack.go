@@ -77,11 +77,12 @@ const ackCaptureLines = 200
 
 // AckOptions configures the PrintAck operation
 type AckOptions struct {
-	Session   string   // Target session name
-	Message   string   // The message that was sent (for echo detection)
-	Panes     []string // Specific pane indices to monitor
-	TimeoutMs int      // How long to wait for acknowledgments (default 30000)
-	PollMs    int      // How often to poll for changes (default 500)
+	Session    string   // Target session name
+	Message    string   // The message that was sent (for echo detection)
+	Panes      []string // Specific pane indices to monitor
+	AgentTypes []string // Only watch panes of these agent types (aliases accepted; empty = any type)
+	TimeoutMs  int      // How long to wait for acknowledgments (default 30000)
+	PollMs     int      // How often to poll for changes (default 500)
 }
 
 // GetAck monitors panes for acknowledgment after a send operation and returns the result.
@@ -135,7 +136,7 @@ func GetAck(opts AckOptions) (*AckOutput, error) {
 		return output, nil
 	}
 
-	targetPanes, targetErr := resolveAckTargets(panes, opts.Panes)
+	targetPanes, targetErr := resolveAckTargets(panes, opts.Panes, opts.AgentTypes)
 	if targetErr != nil {
 		output.Failed = append(output.Failed, AckFailure{Pane: "selector", Reason: targetErr.Error()})
 		output.RobotResponse = NewErrorResponse(
@@ -288,10 +289,17 @@ func shouldSkipDefaultAgentPane(pane tmux.Pane, agentType string) bool {
 	return agentType == "user"
 }
 
-func resolveAckTargets(panes []tmux.Pane, selectors []string) ([]tmux.Pane, error) {
+// resolveAckTargets picks the panes an ack watches: the explicit selectors
+// when given, otherwise every agent pane; a --type list then narrows either
+// set, as it does for --robot-send and --robot-interrupt.
+func resolveAckTargets(panes []tmux.Pane, selectors, agentTypes []string) ([]tmux.Pane, error) {
 	ordered := tmux.SortPanesByTopology(panes)
 	if len(selectors) > 0 {
-		return tmux.ResolvePaneSelectors(ordered, selectors, false)
+		resolved, err := tmux.ResolvePaneSelectors(ordered, selectors, false)
+		if err != nil {
+			return nil, err
+		}
+		return keepPanesOfAgentTypes(resolved, agentTypes, ackPaneAgentType), nil
 	}
 	targets := make([]tmux.Pane, 0, len(ordered))
 	for _, pane := range ordered {
@@ -299,7 +307,7 @@ func resolveAckTargets(panes []tmux.Pane, selectors []string) ([]tmux.Pane, erro
 			targets = append(targets, pane)
 		}
 	}
-	return targets, nil
+	return keepPanesOfAgentTypes(targets, agentTypes, ackPaneAgentType), nil
 }
 
 func detectAcknowledgmentForAgent(initialOutput, currentOutput, message, agentType string) (AckType, bool) {

@@ -197,7 +197,7 @@ func TestResolveAckTargetsCanonicalSelectors(t *testing.T) {
 		{ID: "%21", WindowIndex: 1, Index: 1, Type: tmux.AgentGemini},
 	}
 
-	targets, err := resolveAckTargets(panes, []string{"1"})
+	targets, err := resolveAckTargets(panes, []string{"1"}, nil)
 	if err != nil {
 		t.Fatalf("resolveAckTargets(window selector) error = %v", err)
 	}
@@ -205,7 +205,7 @@ func TestResolveAckTargetsCanonicalSelectors(t *testing.T) {
 		t.Fatalf("window selector resolved %+v, want %%20 then %%21", targets)
 	}
 
-	targets, err = resolveAckTargets(panes, []string{"0.1", "%11", "0.1"})
+	targets, err = resolveAckTargets(panes, []string{"0.1", "%11", "0.1"}, nil)
 	if err != nil {
 		t.Fatalf("resolveAckTargets(alias dedup) error = %v", err)
 	}
@@ -213,11 +213,34 @@ func TestResolveAckTargetsCanonicalSelectors(t *testing.T) {
 		t.Fatalf("alias dedup resolved %+v, want only %%11", targets)
 	}
 
-	if _, err := resolveAckTargets(panes, []string{"9.0"}); err == nil || paneSelectorRobotErrorCode(err) != ErrCodePaneNotFound {
+	if _, err := resolveAckTargets(panes, []string{"9.0"}, nil); err == nil || paneSelectorRobotErrorCode(err) != ErrCodePaneNotFound {
 		t.Fatalf("missing selector error = %v, code = %q", err, paneSelectorRobotErrorCode(err))
 	}
-	if _, err := resolveAckTargets(panes, []string{"1.x"}); err == nil || paneSelectorRobotErrorCode(err) != ErrCodeInvalidFlag {
+	if _, err := resolveAckTargets(panes, []string{"1.x"}, nil); err == nil || paneSelectorRobotErrorCode(err) != ErrCodeInvalidFlag {
 		t.Fatalf("malformed selector error = %v, code = %q", err, paneSelectorRobotErrorCode(err))
+	}
+}
+
+// TestResolveAckTargetsTypeFilter: --robot-ack --type narrows the watched
+// panes (it used to be accepted and ignored, so every agent was watched).
+func TestResolveAckTargetsTypeFilter(t *testing.T) {
+	panes := []tmux.Pane{
+		{ID: "%10", WindowIndex: 0, Index: 0, Type: tmux.AgentUser},
+		{ID: "%11", WindowIndex: 0, Index: 1, Type: tmux.AgentClaude},
+		{ID: "%20", WindowIndex: 1, Index: 0, Type: tmux.AgentCodex},
+		{ID: "%21", WindowIndex: 1, Index: 1, Type: tmux.AgentGemini},
+	}
+	targets, err := resolveAckTargets(panes, nil, []string{"cod"})
+	if err != nil || len(targets) != 1 || targets[0].ID != "%20" {
+		t.Fatalf("--type=cod resolved %+v (err %v), want only %%20", targets, err)
+	}
+	targets, err = resolveAckTargets(panes, []string{"1"}, []string{"gmi"})
+	if err != nil || len(targets) != 1 || targets[0].ID != "%21" {
+		t.Fatalf("--panes=1 --type=gmi resolved %+v (err %v), want only %%21", targets, err)
+	}
+	targets, err = resolveAckTargets(panes, nil, []string{"nonsense-type"})
+	if err != nil || len(targets) != 0 {
+		t.Fatalf("--type=nonsense-type resolved %+v (err %v), want no targets", targets, err)
 	}
 }
 
