@@ -1299,6 +1299,13 @@ func TestIsValidRoute(t *testing.T) {
 		{RouteLeastLoaded, true},
 		{RouteFirstAvailable, true},
 		{RouteRoundRobin, true},
+		// Every router strategy `ntm send --route` takes, not just three.
+		{RoutingStrategy("round-robin-available"), true},
+		{RoutingStrategy("random"), true},
+		{RoutingStrategy("sticky"), true},
+		{RoutingStrategy("affinity"), true},
+		// explicit names a pane; a step's pane field does that.
+		{RoutingStrategy("explicit"), false},
 		{RoutingStrategy("unknown"), false},
 		{RoutingStrategy(""), false},
 	}

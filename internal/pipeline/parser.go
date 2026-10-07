@@ -13,6 +13,8 @@ import (
 
 	"github.com/BurntSushi/toml"
 	"gopkg.in/yaml.v3"
+
+	"github.com/Dicklesworthstone/ntm/internal/robot"
 )
 
 // ParseError represents a validation or parsing error with location info
@@ -562,7 +564,7 @@ func validateStep(step *Step, stepField string, stepIDs map[string]bool, result 
 			result.addError(ParseError{
 				Field:   stepField + ".route",
 				Message: fmt.Sprintf("invalid routing strategy: %s", step.Route),
-				Hint:    "Valid strategies: least-loaded, first-available, round-robin",
+				Hint:    "Valid strategies: " + validRouteNames(),
 			})
 		}
 	}
@@ -833,12 +835,24 @@ func isValidID(id string) bool {
 	return true
 }
 
+// isValidRoute accepts the router's strategies (robot.GetStrategyNames) except
+// explicit, which names a pane: a step's pane field does that. Pipelines kept
+// their own three-name list, so round-robin-available, random, sticky and
+// affinity — all available to `ntm send --route` — were rejected here.
 func isValidRoute(r RoutingStrategy) bool {
-	switch r {
-	case RouteLeastLoaded, RouteFirstAvailable, RouteRoundRobin:
-		return true
+	name := robot.StrategyName(r)
+	return name != robot.StrategyExplicit && robot.IsValidStrategy(name)
+}
+
+// validRouteNames lists the strategies a step's route may name.
+func validRouteNames() string {
+	var names []string
+	for _, name := range robot.GetStrategyNames() {
+		if name != robot.StrategyExplicit {
+			names = append(names, string(name))
+		}
 	}
-	return false
+	return strings.Join(names, ", ")
 }
 
 func isValidErrorAction(a ErrorAction) bool {

@@ -2630,16 +2630,10 @@ func (e *Executor) selectAndMarkPane(ctx context.Context, step *Step, usedPanes 
 	}
 
 	// Select routing strategy
+	// The parser accepted step.Route against the router's own strategy set.
 	strategy := robot.StrategyLeastLoaded
 	if step.Route != "" {
-		switch step.Route {
-		case RouteLeastLoaded:
-			strategy = robot.StrategyLeastLoaded
-		case RouteFirstAvailable:
-			strategy = robot.StrategyFirstAvailable
-		case RouteRoundRobin:
-			strategy = robot.StrategyRoundRobin
-		}
+		strategy = robot.StrategyName(step.Route)
 	}
 
 	// Route to best agent
@@ -2737,16 +2731,10 @@ func (e *Executor) selectPane(ctx context.Context, step *Step) (paneID string, a
 	}
 
 	// Select routing strategy
+	// The parser accepted step.Route against the router's own strategy set.
 	strategy := robot.StrategyLeastLoaded
 	if step.Route != "" {
-		switch step.Route {
-		case RouteLeastLoaded:
-			strategy = robot.StrategyLeastLoaded
-		case RouteFirstAvailable:
-			strategy = robot.StrategyFirstAvailable
-		case RouteRoundRobin:
-			strategy = robot.StrategyRoundRobin
-		}
+		strategy = robot.StrategyName(step.Route)
 	}
 
 	// Route to best agent

@@ -481,10 +481,17 @@ Agent types:
   prompt: Write tests
 ```
 
-Routing strategies:
+Routing strategies (the same router `ntm send --route` uses):
 - `least-loaded` - Choose agent with lowest context usage
 - `first-available` - Choose first idle agent
 - `round-robin` - Rotate through agents
+- `round-robin-available` - Rotate through agents, skipping busy ones
+- `random` - Pick a random available agent
+- `sticky` - Prefer the agent that handled the previous routed step
+- `affinity` - Prefer the agent holding Agent Mail reservations on files the
+  prompt names (falls back to least-loaded when none does)
+
+`explicit` is not a route: name the pane with `pane:` instead.
 
 ## Wait Configuration
 
