@@ -11890,6 +11890,10 @@
           "project_registered": {
             "type": "boolean",
             "description": "Project registered"
+          },
+          "session_agent": {
+            "type": "string",
+            "description": "Session agent"
           }
         },
         "required": [

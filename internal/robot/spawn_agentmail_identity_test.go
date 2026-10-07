@@ -87,6 +87,12 @@ func (s *spawnIdentityMailServer) start(t *testing.T) *httptest.Server {
 				"id": 40 + created, "name": s.names[created-1], "program": program,
 				"model": req.Params.Arguments["model"], "project_id": 7,
 			}
+		case "register_agent":
+			// The session-level coordinator identity (program ntm).
+			result = map[string]interface{}{
+				"id": 90, "name": "RedStone", "program": req.Params.Arguments["program"],
+				"model": req.Params.Arguments["model"], "project_id": 7,
+			}
 		default:
 			s.mu.Unlock()
 			fail("unknown tool: " + req.Params.Name)
@@ -215,6 +221,14 @@ func TestGetSpawnPublishesAgentMailIdentityBeforeEachLaunch(t *testing.T) {
 	}
 	if len(joined) != len(want) || joined["%1"] != want["%1"] || joined["%2"] != want["%2"] {
 		t.Errorf("agents[] pane_id -> agent_mail_name = %v, want %v", joined, want)
+	}
+	// The session-level identity `ntm lock` acts as is registered too, so a
+	// robot-spawned session is lockable like an `ntm spawn` one.
+	if status.SessionAgent != "RedStone" {
+		t.Errorf("agent_mail.session_agent = %q, want RedStone", status.SessionAgent)
+	}
+	if saved, err := agentmail.LoadSessionAgent(session, dir); err != nil || saved == nil || saved.AgentName != "RedStone" {
+		t.Errorf("session agent.json = %+v (err %v), want RedStone persisted for ntm lock", saved, err)
 	}
 
 	tools, programs := mail.calls()

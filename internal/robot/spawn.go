@@ -1397,6 +1397,15 @@ func GetSpawn(ctx context.Context, opts SpawnOptions, cfg *config.Config) (*Spaw
 	// Best-effort by contract; a no-op unless badges are enabled.
 	identity.ReconcileBadges(ctx)
 
+	// Register the session-level identity `ntm lock`/`unlock`/`locks` and the
+	// session coordinator act as, as `ntm spawn` does; without it a
+	// robot-spawned session has no Agent Mail sender. Best-effort.
+	if len(launchRequests) > 0 {
+		if sessionAgent := spawnidentity.RegisterSession(ctx, dir, opts.Session, identityOpts); sessionAgent != "" && output.AgentMail != nil {
+			output.AgentMail.SessionAgent = sessionAgent
+		}
+	}
+
 	// Start the resilience session monitor through the shared spawn code path
 	// (same manifest writer + monitor launcher as CLI spawn; WS0-G6,
 	// bd-ws1-truth-safety-l5ddi.8). BEST-EFFORT: a monitor/manifest failure

@@ -3817,7 +3817,7 @@ func spawnSessionLogicContextWithOutput(ctx context.Context, opts SpawnOptions, 
 		}
 
 		// Register session coordinator with Agent Mail (creates agent.json for ntm lock)
-		registerSessionAgent(ctx, opts.Session, dir)
+		sessionAgent := registerSessionAgent(ctx, opts.Session, dir)
 
 		// Every agent is launched: reconcile the pane badges published as
 		// "starting" before each launch so they reflect the running agents
@@ -3827,6 +3827,9 @@ func spawnSessionLogicContextWithOutput(ctx context.Context, opts SpawnOptions, 
 		// Agent Mail identities were prepared and published per-pane before
 		// each launch (gh#255); assemble the accumulated status for output.
 		agentMailStatus := identityCoordinator.Status()
+		if agentMailStatus != nil {
+			agentMailStatus.SessionAgent = sessionAgent
+		}
 		if err := ctx.Err(); err != nil {
 			return outputError(fmt.Errorf("spawn registration canceled: %w", err))
 		}
@@ -4407,37 +4410,11 @@ func preflightOllamaSpawnContext(ctx context.Context, opts SpawnOptions) (string
 	return normalizedHost, nil
 }
 
-// registerSessionAgent registers the session with Agent Mail.
-// This is non-blocking and logs but does not fail if unavailable.
-func registerSessionAgent(parentCtx context.Context, sessionName, workingDir string) {
-	if !spawnidentity.RegistrationEnabled(cfg) {
-		return
-	}
-	if parentCtx == nil {
-		if !IsJSONOutput() {
-			output.PrintWarning("Agent Mail registration skipped: missing command context")
-		}
-		return
-	}
-	var opts []agentmail.Option
-	if cfg != nil {
-		opts = append(opts, agentmail.ConfigOptions(cfg.AgentMail.URL, cfg.AgentMail.Token)...)
-	}
-	client := agentmail.NewClient(opts...)
-	ctx, cancel := context.WithTimeout(parentCtx, 15*time.Second)
-	defer cancel()
-
-	info, err := client.RegisterSessionAgent(ctx, sessionName, workingDir)
-	if err != nil {
-		// Log but don't fail
-		if !IsJSONOutput() {
-			output.PrintWarningf("Agent Mail registration failed: %v", err)
-		}
-		return
-	}
-	if info != nil && !IsJSONOutput() {
-		output.PrintInfof("Registered with Agent Mail as %s", info.AgentName)
-	}
+// registerSessionAgent registers the session-level identity `ntm lock` acts
+// as and returns its name ("" when disabled or failed). It logs but never
+// fails when Agent Mail is unavailable.
+func registerSessionAgent(parentCtx context.Context, sessionName, workingDir string) string {
+	return spawnidentity.RegisterSession(parentCtx, workingDir, sessionName, spawnIdentityOptions())
 }
 
 // The per-pane Agent Mail identity coordinator (gh#255, ntm#256, ntm#257,

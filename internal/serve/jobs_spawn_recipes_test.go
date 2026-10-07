@@ -154,6 +154,9 @@ func TestRESTSpawnProvisionsAgentMailIdentity(t *testing.T) {
 			result = map[string]interface{}{"id": 3, "slug": "proj", "human_key": req.Params.Arguments["project_key"]}
 		case "create_agent_identity":
 			result = map[string]interface{}{"id": 9, "name": "AmberHeron", "program": req.Params.Arguments["program"], "model": req.Params.Arguments["model"]}
+		case "register_agent":
+			// The session-level coordinator identity `ntm lock` acts as.
+			result = map[string]interface{}{"id": 10, "name": "SilverFox", "program": req.Params.Arguments["program"], "model": req.Params.Arguments["model"]}
 		default:
 			t.Errorf("unexpected Agent Mail tool %q", req.Params.Name)
 		}
@@ -207,6 +210,7 @@ func TestRESTSpawnProvisionsAgentMailIdentity(t *testing.T) {
 			Available        bool              `json:"available"`
 			AgentsRegistered int               `json:"agents_registered"`
 			AgentMap         map[string]string `json:"agent_map"`
+			SessionAgent     string            `json:"session_agent"`
 		} `json:"agent_mail"`
 	}
 	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil || !body.Success {
@@ -217,6 +221,14 @@ func TestRESTSpawnProvisionsAgentMailIdentity(t *testing.T) {
 	}
 	if body.AgentMail == nil || !body.AgentMail.Available || body.AgentMail.AgentsRegistered != 1 || body.AgentMail.AgentMap["%5"] != "AmberHeron" {
 		t.Fatalf("REST spawn agent_mail = %+v, want AmberHeron registered for %%5: %s", body.AgentMail, rec.Body.String())
+	}
+	// A REST-spawned session gets the session-level identity too, so
+	// `ntm lock` works in it.
+	if body.AgentMail.SessionAgent != "SilverFox" {
+		t.Fatalf("REST spawn agent_mail.session_agent = %q, want SilverFox: %s", body.AgentMail.SessionAgent, rec.Body.String())
+	}
+	if saved, err := agentmail.LoadSessionAgent("identity-workers", project); err != nil || saved == nil || saved.AgentName != "SilverFox" {
+		t.Fatalf("session agent.json = %+v (err %v), want SilverFox persisted", saved, err)
 	}
 }
 

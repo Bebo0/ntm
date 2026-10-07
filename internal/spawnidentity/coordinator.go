@@ -31,6 +31,9 @@ type AgentMailSpawnStatus struct {
 	AgentsRegistered  int               `json:"agents_registered"`
 	AgentsFailed      int               `json:"agents_failed"`
 	AgentMap          map[string]string `json:"agent_map,omitempty"` // stable %pane_id -> agent name
+	// SessionAgent is the session-level identity `ntm lock` and the session
+	// coordinator act as (RegisterSession); absent when it was not registered.
+	SessionAgent string `json:"session_agent,omitempty"`
 }
 
 // Agent describes one agent pane whose identity is prepared.
@@ -124,6 +127,45 @@ func ConfigOptions(cfg *config.Config) Options {
 		opts.ClientOptions = agentmail.ConfigOptions(cfg.AgentMail.URL, cfg.AgentMail.Token)
 	}
 	return opts
+}
+
+// sessionRegistrationTimeout bounds RegisterSession's Agent Mail calls.
+const sessionRegistrationTimeout = 15 * time.Second
+
+// RegisterSession registers (or refreshes) the session-level coordinator
+// identity: the agent.json sender that `ntm lock`/`unlock`/`locks` and the
+// session coordinator act as. Every spawn surface calls it once per launch,
+// so a session spawned by the robot API or REST is as lockable as one
+// spawned by `ntm spawn`.
+//
+// It returns the identity name, or "" when registration is disabled or
+// failed. Failures go to the Reporter and never fail the caller.
+func RegisterSession(ctx context.Context, projectKey, session string, opts Options) string {
+	if !opts.Enabled {
+		return ""
+	}
+	if ctx == nil {
+		if opts.Reporter != nil {
+			opts.Reporter.Warnf("Agent Mail registration skipped: missing command context")
+		}
+		return ""
+	}
+	regCtx, cancel := context.WithTimeout(ctx, sessionRegistrationTimeout)
+	defer cancel()
+	info, err := agentmail.NewClient(opts.ClientOptions...).RegisterSessionAgent(regCtx, session, projectKey)
+	if err != nil {
+		if opts.Reporter != nil {
+			opts.Reporter.Warnf("Agent Mail registration failed: %v", err)
+		}
+		return ""
+	}
+	if info == nil || info.AgentName == "" {
+		return ""
+	}
+	if opts.Reporter != nil {
+		opts.Reporter.Infof("Registered with Agent Mail as %s", info.AgentName)
+	}
+	return info.AgentName
 }
 
 // RegisterBatch registers already-running agents with Agent Mail and returns
