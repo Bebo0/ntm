@@ -406,6 +406,14 @@ func (e *Executor) runOnSuccessSteps(ctx context.Context, parent *Step, workflow
 	for i := range parent.OnSuccess {
 		child := parent.OnSuccess[i]
 		child.ID = onSuccessChildStepID(parent.ID, child.ID, i+1)
+		e.stateMu.RLock()
+		prior, exists := e.state.Steps[child.ID]
+		e.stateMu.RUnlock()
+		if exists && !shouldRerunStep(prior) {
+			// The parent command/delivery receipt can be durable before its
+			// StepResult. Adopting it must not repeat already-finished hooks.
+			continue
+		}
 
 		result := e.executeStep(childCtx, &child, workflow)
 		if result.FinishedAt.IsZero() {
@@ -443,19 +451,45 @@ func (e *Executor) runOnSuccessSteps(ctx context.Context, parent *Step, workflow
 // executeStep machinery so it inherits retries, on_failure, and routing.
 // Failures here are persisted into state.Steps but DO NOT change the
 // overall pipeline status — post-pipeline steps are for cleanup and
-// notification, not gating (bd-w6nth.5).
-func (e *Executor) runPostPipelineSteps(ctx context.Context, workflow *Workflow) {
+// notification, not gating (bd-w6nth.5). Only ambiguous ownership of persisted
+// step/dispatch identities is returned as a fatal workflow error.
+func (e *Executor) runPostPipelineSteps(ctx context.Context, workflow *Workflow) error {
 	if workflow == nil || len(workflow.PostPipelineSteps) == 0 {
-		return
+		return nil
+	}
+	checkOwnership := func() error {
+		e.stateMu.RLock()
+		defer e.stateMu.RUnlock()
+		if e.graph != nil {
+			if phaseErrors := e.graph.validatePhaseOwnership(e.state); len(phaseErrors) > 0 {
+				return phaseErrors[0]
+			}
+		}
+		return nil
 	}
 
 	for i := range workflow.PostPipelineSteps {
+		if ctx.Err() != nil || e.checkpointFailure() != nil {
+			return nil
+		}
+		// Main work or an earlier hook may materialize dynamic IDs after
+		// initial preflight. Do not adopt them as a different hook's result.
+		if err := checkOwnership(); err != nil {
+			return err
+		}
 		step := workflow.PostPipelineSteps[i]
 		if step.ID == "" {
 			step.ID = fmt.Sprintf("post_pipeline_%d", i+1)
 		}
 
 		e.stateMu.Lock()
+		if prior, exists := e.state.Steps[step.ID]; exists && !shouldRerunStep(prior) {
+			// A previous attempt may have checkpointed only part of the
+			// post-pipeline tail. Resume restores these outputs before the
+			// main graph runs; do not repeat a completed handoff's effects.
+			e.stateMu.Unlock()
+			continue
+		}
 		e.state.CurrentStep = step.ID
 		e.state.UpdatedAt = time.Now()
 		e.stateMu.Unlock()
@@ -497,6 +531,7 @@ func (e *Executor) runPostPipelineSteps(ctx context.Context, workflow *Workflow)
 
 		e.persistState()
 	}
+	return checkOwnership()
 }
 
 func (e *Executor) executeOnFailureAction(step *Step, failed StepResult) StepResult {

@@ -2,7 +2,10 @@ package pipeline
 
 import (
 	"context"
+	"errors"
 	"os"
+	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -1580,6 +1583,426 @@ func TestRunPostPipelineStepsRunAfterMainFailure(t *testing.T) {
 	}
 	if cleanup.Status != StatusCompleted {
 		t.Errorf("cleanup status = %q, want %q (error=%+v)", cleanup.Status, StatusCompleted, cleanup.Error)
+	}
+}
+
+func resumeFinalizationSavedState(t *testing.T, projectDir string, workflow *Workflow, completed map[string]StepResult) *ExecutionState {
+	t.Helper()
+	prior := &ExecutionState{
+		RunID: "resume-finalization-test", WorkflowID: workflow.Name,
+		Session: "resume-finalization", Status: StatusRunning,
+		StartedAt: time.Now().Add(-time.Minute), UpdatedAt: time.Now(),
+		Steps: completed, Variables: map[string]interface{}{"workspace": projectDir},
+	}
+	if err := SaveState(projectDir, prior); err != nil {
+		t.Fatalf("save prior state: %v", err)
+	}
+	loaded, err := LoadState(projectDir, prior.RunID)
+	if err != nil {
+		t.Fatalf("load prior state: %v", err)
+	}
+	return loaded
+}
+
+func resumeFinalizationCompletedStep(stepID, output string) StepResult {
+	return StepResult{
+		StepID: stepID, Status: StatusCompleted, Output: output,
+		StartedAt: time.Now().Add(-time.Minute), FinishedAt: time.Now().Add(-30 * time.Second),
+	}
+}
+
+func resumeFinalizationConfig(projectDir string) ExecutorConfig {
+	cfg := DefaultExecutorConfig("resume-finalization")
+	cfg.ProjectDir = projectDir
+	cfg.DefaultTimeout, cfg.GlobalTimeout = 5*time.Second, 15*time.Second
+	return cfg
+}
+
+func assertResumeFinalizationOutputs(t *testing.T, state *ExecutionState, found, missing []string) {
+	t.Helper()
+	if state.OutputValidation == nil {
+		t.Error("resumed workflow has no declared-output report")
+		return
+	}
+	if !reflect.DeepEqual(state.OutputValidation.Found, found) || !reflect.DeepEqual(state.OutputValidation.Missing, missing) {
+		t.Errorf("declared-output report = %+v, want found %v, missing %v", state.OutputValidation, found, missing)
+	}
+}
+
+func TestResumeFinalizationRunsHooksAndValidatesOutputs(t *testing.T) {
+	for _, mainFails := range []bool{false, true} {
+		name := "main-success"
+		if mainFails {
+			name = "main-failure"
+		}
+		t.Run(name, func(t *testing.T) {
+			projectDir := t.TempDir()
+			mainCommand := "printf finished"
+			wantStatus := StatusCompleted
+			if mainFails {
+				mainCommand, wantStatus = "exit 7", StatusFailed
+			}
+			workflow := &Workflow{
+				SchemaVersion: SchemaVersion, Name: "resume-tail", Settings: DefaultWorkflowSettings(),
+				Steps: []Step{
+					{ID: "prepared", Command: "printf duplicate > duplicate-main.txt"},
+					{ID: "finish", Command: mainCommand, DependsOn: []string{"prepared"}},
+				},
+				PostPipelineSteps: []Step{
+					{ID: "failed-notification", Command: "exit 9"},
+					{ID: "handback", Command: "printf handback > handback.txt; printf handback", OutputVar: "handback"},
+					{ID: "consume-handback", Command: "printf '%s' '${vars.handback}' > consumed.txt"},
+				},
+				Outputs: []OutputDecl{
+					{Name: "handback", Path: "${vars.workspace}/handback.txt"},
+					{Name: "missing", Path: "${vars.workspace}/missing.txt"},
+				},
+			}
+			prior := resumeFinalizationSavedState(t, projectDir, workflow, map[string]StepResult{
+				"prepared": resumeFinalizationCompletedStep("prepared", "retained"),
+			})
+			state, err := NewExecutor(resumeFinalizationConfig(projectDir)).Resume(context.Background(), workflow, prior, nil)
+			if (err != nil) != mainFails {
+				t.Fatalf("Resume() error = %v, main failure = %v", err, mainFails)
+			}
+			if state.Status != wantStatus {
+				t.Errorf("status = %q, want %q; post failures and missing outputs must remain advisory", state.Status, wantStatus)
+			}
+			for _, artifact := range []string{"handback.txt", "consumed.txt"} {
+				data, err := os.ReadFile(filepath.Join(projectDir, artifact))
+				if err != nil || string(data) != "handback" {
+					t.Errorf("post-pipeline artifact %q = %q, %v; want handback", artifact, data, err)
+				}
+			}
+			if _, err := os.Stat(filepath.Join(projectDir, "duplicate-main.txt")); !errors.Is(err, os.ErrNotExist) {
+				t.Errorf("completed main step ran again: %v", err)
+			}
+			found, missing := []string{filepath.Join(projectDir, "handback.txt")}, []string{filepath.Join(projectDir, "missing.txt")}
+			assertResumeFinalizationOutputs(t, state, found, missing)
+			persisted, err := LoadState(projectDir, state.RunID)
+			if err != nil {
+				t.Fatalf("load final state: %v", err)
+			}
+			assertResumeFinalizationOutputs(t, persisted, found, missing)
+			for _, id := range []string{"handback", "consume-handback"} {
+				if result := persisted.Steps[id]; result.Status != StatusCompleted {
+					t.Errorf("persisted hook %q = %+v, want completed", id, result)
+				}
+			}
+			postFailure := false
+			for _, executionError := range persisted.Errors {
+				if executionError.StepID == "failed-notification" && executionError.Type == "post_pipeline" && !executionError.Fatal {
+					postFailure = true
+				}
+			}
+			if !postFailure {
+				t.Errorf("missing advisory post-pipeline failure: %+v", persisted.Errors)
+			}
+		})
+	}
+}
+
+func TestResumeFinalizationValidatesOutputsWithoutHooks(t *testing.T) {
+	projectDir := t.TempDir()
+	outputPath := filepath.Join(projectDir, "result.txt")
+	if err := os.WriteFile(outputPath, []byte("already written"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	workflow := &Workflow{
+		SchemaVersion: SchemaVersion, Name: "resume-outputs", Settings: DefaultWorkflowSettings(),
+		Steps:   []Step{{ID: "main", Command: "exit 8"}},
+		Outputs: []OutputDecl{{Name: "result", Path: outputPath}, {Name: "missing", Path: filepath.Join(projectDir, "missing.txt")}},
+	}
+	prior := resumeFinalizationSavedState(t, projectDir, workflow, map[string]StepResult{
+		"main": resumeFinalizationCompletedStep("main", "done"),
+	})
+	state, err := NewExecutor(resumeFinalizationConfig(projectDir)).Resume(context.Background(), workflow, prior, nil)
+	if err != nil || state.Status != StatusCompleted {
+		t.Fatalf("Resume() = %v, %v; want completed", state, err)
+	}
+	assertResumeFinalizationOutputs(t, state, []string{outputPath}, []string{filepath.Join(projectDir, "missing.txt")})
+	persisted, err := LoadState(projectDir, state.RunID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertResumeFinalizationOutputs(t, persisted, []string{outputPath}, []string{filepath.Join(projectDir, "missing.txt")})
+}
+
+func TestResumeFinalizationKeepsCompletedHooks(t *testing.T) {
+	for _, completedContainer := range []bool{false, true} {
+		name := "simple-main"
+		if completedContainer {
+			name = "completed-container-with-trimmed-child-state"
+		}
+		t.Run(name, func(t *testing.T) {
+			projectDir := t.TempDir()
+			effectsPath := filepath.Join(projectDir, "handoff-count.txt")
+			if err := os.WriteFile(effectsPath, []byte("once\n"), 0600); err != nil {
+				t.Fatal(err)
+			}
+			main := Step{ID: "main", Command: "exit 8"}
+			if completedContainer {
+				main = Step{ID: "main", Parallel: ParallelSpec{Steps: []Step{{ID: "trimmed", Command: "exit 8"}}}}
+			}
+			workflow := &Workflow{
+				SchemaVersion: SchemaVersion, Name: "resume-partial-tail", Settings: DefaultWorkflowSettings(),
+				Steps: []Step{main},
+				PostPipelineSteps: []Step{
+					{Command: "printf 'once\\n' >> handoff-count.txt; printf handoff.txt", OutputVar: "handback_file"},
+					{ID: "finish-handback", Command: "printf '%s' '${steps.post_pipeline_1.output}' > '${vars.handback_file}'"},
+				},
+				Outputs: []OutputDecl{{Name: "handback", Path: "${vars.workspace}/${vars.handback_file}"}},
+			}
+			firstHook := resumeFinalizationCompletedStep("post_pipeline_1", "handoff.txt")
+			prior := resumeFinalizationSavedState(t, projectDir, workflow, map[string]StepResult{
+				"main": resumeFinalizationCompletedStep("main", "done"), "post_pipeline_1": firstHook,
+			})
+			state, err := NewExecutor(resumeFinalizationConfig(projectDir)).Resume(context.Background(), workflow, prior, nil)
+			if err != nil || state.Status != StatusCompleted {
+				t.Fatalf("Resume() = %v, %v; want completed", state, err)
+			}
+			if data, err := os.ReadFile(effectsPath); err != nil || string(data) != "once\n" {
+				t.Errorf("already-completed post hook repeated side effect: %q, %v", data, err)
+			}
+			if got := state.Steps[firstHook.StepID]; got.Status != StatusCompleted || !got.FinishedAt.Equal(firstHook.FinishedAt) {
+				t.Errorf("completed post hook receipt changed: %+v; want retained %+v", got, firstHook)
+			}
+			if data, err := os.ReadFile(filepath.Join(projectDir, "handoff.txt")); err != nil || string(data) != "handoff.txt" {
+				t.Errorf("pending post hook did not use retained outputs: %q, %v", data, err)
+			}
+			assertResumeFinalizationOutputs(t, state, []string{filepath.Join(projectDir, "handoff.txt")}, nil)
+		})
+	}
+}
+
+func TestResumeFinalizationCancellationRunsOnlyOnCancel(t *testing.T) {
+	projectDir := t.TempDir()
+	settings := DefaultWorkflowSettings()
+	settings.OnCancel = []Step{{ID: "cancel-cleanup", Command: "printf cleaned > cancel-cleanup.txt"}}
+	workflow := &Workflow{
+		SchemaVersion: SchemaVersion, Name: "resume-cancel-tail", Settings: settings,
+		Steps:             []Step{{ID: "main", Command: "printf unexpected > main.txt"}},
+		PostPipelineSteps: []Step{{ID: "handback", Command: "printf unexpected > handback.txt"}},
+		Outputs:           []OutputDecl{{Name: "missing", Path: filepath.Join(projectDir, "missing.txt")}},
+	}
+	prior := resumeFinalizationSavedState(t, projectDir, workflow, map[string]StepResult{})
+	// A cancelled attempt must not expose an output report from an earlier run.
+	prior.OutputValidation = &OutputValidationResult{Found: []string{"stale"}}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	state, err := NewExecutor(resumeFinalizationConfig(projectDir)).Resume(ctx, workflow, prior, nil)
+	if !errors.Is(err, context.Canceled) || state.Status != StatusCancelled {
+		t.Fatalf("Resume() status = %q, error = %v; want cancelled", state.Status, err)
+	}
+	if data, err := os.ReadFile(filepath.Join(projectDir, "cancel-cleanup.txt")); err != nil || string(data) != "cleaned" {
+		t.Errorf("on_cancel cleanup did not run: %q, %v", data, err)
+	}
+	for _, artifact := range []string{"main.txt", "handback.txt"} {
+		if _, err := os.Stat(filepath.Join(projectDir, artifact)); !errors.Is(err, os.ErrNotExist) {
+			t.Errorf("cancelled run dispatched %q: %v", artifact, err)
+		}
+	}
+	if state.OutputValidation != nil {
+		t.Errorf("cancelled run validated outputs: %+v", state.OutputValidation)
+	}
+	persisted, err := LoadState(projectDir, state.RunID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if persisted.Status != StatusCancelled || persisted.Steps["cancel-cleanup"].Status != StatusCompleted || persisted.OutputValidation != nil {
+		t.Errorf("cancelled final state = %+v", persisted)
+	}
+}
+
+func TestResumeFinalizationStartsFreshTailWhenMainReopens(t *testing.T) {
+	for _, kind := range []string{"direct", "on-success", "parallel", "foreach-rounds"} {
+		t.Run(kind, func(t *testing.T) {
+			cfg := resumeFinalizationConfig(t.TempDir())
+			release := Step{ID: "release", Command: "printf 'released\\n' >> cleanups"}
+			post, releasesPerAttempt := release, 1
+			switch kind {
+			case "on-success":
+				post = Step{ID: "handoff", Command: "printf prepared", OnSuccess: []Step{release}}
+			case "parallel":
+				post = Step{ID: "handoff", Parallel: ParallelSpec{Steps: []Step{release}}}
+			case "foreach-rounds":
+				post = Step{ID: "handoff", Foreach: &ForeachConfig{
+					Items: "${vars.resources}", MaxRounds: IntOrExpr{Value: 2}, Steps: []Step{release},
+				}}
+				releasesPerAttempt = 2
+			}
+			workflow := &Workflow{
+				SchemaVersion: SchemaVersion, Name: "post-cleanup-each-attempt", Settings: DefaultWorkflowSettings(),
+				Steps:             []Step{{ID: "work", Command: "printf 'acquired\\n' >> attempts; test -f allow"}},
+				PostPipelineSteps: []Step{post},
+			}
+			first, err := NewExecutor(cfg).Run(context.Background(), workflow, map[string]interface{}{"resources": []interface{}{"resource"}}, nil)
+			if err == nil || first == nil || first.Status != StatusFailed {
+				t.Fatalf("initial attempt should fail: state=%+v err=%v", first, err)
+			}
+			prior, err := LoadState(cfg.ProjectDir, first.RunID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(cfg.ProjectDir, "allow"), []byte("allow"), 0600); err != nil {
+				t.Fatal(err)
+			}
+			second, err := NewExecutor(cfg).Resume(context.Background(), workflow, prior, nil)
+			if err != nil || second == nil || second.Status != StatusCompleted {
+				t.Fatalf("resumed attempt should complete: state=%+v err=%v", second, err)
+			}
+			attempts, err := os.ReadFile(filepath.Join(cfg.ProjectDir, "attempts"))
+			if err != nil || string(attempts) != "acquired\nacquired\n" {
+				t.Errorf("main work did not reopen: %q, %v", attempts, err)
+			}
+			cleanups, err := os.ReadFile(filepath.Join(cfg.ProjectDir, "cleanups"))
+			if err != nil || string(cleanups) != strings.Repeat("released\n", 2*releasesPerAttempt) {
+				t.Errorf("resumed main work must receive fresh cleanup: %q, %v", cleanups, err)
+			}
+		})
+	}
+}
+
+func TestResumeFinalizationAdoptsCompletedSuccessChildBeforeRootCheckpoint(t *testing.T) {
+	cfg := resumeFinalizationConfig(t.TempDir())
+	calls := 0
+	cfg.BeadQueryRunBr = func(_ context.Context, _ []string) ([]byte, error) {
+		calls++
+		return []byte(`{"issues":[]}`), nil
+	}
+	workflow := &Workflow{
+		SchemaVersion: SchemaVersion, Name: "partial-root-tail", Settings: DefaultWorkflowSettings(),
+		Steps: []Step{{ID: "main", Command: "printf main > main-effect"}},
+		PostPipelineSteps: []Step{{ID: "tail", Command: "printf 'tail\\n' >> tail-effects", OnSuccess: []Step{{
+			ID: "child", BeadQuery: &BeadQueryStep{}, OutputVar: "retained_child",
+		}}}},
+	}
+	executor := NewExecutor(cfg)
+	executor.state = resumeFinalizationSavedState(t, cfg.ProjectDir, workflow, map[string]StepResult{})
+	executor.graph = NewDependencyGraph(workflow)
+	mainResult := executor.executeStep(context.Background(), &workflow.Steps[0], workflow)
+	if mainResult.Status != StatusCompleted {
+		t.Fatalf("main fixture failed: %+v", mainResult)
+	}
+	executor.state.Steps[mainResult.StepID] = mainResult
+	tailResult := executor.executeStep(context.Background(), &workflow.PostPipelineSteps[0], workflow)
+	if tailResult.Status != StatusCompleted || calls != 1 {
+		t.Fatalf("tail fixture did not complete once: %+v calls=%d", tailResult, calls)
+	}
+	// A concurrent checkpoint can land after the child finishes but before
+	// the post runner publishes the root result. The command receipt is durable.
+	if err := executor.persistState(); err != nil {
+		t.Fatal(err)
+	}
+	prior, err := LoadState(cfg.ProjectDir, executor.state.RunID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, exists := prior.Steps["tail"]; exists {
+		t.Fatal("fixture incorrectly published the tail root")
+	}
+	childID := "tail_on_success_child"
+	child := prior.Steps[childID]
+	// Completed step outputs must also survive a trimmed/legacy Variables map.
+	prior.Variables = map[string]interface{}{}
+	final, err := NewExecutor(cfg).Resume(context.Background(), workflow, prior, nil)
+	if err != nil || final.Status != StatusCompleted {
+		t.Fatalf("partial tail did not resume: state=%+v err=%v", final, err)
+	}
+	if calls != 1 {
+		t.Fatalf("completed non-command success child was dispatched again: calls=%d", calls)
+	}
+	if got := final.Steps[childID]; !got.FinishedAt.Equal(child.FinishedAt) || final.Variables["retained_child"] != child.Output {
+		t.Errorf("completed success child or named output was lost: %+v, %v", got, final.Variables)
+	}
+	if data, err := os.ReadFile(filepath.Join(cfg.ProjectDir, "tail-effects")); err != nil || string(data) != "tail\n" {
+		t.Errorf("tail command was re-executed: %q, %v", data, err)
+	}
+}
+
+func TestResumeFinalizationRejectsNewDynamicPhaseCollisions(t *testing.T) {
+	for _, fromPost := range []bool{false, true} {
+		name := "main-materializes-id"
+		if fromPost {
+			name = "earlier-post-materializes-id"
+		}
+		t.Run(name, func(t *testing.T) {
+			cfg := resumeFinalizationConfig(t.TempDir())
+			producer := Step{ID: "batch", Foreach: &ForeachConfig{
+				Items: "${vars.items}", Steps: []Step{{ID: "publish", Command: "printf first > first-effects; printf first"}},
+			}}
+			consumer := Step{ID: "batch_iter0", Parallel: ParallelSpec{Steps: []Step{{
+				ID: "publish", Command: "printf unexpected > post-effects",
+			}}}}
+			workflow := &Workflow{
+				SchemaVersion: SchemaVersion, Name: "dynamic-phase-collision", Settings: DefaultWorkflowSettings(),
+				Steps: []Step{producer}, PostPipelineSteps: []Step{consumer},
+			}
+			if fromPost {
+				workflow.Steps = []Step{{ID: "main", Command: "printf main"}}
+				workflow.PostPipelineSteps = []Step{producer, consumer}
+			}
+			prior := resumeFinalizationSavedState(t, cfg.ProjectDir, workflow, map[string]StepResult{})
+			prior.Variables["items"] = []interface{}{"one"}
+			state, err := NewExecutor(cfg).Resume(context.Background(), workflow, prior, nil)
+			if err == nil || state.Status != StatusFailed || !strings.Contains(err.Error(), "shared by workflow phases") {
+				t.Fatalf("new runtime ID hid a different post hook: status=%s err=%v", state.Status, err)
+			}
+			if data, err := os.ReadFile(filepath.Join(cfg.ProjectDir, "first-effects")); err != nil || string(data) != "first" {
+				t.Fatalf("fixture never materialized its dynamic runtime ID: %q, %v", data, err)
+			}
+			if _, err := os.Stat(filepath.Join(cfg.ProjectDir, "post-effects")); !errors.Is(err, os.ErrNotExist) {
+				t.Errorf("ambiguous post hook dispatched: %v", err)
+			}
+			persisted, err := LoadState(cfg.ProjectDir, state.RunID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if persisted.Status != StatusFailed || persisted.Steps["batch_iter0_publish"].Output != "first" {
+				t.Errorf("phase rejection lost the already-executed result: %+v", persisted)
+			}
+		})
+	}
+}
+
+func TestResumeFinalizationClearsReopenedNamedOutputs(t *testing.T) {
+	for _, reset := range []bool{false, true} {
+		name := "failed-post-output"
+		if reset {
+			name = "reset-success-child-output"
+		}
+		t.Run(name, func(t *testing.T) {
+			cfg := resumeFinalizationConfig(t.TempDir())
+			cfg.ResumeOptions.Reset = reset
+			producer := Step{ID: "producer", Command: "printf '%s' '${vars.previous | empty}' > observed; printf new", OutputVar: "previous"}
+			post, priorID := producer, producer.ID
+			if reset {
+				post = Step{ID: "tail", Command: "printf parent", OnSuccess: []Step{producer}}
+				priorID = "tail_on_success_producer"
+			}
+			workflow := &Workflow{
+				SchemaVersion: SchemaVersion, Name: "reopened-post-output", Settings: DefaultWorkflowSettings(),
+				Steps: []Step{{ID: "main", Command: "printf main"}}, PostPipelineSteps: []Step{post},
+			}
+			previous := resumeFinalizationCompletedStep(priorID, "old")
+			if !reset {
+				previous.Status = StatusFailed
+			}
+			prior := resumeFinalizationSavedState(t, cfg.ProjectDir, workflow, map[string]StepResult{
+				"main": resumeFinalizationCompletedStep("main", "done"), priorID: previous,
+			})
+			prior.Variables["previous"] = "stale"
+			state, err := NewExecutor(cfg).Resume(context.Background(), workflow, prior, nil)
+			if err != nil || state.Status != StatusCompleted {
+				t.Fatalf("Resume() = %v, %v; want completed", state, err)
+			}
+			if data, err := os.ReadFile(filepath.Join(cfg.ProjectDir, "observed")); err != nil || string(data) != "empty" {
+				t.Errorf("reopened hook consumed stale named output: %q, %v", data, err)
+			}
+			if got := state.Variables["previous"]; got != "new" {
+				t.Errorf("new hook output = %v, want new", got)
+			}
+		})
 	}
 }
 

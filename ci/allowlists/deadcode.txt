@@ -121,14 +121,11 @@ internal/context/monitor.go:RobotModeEstimator.Confidence	bd-ld4j2	reachable onl
 internal/context/monitor.go:RobotModeEstimator.Name	bd-ld4j2	reachable only through RTA's reflection rule at the 2026-10-05 baseline; wire it (surface + behavioral test) or delete it
 internal/context/pending.go:PendingRotationStore.Clear	bd-ld4j2	reachable only through RTA's reflection rule at the 2026-10-05 baseline; wire it (surface + behavioral test) or delete it
 internal/context/predictor.go:ContextPredictor.AddSample	bd-ld4j2	reachable only through RTA's reflection rule at the 2026-10-05 baseline; wire it (surface + behavioral test) or delete it
-internal/context/predictor.go:ContextPredictor.AddSampleAt	bd-ld4j2	reachable only through RTA's reflection rule at the 2026-10-05 baseline; wire it (surface + behavioral test) or delete it
 internal/context/predictor.go:ContextPredictor.LatestSample	bd-ld4j2	reachable only through RTA's reflection rule at the 2026-10-05 baseline; wire it (surface + behavioral test) or delete it
 internal/context/predictor.go:ContextPredictor.PredictExhaustion	bd-ld4j2	reachable only through RTA's reflection rule at the 2026-10-05 baseline; wire it (surface + behavioral test) or delete it
 internal/context/predictor.go:ContextPredictor.Reset	bd-ld4j2	reachable only through RTA's reflection rule at the 2026-10-05 baseline; wire it (surface + behavioral test) or delete it
 internal/context/predictor.go:ContextPredictor.SampleCount	bd-ld4j2	reachable only through RTA's reflection rule at the 2026-10-05 baseline; wire it (surface + behavioral test) or delete it
 internal/context/predictor.go:ContextPredictor.VelocityTrend	bd-ld4j2	reachable only through RTA's reflection rule at the 2026-10-05 baseline; wire it (surface + behavioral test) or delete it
-internal/context/predictor.go:ContextPredictor.calculateVelocityFromSamples	bd-ld4j2	reachable only through RTA's reflection rule at the 2026-10-05 baseline; wire it (surface + behavioral test) or delete it
-internal/context/predictor.go:ContextPredictor.getSamplesInWindow	bd-ld4j2	reachable only through RTA's reflection rule at the 2026-10-05 baseline; wire it (surface + behavioral test) or delete it
 internal/context/rotation.go:RotationResult.FormatForDisplay	bd-ld4j2	reachable only through RTA's reflection rule at the 2026-10-05 baseline; wire it (surface + behavioral test) or delete it
 internal/context/rotation.go:Rotator.CancelPendingRotation	bd-ld4j2	reachable only through RTA's reflection rule at the 2026-10-05 baseline; wire it (surface + behavioral test) or delete it
 internal/context/rotation.go:Rotator.ClearHistory	bd-ld4j2	reachable only through RTA's reflection rule at the 2026-10-05 baseline; wire it (surface + behavioral test) or delete it
@@ -183,7 +180,6 @@ internal/integrations/caut/cache.go:UsageCache.UpdateUsage	bd-ld4j2	reachable on
 internal/metrics/collector.go:MetricsReport.ExportCSV	bd-ld4j2	reachable only through RTA's reflection rule at the 2026-10-05 baseline; wire it (surface + behavioral test) or delete it
 internal/metrics/collector.go:MetricsReport.ExportJSON	bd-ld4j2	reachable only through RTA's reflection rule at the 2026-10-05 baseline; wire it (surface + behavioral test) or delete it
 internal/output/errors.go:CLIError.WithCause	bd-ld4j2	reachable only through RTA's reflection rule at the 2026-10-05 baseline; wire it (surface + behavioral test) or delete it
-internal/pipeline/deps.go:DependencyGraph.IsExecuted	bd-ld4j2	reachable only through RTA's reflection rule at the 2026-10-05 baseline; wire it (surface + behavioral test) or delete it
 internal/pipeline/deps.go:DependencyGraph.IsFailed	bd-ld4j2	reachable only through RTA's reflection rule at the 2026-10-05 baseline; wire it (surface + behavioral test) or delete it
 internal/pipeline/deps.go:DependencyGraph.Resolve	bd-ld4j2	reachable only through RTA's reflection rule at the 2026-10-05 baseline; wire it (surface + behavioral test) or delete it
 internal/pipeline/executor.go:Executor.SetDetector	bd-ld4j2	reachable only through RTA's reflection rule at the 2026-10-05 baseline; wire it (surface + behavioral test) or delete it
@@ -714,7 +710,7 @@ internal/ensemble/assignment.go:resolveMode	permanent	build-tag blind spot: gate
 internal/ensemble/assignment.go:resolveModeByCode	permanent	build-tag blind spot: gate runs untagged; reachable in release builds via tag-gated internal/ensemble/manager.go (via Assign* chain) (ensemble_experimental)
 internal/ensemble/assignment.go:resolveModeItems	permanent	build-tag blind spot: gate runs untagged; reachable in release builds via tag-gated internal/ensemble/manager.go (via Assign* chain) (ensemble_experimental)
 internal/ensemble/assignment.go:sortAssignablePanes	permanent	build-tag blind spot: gate runs untagged; reachable in release builds via tag-gated internal/ensemble/manager.go (via Assign* chain) (ensemble_experimental)
-internal/ensemble/assignment.go:ValidateAssignments	permanent	build-tag blind spot: gate runs untagged; reachable in release builds via tag-gated internal/ensemble/manager.go (via Assign* chain) (ensemble_experimental)
+internal/ensemble/assignment.go:ValidateAssignments	permanent	build-tag blind spot: gate runs untagged; reachable in release builds via tag-gated internal/ensemble/manager.go (ensemble_experimental)
 internal/ensemble/types.go:ModeRefFromCode	permanent	build-tag blind spot: gate runs untagged; reachable in release builds via tag-gated internal/ensemble/manager.go + internal/robot/ensemble_spawn.go (ensemble_experimental)
 internal/ensemble/validation.go:validateModeIDs	permanent	build-tag blind spot: gate runs untagged; reachable in release builds via tag-gated internal/ensemble/manager.go (ensemble_experimental)
 internal/swarm/pane_launcher.go:GetPaneTarget	permanent	build-tag blind spot: gate runs untagged; reachable in release builds via tag-gated internal/swarm/ensemble_integration.go / internal/ensemble/manager.go pane dispatch (ensemble_experimental)

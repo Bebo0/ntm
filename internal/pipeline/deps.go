@@ -33,6 +33,10 @@ type DependencyGraph struct {
 	// would otherwise let downstream steps unblock before the container
 	// itself ran the nested body.
 	container map[string]string
+	// Post-pipeline hooks share persisted step/output namespaces but are not
+	// scheduled in the main graph. Retain their structure for resume only.
+	postPipelineSteps []Step
+	onCancelSteps     []Step
 }
 
 // DependencyError represents an error in the dependency graph
@@ -57,14 +61,16 @@ type ExecutionPlan struct {
 // NewDependencyGraph creates a dependency graph from workflow steps
 func NewDependencyGraph(workflow *Workflow) *DependencyGraph {
 	g := &DependencyGraph{
-		steps:         make(map[string]*Step),
-		edges:         make(map[string][]string),
-		reverse:       make(map[string][]string),
-		inDegree:      make(map[string]int),
-		remainingDeps: make(map[string]int),
-		executed:      make(map[string]bool),
-		failed:        make(map[string]bool),
-		container:     make(map[string]string),
+		steps:             make(map[string]*Step),
+		edges:             make(map[string][]string),
+		reverse:           make(map[string][]string),
+		inDegree:          make(map[string]int),
+		remainingDeps:     make(map[string]int),
+		executed:          make(map[string]bool),
+		failed:            make(map[string]bool),
+		container:         make(map[string]string),
+		postPipelineSteps: workflow.PostPipelineSteps,
+		onCancelSteps:     workflow.Settings.OnCancel,
 	}
 
 	// Add all steps including parallel sub-steps
@@ -108,7 +114,7 @@ func NewDependencyGraph(workflow *Workflow) *DependencyGraph {
 
 // Validate checks the dependency graph for errors
 func (g *DependencyGraph) Validate() []DependencyError {
-	var errors []DependencyError
+	errors := g.validatePhaseOwnership(nil)
 
 	// Check for missing dependencies and cross-container references.
 	// bd-mb6rd: a step inside a parallel/loop body must not be depended on
@@ -427,6 +433,16 @@ func (g *DependencyGraph) GetStep(id string) (*Step, bool) {
 }
 
 func (g *DependencyGraph) ResolveScopedRuntimeStep(id string) (*Step, string, bool) {
+	if step, canonicalID, ok := g.resolveMainRuntimeStep(id); ok {
+		return step, canonicalID, true
+	}
+	if step, ok := g.resolvePostPipelineRuntimeStep(id); ok {
+		return step, id, true
+	}
+	return nil, "", false
+}
+
+func (g *DependencyGraph) resolveMainRuntimeStep(id string) (*Step, string, bool) {
 	parentIDs := make([]string, 0, len(g.steps))
 	for parentID := range g.steps {
 		parentIDs = append(parentIDs, parentID)
@@ -453,6 +469,105 @@ func (g *DependencyGraph) ResolveScopedRuntimeStep(id string) (*Step, string, bo
 		}
 	}
 	return nil, "", false
+}
+
+func (g *DependencyGraph) resolvePostPipelineRuntimeStep(id string) (*Step, bool) {
+	for i := range g.postPipelineSteps {
+		if step, ok := resolveHookRuntimeStep(&g.postPipelineSteps[i], "post_pipeline", i+1, id); ok {
+			return step, true
+		}
+	}
+	return nil, false
+}
+
+func resolveHookRuntimeStep(root *Step, prefix string, ordinal int, id string) (*Step, bool) {
+	rootID := root.ID
+	if rootID == "" {
+		rootID = fmt.Sprintf("%s_%d", prefix, ordinal)
+	}
+	if id == rootID {
+		return root, true
+	}
+	step, _, ok := resolveScopedRuntimeChildren(rootID, id, root)
+	return step, ok
+}
+
+// All phases store results and launch receipts under the same runtime IDs.
+// Reject ambiguous ownership before resume can adopt or clear any evidence.
+// Persisted IDs also cover dynamic iteration names that do not exist as
+// independently scheduled nodes in the main dependency graph.
+func (g *DependencyGraph) validatePhaseOwnership(state *ExecutionState) []DependencyError {
+	if len(g.postPipelineSteps) == 0 {
+		return nil
+	}
+	ids := make(map[string]bool)
+	for id := range g.steps {
+		ids[id] = true
+	}
+	for _, phase := range []struct {
+		steps  []Step
+		prefix string
+	}{{g.postPipelineSteps, "post_pipeline"}, {g.onCancelSteps, "on_cancel"}} {
+		for i, step := range phase.steps {
+			id := step.ID
+			if id == "" {
+				id = fmt.Sprintf("%s_%d", phase.prefix, i+1)
+			}
+			ids[id] = true
+		}
+	}
+	if state != nil {
+		for id := range state.Steps {
+			ids[id] = true
+		}
+		for id := range state.CommandExecutions {
+			ids[id] = true
+		}
+		for id := range state.AgentDeliveries {
+			ids[id] = true
+		}
+		for id := range state.InFlightSteps {
+			ids[id] = true
+		}
+		for id := range state.ForeachState {
+			ids[id] = true
+		}
+		for id := range state.ParallelState {
+			ids[id] = true
+		}
+	}
+	ordered := make([]string, 0, len(ids))
+	for id := range ids {
+		ordered = append(ordered, id)
+	}
+	sort.Strings(ordered)
+	var errors []DependencyError
+	for _, id := range ordered {
+		var owners []string
+		postOwned := false
+		_, main := g.steps[id]
+		if _, _, scoped := g.resolveMainRuntimeStep(id); main || scoped {
+			owners = append(owners, "steps")
+		}
+		for _, phase := range []struct {
+			steps  []Step
+			prefix string
+		}{{g.postPipelineSteps, "post_pipeline"}, {g.onCancelSteps, "on_cancel"}} {
+			for i := range phase.steps {
+				if _, owned := resolveHookRuntimeStep(&phase.steps[i], phase.prefix, i+1, id); owned {
+					postOwned = postOwned || phase.prefix == "post_pipeline"
+					owners = append(owners, fmt.Sprintf("%s[%d]", phase.prefix, i))
+				}
+			}
+		}
+		if postOwned && len(owners) > 1 {
+			errors = append(errors, DependencyError{
+				Type: "ambiguous_step_id", Steps: []string{id},
+				Message: fmt.Sprintf("step id %q is shared by workflow phases %s; use distinct step IDs", id, strings.Join(owners, ", ")),
+			})
+		}
+	}
+	return errors
 }
 
 // resolveScopedRuntimeChildren follows the same namespaces as the dispatchers.

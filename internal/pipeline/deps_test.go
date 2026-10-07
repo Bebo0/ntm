@@ -1,6 +1,7 @@
 package pipeline
 
 import (
+	"encoding/json"
 	"fmt"
 	"sort"
 	"strings"
@@ -51,6 +52,151 @@ func TestDependencyGraph_Validate_Valid(t *testing.T) {
 	if len(errors) > 0 {
 		t.Errorf("expected no errors, got %v", errors)
 	}
+}
+
+func TestDependencyGraph_Validate_PostPipelinePhaseOwnership(t *testing.T) {
+	command := func(id string) Step { return Step{ID: id, Command: "true"} }
+	parallel := func(id, child string) Step {
+		return Step{ID: id, Parallel: ParallelSpec{Steps: []Step{command(child)}}}
+	}
+	for _, tc := range []struct {
+		name   string
+		main   []Step
+		post   []Step
+		cancel []Step
+		id     string
+		owners []string
+	}{
+		{name: "main_explicit_post", main: []Step{command("finish")}, post: []Step{command("finish")}, id: "finish", owners: []string{"steps", "post_pipeline[0]"}},
+		{name: "main_synthetic_post", main: []Step{command("post_pipeline_1")}, post: []Step{command("")}, id: "post_pipeline_1", owners: []string{"steps", "post_pipeline[0]"}},
+		{name: "post_explicit_post", post: []Step{command("finish"), command("finish")}, id: "finish", owners: []string{"post_pipeline[0]", "post_pipeline[1]"}},
+		{name: "post_synthetic_post", post: []Step{command("post_pipeline_2"), command("")}, id: "post_pipeline_2", owners: []string{"post_pipeline[0]", "post_pipeline[1]"}},
+		{name: "post_explicit_cancel", post: []Step{command("release")}, cancel: []Step{command("release")}, id: "release", owners: []string{"post_pipeline[0]", "on_cancel[0]"}},
+		{name: "synthetic_post_cancel", post: []Step{command("")}, cancel: []Step{command("post_pipeline_1")}, id: "post_pipeline_1", owners: []string{"post_pipeline[0]", "on_cancel[0]"}},
+		{name: "post_synthetic_cancel", post: []Step{command("on_cancel_1")}, cancel: []Step{command("")}, id: "on_cancel_1", owners: []string{"post_pipeline[0]", "on_cancel[0]"}},
+		{name: "post_owned_by_main_body", main: []Step{parallel("work", "publish")}, post: []Step{command("work_publish")}, id: "work_publish", owners: []string{"steps", "post_pipeline[0]"}},
+		{name: "main_owned_by_post_body", main: []Step{command("finish_publish")}, post: []Step{parallel("finish", "publish")}, id: "finish_publish", owners: []string{"steps", "post_pipeline[0]"}},
+		{name: "main_owned_by_synthetic_post_body", main: []Step{command("post_pipeline_1_publish")}, post: []Step{parallel("", "publish")}, id: "post_pipeline_1_publish", owners: []string{"steps", "post_pipeline[0]"}},
+		{name: "post_owned_by_post_body", post: []Step{parallel("finish", "publish"), command("finish_publish")}, id: "finish_publish", owners: []string{"post_pipeline[0]", "post_pipeline[1]"}},
+		{name: "post_owned_by_cancel_body", post: []Step{command("cleanup_release")}, cancel: []Step{parallel("cleanup", "release")}, id: "cleanup_release", owners: []string{"post_pipeline[0]", "on_cancel[0]"}},
+		{name: "cancel_owned_by_post_body", post: []Step{parallel("finish", "release")}, cancel: []Step{command("finish_release")}, id: "finish_release", owners: []string{"post_pipeline[0]", "on_cancel[0]"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			main := tc.main
+			if main == nil {
+				main = []Step{command("work")}
+			}
+			workflow := &Workflow{Steps: main, PostPipelineSteps: tc.post, Settings: WorkflowSettings{OnCancel: tc.cancel}}
+			graph := NewDependencyGraph(workflow)
+			requirePhaseOwnershipError(t, graph.Validate(), tc.id, tc.owners...)
+			if plan := graph.Resolve(); plan.Valid {
+				t.Fatal("ambiguous phase IDs produced an executable plan")
+			}
+		})
+	}
+}
+
+func TestDependencyGraph_Validate_PostPipelinePhaseOwnershipPreservesDistinctScopes(t *testing.T) {
+	for _, withPost := range []bool{false, true} {
+		t.Run(fmt.Sprintf("on_cancel_only_collision_with_post_%t", withPost), func(t *testing.T) {
+			workflow := &Workflow{
+				Steps:    []Step{{ID: "cleanup_release", Command: "true"}},
+				Settings: WorkflowSettings{OnCancel: []Step{{ID: "cleanup", Parallel: ParallelSpec{Steps: []Step{{ID: "release", Command: "true"}}}}}},
+			}
+			if withPost {
+				workflow.PostPipelineSteps = []Step{{ID: "finish", Command: "true"}}
+			}
+			if errs := NewDependencyGraph(workflow).Validate(); len(errs) != 0 {
+				t.Fatalf("post guard broadened the existing on_cancel-only ownership policy: %v", errs)
+			}
+		})
+	}
+	workflow := &Workflow{
+		Steps:             []Step{{ID: "work", Foreach: &ForeachConfig{Items: "${vars.items}", Steps: []Step{{ID: "publish", Command: "true"}}}}},
+		PostPipelineSteps: []Step{{ID: "finish", Parallel: ParallelSpec{Steps: []Step{{ID: "publish", Command: "true"}}}}},
+	}
+	graph := NewDependencyGraph(workflow)
+	state := &ExecutionState{Steps: map[string]StepResult{
+		"work_iter0_publish": {StepID: "work_iter0_publish", Status: StatusCompleted},
+		"finish_publish":     {StepID: "finish_publish", Status: StatusCompleted},
+	}}
+	if errs := graph.Validate(); len(errs) != 0 {
+		t.Fatalf("distinct runtime namespaces rejected because they share an authored leaf name: %v", errs)
+	}
+	if errs := graph.validatePhaseOwnership(state); len(errs) != 0 {
+		t.Fatalf("unambiguous persisted runtime IDs were rejected: %v", errs)
+	}
+	if _, scheduled := graph.GetStep("finish"); scheduled {
+		t.Fatal("post hook became a main graph node")
+	}
+}
+
+func TestDependencyGraph_Validate_PersistedDynamicPhaseOwnership(t *testing.T) {
+	const id = "batch_iter0_publish"
+	workflow := &Workflow{
+		Name:              "dynamic-phase-ownership",
+		Steps:             []Step{{ID: "batch", Foreach: &ForeachConfig{Items: "${vars.items}", Steps: []Step{{ID: "publish", Command: "true"}}}}},
+		PostPipelineSteps: []Step{{ID: "batch_iter0", Parallel: ParallelSpec{Steps: []Step{{ID: "publish", Command: "true"}}}}},
+	}
+	graph := NewDependencyGraph(workflow)
+	if errs := graph.Validate(); len(errs) != 0 {
+		t.Fatalf("fixture should expose its ambiguity only after a dynamic runtime ID exists: %v", errs)
+	}
+	for _, tc := range []struct {
+		name string
+		set  func(*ExecutionState)
+	}{
+		{"step_result", func(s *ExecutionState) {
+			s.Steps = map[string]StepResult{id: {StepID: id, Status: StatusCompleted, Output: "keep"}}
+		}},
+		{"command_receipt", func(s *ExecutionState) { s.CommandExecutions = map[string]CommandExecutionState{id: {StepID: id}} }},
+		{"agent_receipt", func(s *ExecutionState) { s.AgentDeliveries = map[string]AgentDeliveryState{id: {StepID: id}} }},
+		{"in_flight", func(s *ExecutionState) { s.InFlightSteps = map[string]InFlightStepState{id: {StepID: id}} }},
+		{"foreach_progress", func(s *ExecutionState) { s.ForeachState = map[string]ForeachIterationState{id: {StepID: id}} }},
+		{"parallel_progress", func(s *ExecutionState) { s.ParallelState = map[string]ParallelGroupState{id: {StepID: id}} }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			state := &ExecutionState{RunID: "run-phase-ownership", WorkflowID: workflow.Name}
+			tc.set(state)
+			// Ownership is checked before interpreting a record's payload,
+			// including old or unfamiliar receipt shapes. Test every durable
+			// namespace independently so a missing Steps entry is not a bypass.
+			before, err := json.Marshal(state)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var loaded ExecutionState
+			if err := json.Unmarshal(before, &loaded); err != nil {
+				t.Fatal(err)
+			}
+			requirePhaseOwnershipError(t, graph.validatePhaseOwnership(&loaded), id, "steps", "post_pipeline[0]")
+			executor := NewExecutor(DefaultExecutorConfig("test"))
+			executor.state, executor.graph = &loaded, graph
+			if err := executor.applyResumeOptions(workflow, ResumeOptions{Reset: true}); err == nil || !strings.Contains(err.Error(), "shared by workflow phases") {
+				t.Fatalf("explicit reset bypassed phase ownership preflight: %v", err)
+			}
+			after, err := json.Marshal(&loaded)
+			if err != nil || string(before) != string(after) {
+				t.Fatalf("rejected resume discarded ambiguous durable evidence: before=%s after=%s err=%v", before, after, err)
+			}
+		})
+	}
+}
+
+func requirePhaseOwnershipError(t *testing.T, errs []DependencyError, id string, owners ...string) {
+	t.Helper()
+	for _, err := range errs {
+		if err.Type != "ambiguous_step_id" || len(err.Steps) != 1 || err.Steps[0] != id {
+			continue
+		}
+		for _, owner := range owners {
+			if !strings.Contains(err.Message, owner) {
+				t.Fatalf("ownership error does not identify %q: %v", owner, err)
+			}
+		}
+		return
+	}
+	t.Fatalf("expected ambiguity for runtime step %q, got %v", id, errs)
 }
 
 func TestDependencyGraph_Validate_MissingDep(t *testing.T) {

@@ -440,6 +440,16 @@ func (e *Executor) applyResumeOptions(workflow *Workflow, opts ResumeOptions) er
 		e.stateMu.RUnlock()
 		return fmt.Errorf("resume state is nil")
 	}
+	graph := e.graph
+	if graph == nil && workflow != nil {
+		graph = NewDependencyGraph(workflow)
+	}
+	if graph != nil {
+		if phaseErrors := graph.validatePhaseOwnership(state); len(phaseErrors) > 0 {
+			e.stateMu.RUnlock()
+			return phaseErrors[0]
+		}
+	}
 	checkpoint := resumeCheckpointTime(state)
 	priorSession := state.Session
 	targetSession := e.config.Session
@@ -610,6 +620,74 @@ func (e *Executor) resetSettledOnCancelState(workflow *Workflow) {
 	for id, step := range owned {
 		if record, ok := e.state.CommandExecutions[id]; ok && record.Status == commandExecutionSettled {
 			delete(e.state.CommandExecutions, id)
+		}
+		delete(e.state.Steps, id)
+		delete(e.state.ForeachState, id)
+		delete(e.state.ParallelState, id)
+		delete(e.state.InFlightSteps, id)
+		delete(e.state.Variables, "steps."+id+".output")
+		delete(e.state.Variables, "steps."+id+".data")
+		if step.OutputVar != "" {
+			delete(e.state.Variables, step.OutputVar)
+			delete(e.state.Variables, step.OutputVar+"_parsed")
+		}
+	}
+}
+
+// A crash midway through finalization adopts the completed tail. If resume
+// reopens actual main work, its old handoff/cleanup belongs to the previous
+// attempt and must run again after the new work. Inspect top-level roots,
+// because a completed container may retain unmarked child graph placeholders.
+// Admission has already validated launch evidence; unfinished receipts are
+// deliberately retained even when the surrounding tail bookkeeping is reset.
+func (e *Executor) resetPostPipelineForMainAttempt(workflow *Workflow) {
+	if workflow == nil || len(workflow.PostPipelineSteps) == 0 || e.graph == nil {
+		return
+	}
+	reopensMain := false
+	for _, step := range workflow.Steps {
+		if !e.graph.IsExecuted(step.ID) {
+			reopensMain = true
+			break
+		}
+	}
+	if !reopensMain {
+		return
+	}
+	e.stateMu.Lock()
+	defer e.stateMu.Unlock()
+	e.varMu.Lock()
+	defer e.varMu.Unlock()
+	owned := make(map[string]*Step)
+	collect := func(id string) {
+		if step, ok := e.graph.resolvePostPipelineRuntimeStep(id); ok {
+			owned[id] = step
+		}
+	}
+	for id := range e.state.Steps {
+		collect(id)
+	}
+	for id := range e.state.CommandExecutions {
+		collect(id)
+	}
+	for id := range e.state.AgentDeliveries {
+		collect(id)
+	}
+	for id := range e.state.ForeachState {
+		collect(id)
+	}
+	for id := range e.state.ParallelState {
+		collect(id)
+	}
+	for id := range e.state.InFlightSteps {
+		collect(id)
+	}
+	for id, step := range owned {
+		if record, ok := e.state.CommandExecutions[id]; ok && record.Status == commandExecutionSettled {
+			delete(e.state.CommandExecutions, id)
+		}
+		if record, ok := e.state.AgentDeliveries[id]; ok && record.Status == agentDeliveryCompleted {
+			delete(e.state.AgentDeliveries, id)
 		}
 		delete(e.state.Steps, id)
 		delete(e.state.ForeachState, id)
@@ -1015,9 +1093,11 @@ func clearWorkflowStepVariables(vars map[string]interface{}, workflow *Workflow)
 			if step.ForeachPane != nil {
 				walk(step.ForeachPane.Steps)
 			}
+			walk(step.OnSuccess)
 		}
 	}
 	walk(workflow.Steps)
+	walk(workflow.PostPipelineSteps)
 }
 
 func (e *Executor) forceResumeIteration(stepID string, iteration int) {

@@ -340,18 +340,6 @@ func (e *Executor) Run(ctx context.Context, workflow *Workflow, vars map[string]
 	// Execute steps in dependency order
 	err = e.executeWorkflow(ctx, workflow)
 
-	// bd-w6nth.5: post_pipeline_steps run after the main step graph
-	// completes regardless of outcome (success, failure, or non-cancel
-	// error). Failures inside post-steps are recorded but do not flip the
-	// final pipeline status; cleanup, notifications, and hand-off
-	// dispatches must run even when the main pipeline failed.
-	if ctx.Err() == nil {
-		e.runPostPipelineSteps(ctx, workflow)
-		// bd-3uqce: declared-output stat() pass after post-pipeline steps so
-		// any artifacts written by cleanup/handoff steps are still picked up.
-		e.validateDeclaredOutputs(workflow)
-	}
-
 	return e.finishExecution(ctx, workflow, err)
 }
 
@@ -490,6 +478,7 @@ func (e *Executor) Resume(ctx context.Context, workflow *Workflow, prior *Execut
 	e.stateMu.Unlock()
 
 	e.applyResumeState()
+	e.resetPostPipelineForMainAttempt(workflow)
 	if err := e.persistState(); err != nil {
 		return e.state, err
 	}
@@ -3597,7 +3586,11 @@ func (e *Executor) clearStepVariables(stepID string) {
 	delete(e.state.Variables, "steps."+stepID+".output")
 	delete(e.state.Variables, "steps."+stepID+".data")
 
-	if step, ok := e.graph.GetStep(stepID); ok && step.OutputVar != "" {
+	step, ok := e.graph.GetStep(stepID)
+	if !ok {
+		step, _, ok = e.graph.ResolveScopedRuntimeStep(stepID)
+	}
+	if ok && step.OutputVar != "" {
 		delete(e.state.Variables, step.OutputVar)
 		delete(e.state.Variables, step.OutputVar+"_parsed")
 	}
