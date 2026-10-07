@@ -85,6 +85,27 @@ func TestCompletionCoversEveryTopLevelCommand(t *testing.T) {
 	t.Logf("TEST: CompletionCoverage | %d/%d top-level commands completable", total, total)
 }
 
+// TestCommandNamesUnique: no two sibling commands anywhere in the tree share a
+// name or alias. cobra dispatches to the first match, so a second registration
+// is unreachable and shows twice in help and completion (ntm personas was
+// registered both in root.go and in personas.go's init).
+func TestCommandNamesUnique(t *testing.T) {
+	var walk func(parent *cobra.Command)
+	walk = func(parent *cobra.Command) {
+		seen := map[string]string{}
+		for _, cmd := range parent.Commands() {
+			for _, name := range append([]string{cmd.Name()}, cmd.Aliases...) {
+				if prev, dup := seen[name]; dup {
+					t.Errorf("%q: %q is used by both %q and %q", parent.CommandPath(), name, prev, cmd.Name())
+				}
+				seen[name] = cmd.Name()
+			}
+			walk(cmd)
+		}
+	}
+	walk(rootCmd)
+}
+
 // TestShellIntegrationUsesGeneratedCompletion pins the wiring: every shell
 // integration script sources cobra's generated completion instead of
 // re-declaring a hand-rolled (and inevitably stale) command list.
