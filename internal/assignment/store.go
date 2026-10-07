@@ -1612,9 +1612,17 @@ func (s *AssignmentStore) CompleteClear(ctx context.Context, beadID string) erro
 	if s.ClearedGenerations == nil {
 		s.ClearedGenerations = make(map[string]uint64)
 	}
+	cleared := cloneAssignment(assignment)
 	s.ClearedGenerations[beadID]++
 	delete(s.Assignments, beadID)
-	return s.saveLocked()
+	if err := s.saveLocked(); err != nil {
+		return err
+	}
+	// The ledger forgets cleared work; keep a finished assignment's outcome
+	// for agent performance statistics (AggregateOutcomes). Appending only
+	// after the save means a record is never both live and archived.
+	appendOutcomeRecord(s.path, cleared)
+	return nil
 }
 
 // CompleteTerminalReconciliation retires tracker-terminal work only after the

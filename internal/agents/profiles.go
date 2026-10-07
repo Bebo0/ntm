@@ -61,14 +61,14 @@ type Preferences struct {
 // Performance tracks historical performance metrics for an agent.
 type Performance struct {
 	AvgCompletionTime time.Duration `json:"avg_completion_time"`
-	// SuccessRate is a static routing prior, not a measurement. Nothing in the
-	// shipped binary records task outcomes, so this holds whatever the profile
-	// was seeded with. Callers must not present it as observed performance
-	// without checking Measured first — `ntm agents profile` printed
-	// "Tasks Completed: 0" directly above "Success Rate: 90.0%".
+	// SuccessRate is the seeded routing prior until ApplyObservedPerformance
+	// replaces it with the observed completed/(completed+failed) ratio of
+	// recorded assignment outcomes. Callers must not present it as observed
+	// performance without checking Measured first — `ntm agents profile`
+	// once printed "Tasks Completed: 0" directly above "Success Rate: 90.0%".
 	SuccessRate    float64 `json:"success_rate"` // 0.0 to 1.0
 	TasksCompleted int     `json:"tasks_completed"`
-	// LastUpdated is the zero time until outcome recording exists.
+	// LastUpdated is the latest recorded outcome; zero when none.
 	LastUpdated time.Time `json:"last_updated"`
 }
 
@@ -309,10 +309,9 @@ func (pm *ProfileMatcher) ScoreAssignment(agentType AgentType, task TaskInfo) Sc
 	result.LabelMatchScore = labelScore
 	score *= labelScore
 
-	// 5. Performance prior. Not historical: nothing records task outcomes yet,
-	// so this reads the seeded SuccessRate. With the shipped seeds (0.9 for
-	// claude, 0.85 elsewhere) neither branch fires, and it becomes live only
-	// once outcome recording exists.
+	// 5. Performance. Observed task outcomes when ApplyObservedPerformance
+	// supplied them; otherwise the seeded SuccessRate, where (0.9 for claude,
+	// 0.85 elsewhere) neither branch fires.
 	if profile.Performance.SuccessRate > 0.9 {
 		score *= 1.1
 		result.PerformanceBonus = 0.1
@@ -508,6 +507,22 @@ func (pm *ProfileMatcher) RecommendAgent(task TaskInfo) (AgentType, ScoreResult)
 	}
 
 	return bestAgent, bestResult
+}
+
+// ApplyObservedPerformance replaces each profile's seeded performance prior
+// with the observed task outcomes of the agent types that have any, so
+// statistics and the ScoreAssignment performance bonus read real history.
+func (pm *ProfileMatcher) ApplyObservedPerformance(observed map[AgentType]Performance) {
+	pm.mu.Lock()
+	defer pm.mu.Unlock()
+	for agentType, perf := range observed {
+		if !perf.Measured() {
+			continue
+		}
+		if profile, ok := pm.profiles[agentType]; ok {
+			profile.Performance = perf
+		}
+	}
 }
 
 // GetPerformanceStats returns performance statistics for all agents.
