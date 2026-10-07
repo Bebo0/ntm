@@ -29,6 +29,7 @@ import (
 	"github.com/Dicklesworthstone/ntm/internal/ratelimit"
 	"github.com/Dicklesworthstone/ntm/internal/recovery"
 	"github.com/Dicklesworthstone/ntm/internal/resilience"
+	"github.com/Dicklesworthstone/ntm/internal/spawnidentity"
 	"github.com/Dicklesworthstone/ntm/internal/state"
 	statuspkg "github.com/Dicklesworthstone/ntm/internal/status"
 	"github.com/Dicklesworthstone/ntm/internal/tmux"
@@ -212,6 +213,14 @@ type SpawnOutput struct {
 	// "claude-opus-5"). Advisory only: unrecognized models still spawn, so
 	// custom/self-hosted model IDs keep working (bd-uh7la item 6).
 	ModelHints []string `json:"model_hints,omitempty"`
+	// AgentMail reports the Agent Mail identity provisioned for each agent
+	// pane immediately before its launch (the same coordinator and status
+	// object as `ntm spawn --json`): availability, project registration,
+	// registered/failed counts, and the %pane_id -> agent name map. Absent
+	// when registration is disabled ([agent_mail] enabled + auto_register)
+	// or no agent was launched. Agent Mail being unavailable never fails the
+	// spawn; it shows up here as available=false with agents_failed.
+	AgentMail *spawnidentity.AgentMailSpawnStatus `json:"agent_mail,omitempty"`
 }
 
 func setSpawnCancellation(output *SpawnOutput, err error) {
@@ -1298,6 +1307,14 @@ func GetSpawn(ctx context.Context, opts SpawnOptions, cfg *config.Config) (*Spaw
 	monitorCommands := make(map[string]string, len(launchRequests))
 	launchModels := spawnLaunchModels(cfg, opts)
 	launch := deps.LaunchAgent
+	// Spawn-scoped Agent Mail identity coordinator — the same implementation
+	// `ntm spawn` uses (internal/spawnidentity). Lazily initialized: no Agent
+	// Mail traffic when registration is disabled or nothing launches.
+	identityOpts := spawnidentity.ConfigOptions(cfg)
+	identityOpts.PreLaunch = true
+	identityOpts.Reporter = spawnIdentityLog{session: opts.Session}
+	identityOpts.ListPanes = deps.GetPanes
+	identity := spawnidentity.New(dir, opts.Session, identityOpts)
 	for i, request := range launchRequests {
 		if err := ctx.Err(); err != nil {
 			setSpawnCancellation(output, err)
@@ -1307,6 +1324,24 @@ func GetSpawn(ctx context.Context, opts SpawnOptions, cfg *config.Config) (*Spaw
 		command, model := agentCommands[request.agentType], launchModels[request.agentType]
 		if spec, ok := recipeLaunches[spawnRecipeKey{agentType: request.agentType, number: request.number}]; ok {
 			command, model = spec.command, spec.model
+		}
+		title := fmt.Sprintf("%s__%s_%d", opts.Session, agentTypeShort(request.agentType), request.number)
+		// Publish this pane's Agent Mail identity BEFORE its agent command is
+		// sent, exactly as `ntm spawn` does (gh#255): a process resolving its
+		// identity during startup reads its assigned name, and reservation-
+		// bearing assignment finds a canonical identity for the pane. The
+		// identity is keyed by tmux pane id, so a pane without one has none.
+		// Failures degrade gracefully and never block the launch.
+		if pane.ID != "" {
+			identity.PrepareAgent(ctx, spawnidentity.Agent{
+				PaneIndex:     pane.Index,
+				PaneID:        pane.ID,
+				PaneTitle:     title,
+				AgentType:     agentTypeShort(request.agentType),
+				Model:         model.ModelAlias,
+				ResolvedModel: model.Model,
+			})
+			output.AgentMail = identity.Status()
 		}
 		launchCtx := context.WithValue(ctx, spawnLaunchModelContextKey{}, model)
 		agent, launchErr := launch(
@@ -1319,7 +1354,7 @@ func GetSpawn(ctx context.Context, opts SpawnOptions, cfg *config.Config) (*Spaw
 			agent.Type = request.agentType
 		}
 		if agent.Title == "" {
-			agent.Title = fmt.Sprintf("%s__%s_%d", opts.Session, agentTypeShort(request.agentType), request.number)
+			agent.Title = title
 		}
 		if agent.Variant == "" {
 			agent.Variant = model.ModelAlias
@@ -1346,6 +1381,11 @@ func GetSpawn(ctx context.Context, opts SpawnOptions, cfg *config.Config) (*Spaw
 	// recount them, including a partially successful batch. Readiness and
 	// assignment do not create capacity and must not hold the fleet fence.
 	releaseAdmission()
+
+	// Every launch has been attempted: re-derive the pane badges published
+	// as "starting" from the running panes (ntm#312), as `ntm spawn` does.
+	// Best-effort by contract; a no-op unless badges are enabled.
+	identity.ReconcileBadges(ctx)
 
 	// Start the resilience session monitor through the shared spawn code path
 	// (same manifest writer + monitor launcher as CLI spawn; WS0-G6,
@@ -1542,6 +1582,19 @@ func recordSpawnMonitorDegraded(session string, cause error) {
 	}); err != nil {
 		slog.Warn("[robot.spawn] cannot record monitor degradation", "session", session, "error", err)
 	}
+}
+
+// spawnIdentityLog routes the shared identity coordinator's diagnostics to
+// the structured log: robot stdout carries only the JSON envelope, whose
+// agent_mail object reports the outcome.
+type spawnIdentityLog struct{ session string }
+
+func (l spawnIdentityLog) Infof(format string, args ...any) {
+	slog.Info("[robot.spawn] agent mail identity", "session", l.session, "detail", fmt.Sprintf(format, args...))
+}
+
+func (l spawnIdentityLog) Warnf(format string, args ...any) {
+	slog.Warn("[robot.spawn] agent mail identity", "session", l.session, "detail", fmt.Sprintf(format, args...))
 }
 
 // PrintSpawn creates a session with agents and outputs structured JSON.

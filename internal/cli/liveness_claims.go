@@ -24,10 +24,10 @@ func init() {
 	config.RegisterReader("agent_mail.enabled", newAgentMailClient)
 	config.RegisterReader("agent_mail.url", newAgentMailClient)
 	config.RegisterReader("agent_mail.token", newAgentMailClient)
-	config.RegisterReader("agent_mail.auto_register", agentMailRegistrationEnabled)
+	// agent_mail.auto_register / pane_badges / pane_badge_format are claimed
+	// by internal/spawnidentity, which owns their read path for every launch
+	// surface.
 	config.RegisterReader("agent_mail.supervisor_enabled", shouldSuperviseAgentMailDaemon)
-	config.RegisterReader("agent_mail.pane_badges", paneBadgesEnabled)
-	config.RegisterReader("agent_mail.pane_badge_format", paneBadgeTemplate)
 
 	// Compaction recovery: the session monitor owns the prompt (monitor.go,
 	// bd-xa7ry); the dashboard only displays detected compactions.

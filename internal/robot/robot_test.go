@@ -205,6 +205,15 @@ func TestMain(m *testing.M) {
 		fmt.Fprintf(os.Stderr, "isolate robot test data home: %v\n", err)
 		os.Exit(1)
 	}
+	// Robot spawn provisions Agent Mail identities under the default config
+	// ([agent_mail] enabled + auto_register). Point every test that does not
+	// install its own stub at a refusing local port, so no test registers
+	// agents with a developer's real Agent Mail server (or one named by the
+	// ambient AGENT_MAIL_URL). Tests that need a server use t.Setenv.
+	if err := os.Setenv("AGENT_MAIL_URL", "http://127.0.0.1:1/mcp/"); err != nil {
+		fmt.Fprintf(os.Stderr, "isolate robot Agent Mail endpoint: %v\n", err)
+		os.Exit(1)
+	}
 	code := m.Run()
 	_ = os.RemoveAll(dataHome)
 	if err := cleanupTmux(); err != nil {

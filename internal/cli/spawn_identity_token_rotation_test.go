@@ -3,7 +3,7 @@ package cli
 // Regression tests for GitHub issue #321.
 //
 // Re-registering a REUSED Agent Mail identity can rotate its registration
-// token. spawnIdentityCoordinator.prepareAgent used to throw the
+// token. The spawn identity coordinator's prepareAgent used to throw the
 // re-registration response away (`_, _ = c.client.RegisterAgent(...)`), so the
 // session registry — the durable store a later ntm process and the restarted
 // worker both read — kept the superseded credential. The fresh-identity branch
@@ -11,7 +11,7 @@ package cli
 // invisible.
 //
 // The contract pinned here: a nonempty replacement token is persisted through
-// the existing registry path before prepareAgent returns (and therefore before
+// the existing registry path before PrepareAgent returns (and therefore before
 // the pane's agent process is launched); a refused registration, an
 // empty-token response, or a response naming a different identity all preserve
 // the recorded token; unrelated identities are never touched.
@@ -26,6 +26,7 @@ import (
 
 	"github.com/Dicklesworthstone/ntm/internal/agentmail"
 	"github.com/Dicklesworthstone/ntm/internal/config"
+	"github.com/Dicklesworthstone/ntm/internal/spawnidentity"
 	"github.com/Dicklesworthstone/ntm/internal/tmux"
 )
 
@@ -197,17 +198,17 @@ func TestReusedIdentityPersistsRotatedRegistrationToken(t *testing.T) {
 	paneTitle := "spawn_identity_token_rotation_test__cc_1"
 	projectKey, session := rotationFixture(t, url, agentName, paneTitle, paneID, oldToken)
 
-	coordinator := newSpawnIdentityCoordinator(projectKey, session)
-	coordinator.prepareAgent(context.Background(), spawnedAgentInfo{
-		paneIndex: 1,
-		paneID:    paneID,
-		paneTitle: paneTitle,
-		agentType: "cc",
-		model:     "opus",
+	coordinator := newSpawnIdentityCoordinator(projectKey, session, false)
+	coordinator.PrepareAgent(context.Background(), spawnidentity.Agent{
+		PaneIndex: 1,
+		PaneID:    paneID,
+		PaneTitle: paneTitle,
+		AgentType: "cc",
+		Model:     "opus",
 	})
 
 	// The reuse branch must be the one that ran.
-	status := coordinator.finalStatus()
+	status := coordinator.Status()
 	if status == nil || status.AgentMap[paneID] != agentName {
 		t.Fatalf("status = %+v, want the reused identity %s bound to %s", status, agentName, paneID)
 	}
@@ -242,9 +243,9 @@ func TestReusedIdentityKeepsTokenWhenResponseCarriesNone(t *testing.T) {
 	paneTitle := "spawn_identity_token_rotation_test__cc_2"
 	projectKey, session := rotationFixture(t, url, agentName, paneTitle, paneID, oldToken)
 
-	coordinator := newSpawnIdentityCoordinator(projectKey, session)
-	coordinator.prepareAgent(context.Background(), spawnedAgentInfo{
-		paneIndex: 2, paneID: paneID, paneTitle: paneTitle, agentType: "cc", model: "opus",
+	coordinator := newSpawnIdentityCoordinator(projectKey, session, false)
+	coordinator.PrepareAgent(context.Background(), spawnidentity.Agent{
+		PaneIndex: 2, PaneID: paneID, PaneTitle: paneTitle, AgentType: "cc", Model: "opus",
 	})
 
 	registry := reloadRegistry(t, session, projectKey)
@@ -267,13 +268,13 @@ func TestReusedIdentityKeepsTokenWhenReRegistrationFails(t *testing.T) {
 	paneTitle := "spawn_identity_token_rotation_test__cc_3"
 	projectKey, session := rotationFixture(t, url, agentName, paneTitle, paneID, oldToken)
 
-	coordinator := newSpawnIdentityCoordinator(projectKey, session)
-	coordinator.prepareAgent(context.Background(), spawnedAgentInfo{
-		paneIndex: 3, paneID: paneID, paneTitle: paneTitle, agentType: "cc", model: "opus",
+	coordinator := newSpawnIdentityCoordinator(projectKey, session, false)
+	coordinator.PrepareAgent(context.Background(), spawnidentity.Agent{
+		PaneIndex: 3, PaneID: paneID, PaneTitle: paneTitle, AgentType: "cc", Model: "opus",
 	})
 
 	// Reuse still succeeds locally even though the server refused.
-	status := coordinator.finalStatus()
+	status := coordinator.Status()
 	if status == nil || status.AgentMap[paneID] != agentName {
 		t.Fatalf("status = %+v, want reuse of %s to survive a refused re-registration", status, agentName)
 	}
@@ -297,9 +298,9 @@ func TestReusedIdentityIgnoresTokenForDifferentName(t *testing.T) {
 	paneTitle := "spawn_identity_token_rotation_test__cc_4"
 	projectKey, session := rotationFixture(t, url, agentName, paneTitle, paneID, oldToken)
 
-	coordinator := newSpawnIdentityCoordinator(projectKey, session)
-	coordinator.prepareAgent(context.Background(), spawnedAgentInfo{
-		paneIndex: 4, paneID: paneID, paneTitle: paneTitle, agentType: "cc", model: "opus",
+	coordinator := newSpawnIdentityCoordinator(projectKey, session, false)
+	coordinator.PrepareAgent(context.Background(), spawnidentity.Agent{
+		PaneIndex: 4, PaneID: paneID, PaneTitle: paneTitle, AgentType: "cc", Model: "opus",
 	})
 
 	registry := reloadRegistry(t, session, projectKey)

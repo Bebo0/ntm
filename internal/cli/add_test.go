@@ -19,6 +19,7 @@ import (
 	"github.com/Dicklesworthstone/ntm/internal/output"
 	"github.com/Dicklesworthstone/ntm/internal/persona"
 	"github.com/Dicklesworthstone/ntm/internal/robot"
+	"github.com/Dicklesworthstone/ntm/internal/spawnidentity"
 	"github.com/Dicklesworthstone/ntm/internal/tmux"
 	"github.com/Dicklesworthstone/ntm/tests/testutil"
 )
@@ -420,8 +421,8 @@ func TestAddRegistersAgentsWithAgentMail(t *testing.T) {
 	// The six fields registerSpawnedAgents needs to create (or reuse) an
 	// identity: anything missing here silently degrades the registration.
 	wantFields := map[string]bool{
-		"paneIndex": false, "paneID": false, "paneTitle": false,
-		"agentType": false, "model": false, "resolvedModel": false,
+		"PaneIndex": false, "PaneID": false, "PaneTitle": false,
+		"AgentType": false, "Model": false, "ResolvedModel": false,
 	}
 	ast.Inspect(executeAddDecl, func(node ast.Node) bool {
 		switch n := node.(type) {
@@ -430,8 +431,11 @@ func TestAddRegistersAgentsWithAgentMail(t *testing.T) {
 				registerCalls++
 			}
 		case *ast.CompositeLit:
-			ident, ok := n.Type.(*ast.Ident)
-			if !ok || ident.Name != "spawnedAgentInfo" {
+			sel, ok := n.Type.(*ast.SelectorExpr)
+			if !ok || sel.Sel.Name != "Agent" {
+				return true
+			}
+			if pkg, ok := sel.X.(*ast.Ident); !ok || pkg.Name != "spawnidentity" {
 				return true
 			}
 			for _, elt := range n.Elts {
@@ -456,7 +460,7 @@ func TestAddRegistersAgentsWithAgentMail(t *testing.T) {
 	}
 	for field, seen := range wantFields {
 		if !seen {
-			t.Errorf("executeAdd does not populate spawnedAgentInfo.%s for added panes", field)
+			t.Errorf("executeAdd does not populate spawnidentity.Agent.%s for added panes", field)
 		}
 	}
 }
@@ -468,7 +472,7 @@ func TestAddResponseCarriesAgentMailStatus(t *testing.T) {
 	data, err := json.Marshal(output.AddResponse{
 		TotalAdded: 1,
 		NewPanes:   []output.PaneResponse{{PaneID: "%42", Title: "proj__cc_2", Type: "cc"}},
-		AgentMail: &output.AgentMailSpawnStatus{
+		AgentMail: &spawnidentity.AgentMailSpawnStatus{
 			Available:         true,
 			ProjectRegistered: true,
 			AgentsRegistered:  1,

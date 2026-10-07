@@ -8,33 +8,9 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/Dicklesworthstone/ntm/internal/spawnidentity"
 	"github.com/Dicklesworthstone/ntm/internal/tmux"
 )
-
-func TestModelDelegationIsBuiltInDefault(t *testing.T) {
-	for agentType, want := range map[string]bool{
-		// Empty compiled-in default: delegation is the intended config.
-		"cc":       true, // ntm#334
-		"claude":   true,
-		"grok":     true,
-		"oc":       true,
-		"opencode": true,
-		"omp":      true,
-		"cursor":   true, // no [models] key exists to set
-		// Non-empty compiled-in default: an empty model means the user
-		// blanked it, so the notice still explains the placeholder.
-		"cod":    false,
-		"gmi":    false,
-		"ollama": false,
-		// Plugin agent types keep the notice.
-		"hermes": false,
-		"":       false,
-	} {
-		if got := modelDelegationIsBuiltInDefault(agentType); got != want {
-			t.Errorf("modelDelegationIsBuiltInDefault(%q) = %v, want %v", agentType, got, want)
-		}
-	}
-}
 
 // TestSpawnIdentityCoordinator_BareClaudeIsNotToldToSetDefaultModel: since
 // ntm#334 a bare --cc pane resolves no model by design, so registering it with
@@ -54,11 +30,11 @@ func TestSpawnIdentityCoordinator_BareClaudeIsNotToldToSetDefaultModel(t *testin
 	stubPaneProbe(t, panes, nil)
 
 	out := captureNoticeStdout(t, func() {
-		coordinator := newSpawnIdentityCoordinator(projectKey, session)
-		coordinator.prepareAgent(context.Background(), spawnedAgentInfo{
-			paneIndex: 1, paneID: "%7", paneTitle: session + "__cc_1", agentType: "cc",
+		coordinator := newSpawnIdentityCoordinator(projectKey, session, false)
+		coordinator.PrepareAgent(context.Background(), spawnidentity.Agent{
+			PaneIndex: 1, PaneID: "%7", PaneTitle: session + "__cc_1", AgentType: "cc",
 		})
-		if status := coordinator.finalStatus(); status == nil || status.AgentsRegistered != 1 {
+		if status := coordinator.Status(); status == nil || status.AgentsRegistered != 1 {
 			t.Fatalf("bare claude pane must still register: %+v", status)
 		}
 	})
@@ -67,9 +43,9 @@ func TestSpawnIdentityCoordinator_BareClaudeIsNotToldToSetDefaultModel(t *testin
 	}
 
 	out = captureNoticeStdout(t, func() {
-		coordinator := newSpawnIdentityCoordinator(projectKey, session)
-		coordinator.prepareAgent(context.Background(), spawnedAgentInfo{
-			paneIndex: 2, paneID: "%8", paneTitle: session + "__hermes_1", agentType: "hermes",
+		coordinator := newSpawnIdentityCoordinator(projectKey, session, false)
+		coordinator.PrepareAgent(context.Background(), spawnidentity.Agent{
+			PaneIndex: 2, PaneID: "%8", PaneTitle: session + "__hermes_1", AgentType: "hermes",
 		})
 	})
 	if !strings.Contains(out, "No model resolved for pane 2 (hermes)") {

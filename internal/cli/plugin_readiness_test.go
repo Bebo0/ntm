@@ -132,18 +132,3 @@ func TestDefaultDepChecksIncludesOpencode(t *testing.T) {
 		t.Fatal("ntm deps must probe the opencode binary")
 	}
 }
-
-func TestDelegatedModelPlaceholder(t *testing.T) {
-	if got := delegatedModelPlaceholder("opencode"); got != "opencode/cli-default" {
-		t.Fatalf("delegated model = %q", got)
-	}
-	if got := delegatedModelPlaceholder(""); got != "agent/cli-default" {
-		t.Fatalf("empty program delegated model = %q", got)
-	}
-	if got := modelDefaultKeyForType("oc"); got != "opencode" {
-		t.Fatalf("default key for oc = %q", got)
-	}
-	if got := modelDefaultKeyForType("omp"); got != "omp" {
-		t.Fatalf("default key for plugin = %q", got)
-	}
-}

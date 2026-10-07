@@ -46,6 +46,7 @@ import (
 	"github.com/Dicklesworthstone/ntm/internal/recovery"
 	"github.com/Dicklesworthstone/ntm/internal/resilience"
 	"github.com/Dicklesworthstone/ntm/internal/robot"
+	"github.com/Dicklesworthstone/ntm/internal/spawnidentity"
 	"github.com/Dicklesworthstone/ntm/internal/state"
 	statuspkg "github.com/Dicklesworthstone/ntm/internal/status"
 	"github.com/Dicklesworthstone/ntm/internal/swarm"
@@ -2984,8 +2985,7 @@ func spawnSessionLogicContextWithOutput(ctx context.Context, opts SpawnOptions, 
 	// instruction instead of racing the post-launch registration that used to
 	// run here. Lazily initialized — no Agent Mail traffic when registration
 	// is disabled or no agents launch.
-	identityCoordinator := newSpawnIdentityCoordinator(dir, opts.Session)
-	identityCoordinator.preLaunch = true
+	identityCoordinator := newSpawnIdentityCoordinator(dir, opts.Session, true)
 
 	// CAAM seat selection (ntm#319). One ranked query per provider for the
 	// whole spawn, resolved before the first agent command is sent. Off by
@@ -3372,14 +3372,14 @@ func spawnSessionLogicContextWithOutput(ctx context.Context, opts SpawnOptions, 
 		if workingDir != dir {
 			paneDir = workingDir
 		}
-		identityCoordinator.prepareAgent(ctx, spawnedAgentInfo{
-			paneIndex:     pane.Index,
-			paneID:        pane.ID,
-			paneTitle:     title,
-			paneDir:       paneDir,
-			agentType:     string(agent.Type),
-			model:         agent.Model,
-			resolvedModel: resolvedModel,
+		identityCoordinator.PrepareAgent(ctx, spawnidentity.Agent{
+			PaneIndex:     pane.Index,
+			PaneID:        pane.ID,
+			PaneTitle:     title,
+			PaneDir:       paneDir,
+			AgentType:     string(agent.Type),
+			Model:         agent.Model,
+			ResolvedModel: resolvedModel,
 		})
 
 		// Re-read the exact pane immediately before typing into it: the batch
@@ -3822,11 +3822,11 @@ func spawnSessionLogicContextWithOutput(ctx context.Context, opts SpawnOptions, 
 		// Every agent is launched: reconcile the pane badges published as
 		// "starting" before each launch so they reflect the running agents
 		// (ntm#312). Best-effort by contract.
-		identityCoordinator.reconcileBadges(ctx)
+		identityCoordinator.ReconcileBadges(ctx)
 
 		// Agent Mail identities were prepared and published per-pane before
 		// each launch (gh#255); assemble the accumulated status for output.
-		agentMailStatus := identityCoordinator.finalStatus()
+		agentMailStatus := identityCoordinator.Status()
 		if err := ctx.Err(); err != nil {
 			return outputError(fmt.Errorf("spawn registration canceled: %w", err))
 		}
@@ -4407,20 +4407,10 @@ func preflightOllamaSpawnContext(ctx context.Context, opts SpawnOptions) (string
 	return normalizedHost, nil
 }
 
-// agentMailRegistrationEnabled reports whether spawn may contact Agent Mail
-// to register identities. It fails closed: a missing config never authorizes
-// a network-facing side effect, and both the top-level toggle and the
-// auto_register preference must be on. This is a user-preference and privacy
-// boundary (#243): registration sends the absolute project path, session
-// metadata, and any configured bearer token to the configured endpoint.
-func agentMailRegistrationEnabled() bool {
-	return cfg != nil && cfg.AgentMail.Enabled && cfg.AgentMail.AutoRegister
-}
-
 // registerSessionAgent registers the session with Agent Mail.
 // This is non-blocking and logs but does not fail if unavailable.
 func registerSessionAgent(parentCtx context.Context, sessionName, workingDir string) {
-	if !agentMailRegistrationEnabled() {
+	if !spawnidentity.RegistrationEnabled(cfg) {
 		return
 	}
 	if parentCtx == nil {
@@ -4450,502 +4440,59 @@ func registerSessionAgent(parentCtx context.Context, sessionName, workingDir str
 	}
 }
 
-// spawnedAgentInfo holds agent info for registration with Agent Mail.
-type spawnedAgentInfo struct {
-	paneIndex     int
-	paneID        string
-	paneTitle     string
-	agentType     string
-	model         string
-	resolvedModel string
-	// paneDir is the directory the agent process is launched in when it
-	// differs from the session's project key (linked worktrees). Empty for
-	// ordinary panes. The identity is additionally published under this key
-	// so cwd-derived resolution finds it (ntm#257).
-	paneDir string
-}
-
-// registerSpawnedAgents registers each spawned agent with Agent Mail and returns status.
-// This function implements graceful degradation - Agent Mail unavailability does not
-// cause spawn to fail. Returns nil if Agent Mail is not available or disabled.
-//
-// It is the batch (post-launch) entry point used by add, adopt, and relaunch,
-// where the agent processes already exist. The spawn path instead uses a
-// spawnIdentityCoordinator directly so each pane's identity is published
-// BEFORE its agent command is sent (gh#255); both paths share the same
-// per-pane logic below.
-func registerSpawnedAgents(parentCtx context.Context, workingDir, sessionName string, agents []spawnedAgentInfo) *output.AgentMailSpawnStatus {
-	if parentCtx == nil {
-		return &output.AgentMailSpawnStatus{AgentsFailed: len(agents)}
-	}
-	coordinator := newSpawnIdentityCoordinator(workingDir, sessionName)
-	for _, agent := range agents {
-		coordinator.prepareAgent(parentCtx, agent)
-	}
-	// The agents are already running: reconcile their pane badges in one
-	// pass (ntm#312). Best-effort, never affects the registration status.
-	coordinator.reconcileBadges(parentCtx)
-	return coordinator.finalStatus()
-}
-
-// spawnIdentityCoordinator owns one Agent Mail client, availability probe,
-// project registration, session registry, and transient-busy reconciliation
-// set for the lifetime of a spawn (or batch registration). Initialization is
-// lazy: nothing contacts Agent Mail until the first prepareAgent call, so a
-// spawn with zero agents (or with registration disabled) pays no cost.
-//
-// The coordinator exists to fix a startup race (gh#255): identities used to
-// be created and published only after every agent had been launched, so an
-// agent that resolved its pane identity during boot could read a previous
-// occupant's name — or none. prepareAgent is designed to run immediately
-// before tmux.SendKeysContext for each pane, making the identity file and
-// registry entry durable before the agent process starts.
-//
-// Failure policy is unchanged from the historical batch path: Agent Mail
-// being disabled, unavailable, or failing per-pane never blocks the launch
-// (graceful degradation); failures are counted and warned, not fatal.
-type spawnIdentityCoordinator struct {
-	workingDir  string
-	sessionName string
-
-	initialized bool
-	enabled     bool
-	client      *agentmail.Client
-	available   bool
-	projectOK   bool
-	registry    *agentmail.SessionAgentRegistry
-	// reconciledIDs tracks agent IDs already claimed by transient-busy
-	// reconciliation so two panes never match the same server-side agent.
-	reconciledIDs map[int]bool
-	status        *output.AgentMailSpawnStatus
-	// livePanes maps pane id -> #{pane_pid} for the session as observed when
-	// the coordinator initialized (refreshed on a miss); liveness derives from
-	// it. Both are nil when the topology could not be read, which makes every
-	// recorded holder count as live — the fail-safe is a fresh identity,
-	// never a shared one (ntm#256).
-	livePanes map[string]int
-	liveness  agentmail.PaneLiveness
-	// preLaunch is true on the spawn path, where prepareAgent runs before
-	// the agent command is sent: each pane's identity badge is then
-	// published with lifecycle=starting right after its identity (ntm#312).
-	// The batch path (add/adopt/relaunch) reconciles once at the end
-	// instead, because its agents are already running.
-	preLaunch bool
-}
+// The per-pane Agent Mail identity coordinator (gh#255, ntm#256, ntm#257,
+// ntm#312, ntm#321) lives in internal/spawnidentity so robot and REST spawn
+// provision identities exactly like the cli lifecycle commands. The helpers
+// below bind it to the cli configuration and human output.
 
 // spawnIdentityPaneProbe lists a session's panes for liveness judgement. It
 // is a variable so tests can supply a topology without a tmux server.
 var spawnIdentityPaneProbe = tmux.GetPanesContext
 
-func newSpawnIdentityCoordinator(workingDir, sessionName string) *spawnIdentityCoordinator {
-	return &spawnIdentityCoordinator{
-		workingDir:    workingDir,
-		sessionName:   sessionName,
-		reconciledIDs: make(map[int]bool),
-	}
-}
+// cliIdentityReporter prints coordinator diagnostics on the human output
+// paths and stays silent under --json, where the agent_mail status object
+// carries the outcome.
+type cliIdentityReporter struct{}
 
-// ensureInit performs the one-time spawn-scoped setup: config gate, client
-// construction, availability probe, registry load, and project registration.
-func (c *spawnIdentityCoordinator) ensureInit(parentCtx context.Context) {
-	if c.initialized {
-		return
-	}
-	c.initialized = true
-
-	// Fail closed: no config never authorizes contacting Agent Mail, and both
-	// enabled and auto_register must be on (#243).
-	if !agentMailRegistrationEnabled() {
-		return
-	}
-	c.enabled = true
-
-	var opts []agentmail.Option
-	if cfg != nil {
-		opts = append(opts, agentmail.ConfigOptions(cfg.AgentMail.URL, cfg.AgentMail.Token)...)
-	}
-	c.client = agentmail.NewClient(opts...)
-
-	// Do not gate spawn registration on the full MCP health_check probe. Its
-	// availability budget is deliberately small, while a healthy Agent Mail
-	// server under database pressure may need longer to assemble the
-	// diagnostic snapshot; gating on it made a loaded-but-healthy server
-	// suppress every pane identity. ensure_project below is the operation
-	// spawn actually needs and is a sufficient (and lighter) reachability
-	// check — treat its response as authoritative.
-	c.status = &output.AgentMailSpawnStatus{
-		Available: false,
-		AgentMap:  make(map[string]string),
-	}
-
-	// Load existing registry to reuse identities on respawn (#69),
-	// falling back to a fresh registry if none exists.
-	c.registry, _ = agentmail.LoadSessionAgentRegistry(c.sessionName, c.workingDir)
-	if c.registry == nil {
-		c.registry = agentmail.NewSessionAgentRegistry(c.sessionName, c.workingDir)
-	}
-	c.observeLivePanes(parentCtx)
-
-	// Ensure project exists; success also marks Agent Mail available.
-	ctx, cancel := context.WithTimeout(parentCtx, 15*time.Second)
-	defer cancel()
-	if _, err := c.client.EnsureProject(ctx, c.workingDir); err != nil {
-		if !IsJSONOutput() {
-			output.PrintWarningf("Agent Mail project registration failed: %v", err)
-		}
-		return
-	}
-	c.available = true
-	c.status.Available = true
-	c.projectOK = true
-	c.status.ProjectRegistered = true
-}
-
-// prepareAgent reuses or creates the Agent Mail identity for one pane and
-// publishes it (canonical identity file, legacy compat file, session
-// registry) so the identity is resolvable before the agent process starts.
-// All failures degrade gracefully: they are counted in the aggregate status
-// and never block the pane's launch.
-func (c *spawnIdentityCoordinator) prepareAgent(parentCtx context.Context, agent spawnedAgentInfo) {
-	if parentCtx == nil {
-		return
-	}
-	c.ensureInit(parentCtx)
-	if !c.enabled {
-		return
-	}
-	if !c.available || !c.projectOK {
-		c.status.AgentsFailed++
-		return
-	}
-	if parentCtx.Err() != nil {
-		c.status.AgentsFailed++
-		return
-	}
-
-	// Reuse the identity of a prior occupant of this slot (#69) — but only a
-	// DEAD one. The pane id is the primary key; a matching title whose
-	// recorded pane is still live means the slot is occupied and the running
-	// agent keeps its name, so this pane gets a fresh identity (ntm#256).
-	if existingName, recoveredFrom, ok := c.registry.ResolveForPane(agent.paneTitle, agent.paneID, c.liveness); ok && existingName != "" {
-		// Best-effort: re-register the reused name bound to THIS pane so the
-		// server's pane-binding generation receipt follows the new pane
-		// instead of the dead one it recovered from. Reuse deliberately does
-		// not depend on the server (#69: a same-session respawn gets its name
-		// back even offline), so a failed or timed-out re-registration only
-		// means the binding refresh waits for the next opportunity.
-		reuseProgram := agentTypeToProgram(agent.agentType)
-		reuseModel := agent.resolvedModel
-		if reuseModel == "" {
-			reuseModel = agent.model
-		}
-		if strings.TrimSpace(reuseModel) == "" {
-			reuseModel = delegatedModelPlaceholder(reuseProgram)
-		}
-		// Re-claiming an existing name on mcp-agent-mail >=2.13 needs its
-		// registration token; prime the client's cache from the registry.
-		c.registry.HydrateClientTokens(c.client)
-		reregCtx, reregCancel := context.WithTimeout(parentCtx, 15*time.Second)
-		reregistered, reregErr := c.client.RegisterAgent(reregCtx, agentmail.RegisterAgentOptions{
-			ProjectKey: c.workingDir,
-			Program:    reuseProgram,
-			Model:      reuseModel,
-			Name:       existingName,
-			PaneID:     agent.paneID,
-		})
-		reregCancel()
-		// Re-registration can ROTATE this identity's registration token:
-		// mcp-agent-mail >=2.13 may issue a fresh credential when it re-binds
-		// an existing name to a new pane, and the previous one then stops
-		// authenticating the agent. Persisting the replacement in the session
-		// registry BEFORE the agent process starts is what makes a restarted
-		// worker inherit a credential the server still accepts (ntm#321).
-		//
-		// Deliberately conservative: a failed or timed-out re-registration,
-		// or a response carrying no token, leaves the recorded token
-		// untouched — reuse must survive an offline server (#69), and
-		// SetRegistrationToken("") would DELETE the entry. A response naming
-		// a different identity is not ours to record against this name.
-		if reregErr == nil && reregistered != nil &&
-			reregistered.RegistrationToken != "" &&
-			(reregistered.Name == "" || reregistered.Name == existingName) {
-			c.registry.SetRegistrationToken(existingName, reregistered.RegistrationToken)
-		}
-
-		c.status.AgentsRegistered++
-		c.status.AgentMap[agent.paneID] = existingName
-		if !IsJSONOutput() {
-			if recoveredFrom != "" {
-				output.PrintInfof("Reused existing identity for pane %d: %s (recovered from pane %s, no longer live)", agent.paneIndex, existingName, recoveredFrom)
-			} else {
-				output.PrintInfof("Reused existing identity for pane %d: %s", agent.paneIndex, existingName)
-			}
-		}
-		c.publishIdentity(agent, existingName)
-		c.registry.AddAgent(agent.paneTitle, agent.paneID, existingName)
-		c.recordPanePID(parentCtx, agent.paneID)
-		c.persistRegistry()
-		c.publishStartingBadge(parentCtx, agent)
-		return
-	}
-
-	// Map agent type to program name
-	program := agentTypeToProgram(agent.agentType)
-	model := agent.resolvedModel
-	if model == "" {
-		model = agent.model
-	}
-	// Agent Mail rejects an empty model, but several agent types legitimately
-	// delegate model selection to the CLI's own config (bare --oc=N, --grok=N,
-	// plugins without a default). Register with a stable, clearly-delegated
-	// delegation marker instead of failing the pane's identity (ntm#261).
-	if strings.TrimSpace(model) == "" {
-		model = delegatedModelPlaceholder(program)
-		if !IsJSONOutput() && !modelDelegationIsBuiltInDefault(agent.agentType) {
-			output.PrintInfof("No model resolved for pane %d (%s); registering with Agent Mail as %q — set models.default_%s or pass an explicit model to name it",
-				agent.paneIndex, agent.agentType, model, modelDefaultKeyForType(agent.agentType))
-		}
-	}
-
-	regCtx, regCancel := context.WithTimeout(parentCtx, 15*time.Second)
-	registered, err := c.client.CreateAgentIdentity(regCtx, agentmail.RegisterAgentOptions{
-		ProjectKey: c.workingDir,
-		Program:    program,
-		Model:      model,
-		PaneID:     agent.paneID,
-	})
-	regCancel()
-
-	if err != nil {
-		// On transient busy errors, the agent may have been created server-side
-		// despite the error. Reconcile by listing agents and checking.
-		if errors.Is(err, agentmail.ErrTransientBusy) {
-			reconcileCtx, reconcileCancel := context.WithTimeout(parentCtx, 5*time.Second)
-			allAgents, listErr := c.client.ListAgents(reconcileCtx, c.workingDir)
-			reconcileCancel()
-			if listErr == nil {
-				// Look for a recently-created agent matching our program/model
-				// that hasn't already been claimed by a prior pane.
-				var found *agentmail.Agent
-				for i := range allAgents {
-					if allAgents[i].Program == program && allAgents[i].Model == model {
-						if !c.reconciledIDs[allAgents[i].ID] {
-							if found == nil || allAgents[i].ID > found.ID {
-								found = &allAgents[i]
-							}
-						}
-					}
-				}
-				if found != nil {
-					// Agent was actually created — treat as success
-					c.reconciledIDs[found.ID] = true
-					registered = found
-					err = nil
-					if !IsJSONOutput() {
-						output.PrintInfof("Reconciled busy response for pane %d: agent %s exists", agent.paneIndex, found.Name)
-					}
-				}
-			}
-		}
-		if err != nil {
-			c.status.AgentsFailed++
-			if !IsJSONOutput() {
-				output.PrintWarningf("Agent Mail registration failed for pane %d: %v", agent.paneIndex, err)
-			}
-			return
-		}
-	}
-
-	// Write the per-pane identity file(s) so Agent Mail and notify hooks can
-	// resolve AGENT_MAIL_AGENT before the agent process starts.
-	c.publishIdentity(agent, registered.Name)
-
-	c.status.AgentsRegistered++
-	c.status.AgentMap[agent.paneID] = registered.Name
-
-	// Add to registry for persistence
-	c.registry.AddAgent(agent.paneTitle, agent.paneID, registered.Name)
-	c.recordPanePID(parentCtx, agent.paneID)
-	// Persist the registration_token alongside the agent name so
-	// later ntm processes can re-authenticate as this agent on
-	// mcp-agent-mail >=2.13 (ntm#146).
-	if registered.RegistrationToken != "" {
-		c.registry.SetRegistrationToken(registered.Name, registered.RegistrationToken)
-	}
-	c.persistRegistry()
-	c.publishStartingBadge(parentCtx, agent)
-
+func (cliIdentityReporter) Infof(format string, args ...any) {
 	if !IsJSONOutput() {
-		output.PrintInfof("Registered agent pane %d as %s", agent.paneIndex, registered.Name)
+		output.PrintInfof(format, args...)
 	}
 }
 
-// persistRegistry saves the session registry after each mutation so the
-// pane-to-name mapping is durable before the pane's agent process launches.
-func (c *spawnIdentityCoordinator) persistRegistry() {
-	if c.registry == nil || c.registry.Count() == 0 {
-		return
-	}
-	if err := agentmail.SaveSessionAgentRegistry(c.registry); err != nil {
-		if !IsJSONOutput() {
-			output.PrintWarningf("Failed to persist agent registry: %v", err)
-		}
+func (cliIdentityReporter) Warnf(format string, args ...any) {
+	if !IsJSONOutput() {
+		output.PrintWarningf(format, args...)
 	}
 }
 
-// finalStatus returns the aggregate registration status for output assembly.
-// It returns nil when registration is disabled or no agent was ever prepared,
-// matching the historical registerSpawnedAgents contract.
-func (c *spawnIdentityCoordinator) finalStatus() *output.AgentMailSpawnStatus {
-	return c.status
+// spawnIdentityOptions binds the shared identity coordinator to the cli
+// configuration (registration gate, endpoint, badges), human output, and the
+// cli's tmux ports.
+func spawnIdentityOptions() spawnidentity.Options {
+	opts := spawnidentity.ConfigOptions(cfg)
+	opts.Reporter = cliIdentityReporter{}
+	opts.ListPanes = spawnIdentityPaneProbe
+	opts.BadgeTmux = paneBadgeTmux
+	return opts
 }
 
-// observeLivePanes snapshots the session's pane ids and pids so registry
-// bindings can be judged live or dead (ntm#256). When the topology cannot be
-// read the snapshot is nil and ResolveForPane treats every recorded holder as
-// live: titles then never trigger reuse, pane ids still do.
-func (c *spawnIdentityCoordinator) observeLivePanes(ctx context.Context) {
-	panes, err := spawnIdentityPaneProbe(ctx, c.sessionName)
-	if err != nil {
-		c.livePanes = nil
-		c.liveness = nil
-		return
-	}
-	live := make(map[string]int, len(panes))
-	for _, p := range panes {
-		if p.ID != "" {
-			live[p.ID] = p.PID
-		}
-	}
-	c.livePanes = live
-	c.liveness = livenessFromPanes(panes)
+// newSpawnIdentityCoordinator returns a cli-bound coordinator. preLaunch is
+// true on the spawn path, where each pane's identity (and starting badge) is
+// published before its agent command is sent.
+func newSpawnIdentityCoordinator(workingDir, sessionName string, preLaunch bool) *spawnidentity.Coordinator {
+	opts := spawnIdentityOptions()
+	opts.PreLaunch = preLaunch
+	return spawnidentity.New(workingDir, sessionName, opts)
 }
 
-// recordPanePID stores the registering pane's current #{pane_pid} beside its
-// binding so a later process can tell this incarnation from a recycled %N.
-// A pane absent from the init snapshot (created after it) triggers one
-// refresh; an unknown pid is simply left unrecorded.
-func (c *spawnIdentityCoordinator) recordPanePID(ctx context.Context, paneID string) {
-	if paneID == "" || c.registry == nil {
-		return
-	}
-	pid, ok := c.livePanes[paneID]
-	if !ok {
-		c.observeLivePanes(ctx)
-		pid = c.livePanes[paneID]
-	}
-	c.registry.SetPanePID(paneID, pid)
-}
-
-// publishIdentity writes the canonical identity file (XDG-compliant, atomic,
-// Agent-Mail-compatible; see agentmail.CanonicalIdentityPath and the
-// mcp-agent-mail Rust reference in pane_identity.rs) plus the legacy /tmp
-// compat file still read by older hooks, under every project key the pane may
-// resolve its identity through: the session key, its symlink-resolved form,
-// and the pane's worktree directory (ntm#257). The extra keys are best-effort;
-// only a failure on the session key itself is reported.
-func (c *spawnIdentityCoordinator) publishIdentity(agent spawnedAgentInfo, name string) {
-	// When registration carried a pane binding, the Agent Mail server has
-	// already written a structured generation receipt (name + pane + PID +
-	// socket) at the canonical session-key path. That receipt is strictly
-	// richer than a plain name — its liveness facts back the server's
-	// pane-identity reuse — so never clobber it: keep it in place and mirror
-	// its exact bytes into the alternate project namespaces. Without a
-	// matching receipt (older server, unreachable filesystem, or a stale
-	// receipt for a different identity), fall back to plain-name writes.
-	receipt, receiptName, hasReceipt := agentmail.ReadPaneIdentityReceipt(c.workingDir, agent.paneID)
-	if hasReceipt && receiptName != name {
-		hasReceipt = false
-	}
-	for i, key := range identityPublishKeys(c.workingDir, agent.paneDir) {
-		switch {
-		case hasReceipt && key == c.workingDir:
-			// Canonical receipt already in place; leave it untouched.
-		case hasReceipt:
-			if _, writeErr := agentmail.MirrorPaneIdentityReceipt(key, agent.paneID, receipt); writeErr != nil && i == 0 && !IsJSONOutput() {
-				output.PrintWarningf("Failed to mirror identity receipt for pane %d: %v", agent.paneIndex, writeErr)
-			}
-		default:
-			if _, writeErr := agentmail.WriteIdentity(key, agent.paneID, name); writeErr != nil && i == 0 && !IsJSONOutput() {
-				output.PrintWarningf("Failed to write identity file for pane %d: %v", agent.paneIndex, writeErr)
-			}
-		}
-		_ = agentmail.WriteLegacyCompatIdentity(key, agent.paneID, name)
-	}
-}
-
-// delegatedModelPlaceholder is the model identifier NTM registers with Agent
-// Mail when the agent type delegates model selection to its own CLI config
-// and no explicit model was given. It is stable per program, so the same
-// pane re-registers identically, and unmistakably not a real model name.
-func delegatedModelPlaceholder(program string) string {
-	program = strings.TrimSpace(program)
-	if program == "" {
-		program = "agent"
-	}
-	return program + "/cli-default"
-}
-
-// modelDelegationIsBuiltInDefault reports whether leaving the launch model to
-// the agent's own CLI is NTM's built-in default for this agent type: a known
-// type whose compiled-in [models] default is empty (claude since ntm#334, and
-// grok, opencode, omp), or one with no [models] key at all. Such a pane
-// resolving no model is the intended configuration, so the delegation notice
-// — which suggests setting models.default_<type> — would advise undoing the
-// default on every spawn. Plugin types and a user-blanked non-empty default
-// (codex, gemini, ollama) still get the notice.
-func modelDelegationIsBuiltInDefault(agentType string) bool {
-	canonical := agentpkg.AgentType(agentType).Canonical()
-	if !canonical.IsValid() || canonical == agentpkg.AgentTypeUser {
-		return false
-	}
-	defaults := config.DefaultModels()
-	return strings.TrimSpace(defaults.GetModelName(string(canonical), "")) == ""
-}
-
-// modelDefaultKeyForType names the [models] key a user would set to give the
-// type a real default model, for the delegation notice.
-func modelDefaultKeyForType(agentType string) string {
-	switch agentpkg.AgentType(agentType).Canonical() {
-	case agentpkg.AgentTypeOpencode:
-		return "opencode"
-	case agentpkg.AgentTypeGrok:
-		return "grok"
-	case agentpkg.AgentTypeOmp:
-		return "omp"
-	case agentpkg.AgentTypeClaudeCode:
-		return "claude"
-	case agentpkg.AgentTypeCodex:
-		return "codex"
-	case agentpkg.AgentTypeGemini:
-		return "gemini"
-	case agentpkg.AgentTypeOllama:
-		return "ollama"
-	default:
-		return strings.ToLower(strings.TrimSpace(agentType))
-	}
-}
-
-// agentTypeToProgram maps NTM agent types to Agent Mail program names.
-func agentTypeToProgram(agentType string) string {
-	switch agentType {
-	case "cc":
-		return "claude-code"
-	case "cod":
-		return "codex-cli"
-	case "gmi":
-		return "gemini-cli"
-	case "cursor":
-		return "cursor"
-	case "windsurf":
-		return "windsurf"
-	case "aider":
-		return "aider"
-	case "oc":
-		return "opencode"
-	default:
-		return agentType
-	}
+// registerSpawnedAgents registers already-running agents with Agent Mail and
+// returns the status (nil when registration is disabled). It is the batch
+// entry point used by add, adopt, and relaunch; spawn prepares each pane
+// before launch instead (gh#255). Agent Mail unavailability never fails the
+// caller.
+func registerSpawnedAgents(parentCtx context.Context, workingDir, sessionName string, agents []spawnidentity.Agent) *spawnidentity.AgentMailSpawnStatus {
+	return spawnidentity.RegisterBatch(parentCtx, workingDir, sessionName, agents, spawnIdentityOptions())
 }
 
 // Identity file path helpers moved to internal/agentmail/pane_identity.go so

@@ -19,6 +19,7 @@ import (
 	_ "github.com/Dicklesworthstone/ntm/internal/resilience"      // resilience.* + rotation gates + notifications.*
 	_ "github.com/Dicklesworthstone/ntm/internal/robot"           // robot-consumed keys (liveness_claims.go) + retry.alerts.*
 	_ "github.com/Dicklesworthstone/ntm/internal/scanner"         // scanner.ubs_path
+	_ "github.com/Dicklesworthstone/ntm/internal/spawnidentity"   // agent_mail.auto_register + agent_mail.pane_badge*
 	_ "github.com/Dicklesworthstone/ntm/internal/swarm"           // swarm tiers + agents.claude_isolate_*
 	_ "github.com/Dicklesworthstone/ntm/internal/tui/dashboard"   // theme, help_verbosity, rano, compaction recovery
 	_ "github.com/Dicklesworthstone/ntm/internal/webhook"         // retry globals + retry.webhook.*

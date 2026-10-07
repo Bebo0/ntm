@@ -22,6 +22,7 @@ import (
 
 	"github.com/Dicklesworthstone/ntm/internal/agentmail"
 	"github.com/Dicklesworthstone/ntm/internal/config"
+	"github.com/Dicklesworthstone/ntm/internal/spawnidentity"
 	"github.com/Dicklesworthstone/ntm/internal/tmux"
 )
 
@@ -96,12 +97,12 @@ func TestSpawnIdentityCoordinator_LiveHolderKeepsItsName(t *testing.T) {
 		{ID: "%9", PID: 999, Title: session + "__cc_1"},
 	}, nil)
 
-	coordinator := newSpawnIdentityCoordinator(projectKey, session)
-	coordinator.prepareAgent(context.Background(), spawnedAgentInfo{
-		paneIndex: 2, paneID: "%9", paneTitle: session + "__cc_1", agentType: "cc", model: "opus",
+	coordinator := newSpawnIdentityCoordinator(projectKey, session, false)
+	coordinator.PrepareAgent(context.Background(), spawnidentity.Agent{
+		PaneIndex: 2, PaneID: "%9", PaneTitle: session + "__cc_1", AgentType: "cc", Model: "opus",
 	})
 
-	status := coordinator.finalStatus()
+	status := coordinator.Status()
 	if status == nil || status.AgentsRegistered != 1 || status.AgentMap["%9"] != "BraveFalcon" {
 		t.Fatalf("status = %+v, want a fresh BraveFalcon for %%9", status)
 	}
@@ -146,12 +147,12 @@ func TestSpawnIdentityCoordinator_DeadHolderIsReused(t *testing.T) {
 	// %5 is gone; %9 is the respawned pane.
 	stubPaneProbe(t, []tmux.Pane{{ID: "%9", PID: 999, Title: session + "__cc_1"}}, nil)
 
-	coordinator := newSpawnIdentityCoordinator(projectKey, session)
-	coordinator.prepareAgent(context.Background(), spawnedAgentInfo{
-		paneIndex: 1, paneID: "%9", paneTitle: session + "__cc_1", agentType: "cc",
+	coordinator := newSpawnIdentityCoordinator(projectKey, session, false)
+	coordinator.PrepareAgent(context.Background(), spawnidentity.Agent{
+		PaneIndex: 1, PaneID: "%9", PaneTitle: session + "__cc_1", AgentType: "cc",
 	})
 
-	status := coordinator.finalStatus()
+	status := coordinator.Status()
 	if status == nil || status.AgentsRegistered != 1 || status.AgentMap["%9"] != "OldTenant" {
 		t.Fatalf("status = %+v, want OldTenant reused for %%9", status)
 	}
@@ -189,12 +190,12 @@ func TestSpawnIdentityCoordinator_RecycledPaneIDIsDead(t *testing.T) {
 		{ID: "%9", PID: 999, Title: session + "__cc_1"},
 	}, nil)
 
-	coordinator := newSpawnIdentityCoordinator(projectKey, session)
-	coordinator.prepareAgent(context.Background(), spawnedAgentInfo{
-		paneIndex: 1, paneID: "%9", paneTitle: session + "__cc_1", agentType: "cc",
+	coordinator := newSpawnIdentityCoordinator(projectKey, session, false)
+	coordinator.PrepareAgent(context.Background(), spawnidentity.Agent{
+		PaneIndex: 1, PaneID: "%9", PaneTitle: session + "__cc_1", AgentType: "cc",
 	})
 
-	if status := coordinator.finalStatus(); status == nil || status.AgentMap["%9"] != "OldTenant" {
+	if status := coordinator.Status(); status == nil || status.AgentMap["%9"] != "OldTenant" {
 		t.Fatalf("status = %+v, want OldTenant recovered from the dead %%5 binding", status)
 	}
 	if creates := countCreates(calledTools()); creates != 1 {
@@ -216,12 +217,12 @@ func TestSpawnIdentityCoordinator_ReuseSurvivesFailedBindingRefresh(t *testing.T
 	seedRegistry(t, session, projectKey, session+"__cc_1", "%5", "OldTenant", 111)
 	stubPaneProbe(t, []tmux.Pane{{ID: "%9", PID: 999, Title: session + "__cc_1"}}, nil)
 
-	coordinator := newSpawnIdentityCoordinator(projectKey, session)
-	coordinator.prepareAgent(context.Background(), spawnedAgentInfo{
-		paneIndex: 1, paneID: "%9", paneTitle: session + "__cc_1", agentType: "cc",
+	coordinator := newSpawnIdentityCoordinator(projectKey, session, false)
+	coordinator.PrepareAgent(context.Background(), spawnidentity.Agent{
+		PaneIndex: 1, PaneID: "%9", PaneTitle: session + "__cc_1", AgentType: "cc",
 	})
 
-	status := coordinator.finalStatus()
+	status := coordinator.Status()
 	if status == nil || status.AgentsRegistered != 1 || status.AgentMap["%9"] != "OldTenant" {
 		t.Fatalf("status = %+v, want OldTenant reused despite failed binding refresh", status)
 	}
@@ -243,12 +244,12 @@ func TestSpawnIdentityCoordinator_UnobservableLivenessNeverShares(t *testing.T) 
 	seedRegistry(t, session, projectKey, session+"__cc_1", "%5", "OldTenant", 111)
 	stubPaneProbe(t, nil, errors.New("tmux unreachable"))
 
-	coordinator := newSpawnIdentityCoordinator(projectKey, session)
-	coordinator.prepareAgent(context.Background(), spawnedAgentInfo{
-		paneIndex: 1, paneID: "%9", paneTitle: session + "__cc_1", agentType: "cc",
+	coordinator := newSpawnIdentityCoordinator(projectKey, session, false)
+	coordinator.PrepareAgent(context.Background(), spawnidentity.Agent{
+		PaneIndex: 1, PaneID: "%9", PaneTitle: session + "__cc_1", AgentType: "cc",
 	})
 
-	if status := coordinator.finalStatus(); status == nil || status.AgentMap["%9"] != "BraveFalcon" {
+	if status := coordinator.Status(); status == nil || status.AgentMap["%9"] != "BraveFalcon" {
 		t.Fatalf("status = %+v, want a fresh identity when liveness is unobservable", status)
 	}
 	if creates := countCreates(calledTools()); creates != 1 {
@@ -275,9 +276,9 @@ func TestSpawnIdentityCoordinator_WorktreePanePublishesUnderBothKeys(t *testing.
 	session := "spawn_identity_worktree"
 	stubPaneProbe(t, []tmux.Pane{{ID: "%3", PID: 333, Title: session + "__cc_1"}}, nil)
 
-	coordinator := newSpawnIdentityCoordinator(projectKey, session)
-	coordinator.prepareAgent(context.Background(), spawnedAgentInfo{
-		paneIndex: 1, paneID: "%3", paneTitle: session + "__cc_1", agentType: "cc", paneDir: worktree,
+	coordinator := newSpawnIdentityCoordinator(projectKey, session, false)
+	coordinator.PrepareAgent(context.Background(), spawnidentity.Agent{
+		PaneIndex: 1, PaneID: "%3", PaneTitle: session + "__cc_1", AgentType: "cc", PaneDir: worktree,
 	})
 
 	if got := readIdentity(t, projectKey, "%3"); got != "BraveFalcon" {
@@ -300,9 +301,9 @@ func TestSpawnIdentityCoordinator_WorktreePanePublishesUnderBothKeys(t *testing.
 	}
 
 	// A plain (non-worktree) pane publishes only under the session key.
-	plain := newSpawnIdentityCoordinator(projectKey, session)
-	plain.prepareAgent(context.Background(), spawnedAgentInfo{
-		paneIndex: 2, paneID: "%4", paneTitle: session + "__cc_2", agentType: "cc",
+	plain := newSpawnIdentityCoordinator(projectKey, session, false)
+	plain.PrepareAgent(context.Background(), spawnidentity.Agent{
+		PaneIndex: 2, PaneID: "%4", PaneTitle: session + "__cc_2", AgentType: "cc",
 	})
 	if got := readIdentity(t, projectKey, "%4"); got != "BraveFalcon" {
 		t.Fatalf("plain pane identity under session key = %q", got)
@@ -333,8 +334,8 @@ func TestSpawnWorktreeInjectsAgentMailProject(t *testing.T) {
 	if !strings.Contains(body, `opts.PaneEnv["AGENT_MAIL_PROJECT"]`) {
 		t.Fatal("spawn must defer to an explicit --pane-env AGENT_MAIL_PROJECT value")
 	}
-	if !strings.Contains(body, `paneDir:`) {
-		t.Fatal("spawn must hand the pane's launch directory to prepareAgent so worktree identities publish under both keys")
+	if !strings.Contains(body, `PaneDir:`) {
+		t.Fatal("spawn must hand the pane's launch directory to PrepareAgent so worktree identities publish under both keys")
 	}
 }
 
@@ -378,60 +379,5 @@ func failingRegistrationMailServer(t *testing.T) *httptest.Server {
 	return srv
 }
 
-// TestPublishIdentityPreservesServerReceipt: when registration carried a pane
-// binding, the Agent Mail server has already written a structured generation
-// receipt at the canonical session-key path. publishIdentity must keep it
-// (not clobber it with a plain name) and mirror its exact bytes into the
-// pane's worktree namespace.
-func TestPublishIdentityPreservesServerReceipt(t *testing.T) {
-	isolateIdentityDirs(t)
-
-	projectKey := t.TempDir()
-	paneDir := t.TempDir()
-	receipt := `{"name":"BlueLake","session_name":"s","pane_id":"%7","pane_pid":4242,` +
-		`"socket_path":"/tmp/tmux.sock","written_at":"2026-08-31T00:00:00Z"}`
-	canonical := agentmail.CanonicalIdentityPath(projectKey, "%7")
-	if err := os.MkdirAll(filepath.Dir(canonical), 0o700); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(canonical, []byte(receipt), 0o600); err != nil {
-		t.Fatal(err)
-	}
-
-	c := newSpawnIdentityCoordinator(projectKey, "receipt_session")
-	c.publishIdentity(spawnedAgentInfo{paneIndex: 1, paneID: "%7", paneDir: paneDir}, "BlueLake")
-
-	after, err := os.ReadFile(canonical)
-	if err != nil || string(after) != receipt {
-		t.Fatalf("canonical receipt after publish = %q err=%v, want untouched", after, err)
-	}
-	mirrored, err := os.ReadFile(agentmail.CanonicalIdentityPath(paneDir, "%7"))
-	if err != nil || string(mirrored) != receipt {
-		t.Fatalf("worktree mirror = %q err=%v, want byte-identical receipt", mirrored, err)
-	}
-}
-
-// TestPublishIdentityOverwritesMismatchedReceipt: a receipt bound to a
-// DIFFERENT identity is stale evidence for this pane and is replaced with the
-// registered name.
-func TestPublishIdentityOverwritesMismatchedReceipt(t *testing.T) {
-	isolateIdentityDirs(t)
-
-	projectKey := t.TempDir()
-	canonical := agentmail.CanonicalIdentityPath(projectKey, "%7")
-	if err := os.MkdirAll(filepath.Dir(canonical), 0o700); err != nil {
-		t.Fatal(err)
-	}
-	stale := `{"name":"OldTenant","session_name":"s","pane_id":"%7","pane_pid":1,` +
-		`"socket_path":"/tmp/tmux.sock","written_at":"2026-08-01T00:00:00Z"}`
-	if err := os.WriteFile(canonical, []byte(stale), 0o600); err != nil {
-		t.Fatal(err)
-	}
-
-	c := newSpawnIdentityCoordinator(projectKey, "receipt_session")
-	c.publishIdentity(spawnedAgentInfo{paneIndex: 1, paneID: "%7"}, "BlueLake")
-
-	if got := readIdentity(t, projectKey, "%7"); got != "BlueLake" {
-		t.Fatalf("identity after publish = %q, want BlueLake replacing the stale receipt", got)
-	}
-}
+// The publishIdentity receipt-preservation tests moved with the coordinator
+// to internal/spawnidentity (coordinator_test.go there).

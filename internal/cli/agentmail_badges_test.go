@@ -13,6 +13,7 @@ import (
 
 	"github.com/Dicklesworthstone/ntm/internal/agentmail"
 	"github.com/Dicklesworthstone/ntm/internal/config"
+	"github.com/Dicklesworthstone/ntm/internal/spawnidentity"
 	"github.com/Dicklesworthstone/ntm/internal/tmux"
 )
 
@@ -98,9 +99,9 @@ func (f *fakeBadgeTmux) badgeFor(paneID string) (tmux.PaneBadge, bool) {
 
 func installFakeBadgeTmux(t *testing.T, fake *fakeBadgeTmux) {
 	t.Helper()
-	old := newPaneBadgeTmux
-	newPaneBadgeTmux = func() paneBadgeTmux { return fake }
-	t.Cleanup(func() { newPaneBadgeTmux = old })
+	old := paneBadgeTmux
+	paneBadgeTmux = fake
+	t.Cleanup(func() { paneBadgeTmux = old })
 }
 
 func setBadgeConfig(t *testing.T, enabled bool) {
@@ -156,7 +157,7 @@ func TestReconcileSessionIdentityBadges_PublishesAndReportsDrift(t *testing.T) {
 	fake := &fakeBadgeTmux{panes: fixturePanes(session), windows: singleWindow()}
 	installFakeBadgeTmux(t, fake)
 
-	report, err := reconcileSessionIdentityBadges(context.Background(), badgeReconcileOptions{Session: session})
+	report, err := reconcileSessionBadges(context.Background(), session)
 	if err != nil {
 		t.Fatalf("reconcile: %v", err)
 	}
@@ -207,7 +208,7 @@ func TestReconcileSessionIdentityBadges_UnregisteredAgentPaneShowsUnknown(t *tes
 	fake := &fakeBadgeTmux{panes: panes, windows: singleWindow()}
 	installFakeBadgeTmux(t, fake)
 
-	report, err := reconcileSessionIdentityBadges(context.Background(), badgeReconcileOptions{Session: session})
+	report, err := reconcileSessionBadges(context.Background(), session)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -234,12 +235,12 @@ func TestReconcileSessionIdentityBadges_DisabledWithdrawsAndRestores(t *testing.
 	badgeFixture(t, session, projectKey)
 	fake := &fakeBadgeTmux{panes: fixturePanes(session), windows: singleWindow()}
 	installFakeBadgeTmux(t, fake)
-	if _, err := reconcileSessionIdentityBadges(context.Background(), badgeReconcileOptions{Session: session}); err != nil {
+	if _, err := reconcileSessionBadges(context.Background(), session); err != nil {
 		t.Fatal(err)
 	}
 
 	setBadgeConfig(t, false)
-	report, err := reconcileSessionIdentityBadges(context.Background(), badgeReconcileOptions{Session: session})
+	report, err := reconcileSessionBadges(context.Background(), session)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -263,7 +264,7 @@ func TestReconcileSessionIdentityBadges_DisabledWithdrawsAndRestores(t *testing.
 	}
 	// A second disabled pass has nothing left to withdraw.
 	fake.cleared, fake.disabled = nil, nil
-	report, _ = reconcileSessionIdentityBadges(context.Background(), badgeReconcileOptions{Session: session})
+	report, _ = reconcileSessionBadges(context.Background(), session)
 	if report.Cleared != 0 || report.WindowsRestored != 0 {
 		t.Fatalf("second disabled pass = cleared %d, restored %d", report.Cleared, report.WindowsRestored)
 	}
@@ -303,7 +304,7 @@ func TestReconcileSessionIdentityBadges_TopologyAndOptOut(t *testing.T) {
 	fake := &fakeBadgeTmux{panes: panes, windows: windows}
 	installFakeBadgeTmux(t, fake)
 
-	report, err := reconcileSessionIdentityBadges(context.Background(), badgeReconcileOptions{Session: session})
+	report, err := reconcileSessionBadges(context.Background(), session)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -343,7 +344,7 @@ func TestReconcileSessionIdentityBadges_TopologyAndOptOut(t *testing.T) {
 	}
 	fake = &fakeBadgeTmux{panes: panes, windows: windows}
 	installFakeBadgeTmux(t, fake)
-	report, err = reconcileSessionIdentityBadges(context.Background(), badgeReconcileOptions{Session: session})
+	report, err = reconcileSessionBadges(context.Background(), session)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -363,7 +364,7 @@ func TestReconcileSessionIdentityBadges_TmuxUnavailableRetainsSuccess(t *testing
 	badgeFixture(t, session, projectKey)
 	fake := &fakeBadgeTmux{panes: fixturePanes(session), windows: singleWindow()}
 	installFakeBadgeTmux(t, fake)
-	if _, err := reconcileSessionIdentityBadges(context.Background(), badgeReconcileOptions{Session: session}); err != nil {
+	if _, err := reconcileSessionBadges(context.Background(), session); err != nil {
 		t.Fatal(err)
 	}
 	before, _ := agentmail.LoadPaneBadgeStore(session, projectKey)
@@ -373,7 +374,7 @@ func TestReconcileSessionIdentityBadges_TmuxUnavailableRetainsSuccess(t *testing
 	}
 
 	fake.panesErr = errors.New("no server running")
-	report, err := reconcileSessionIdentityBadges(context.Background(), badgeReconcileOptions{Session: session})
+	report, err := reconcileSessionBadges(context.Background(), session)
 	if err == nil || report.TmuxError == "" {
 		t.Fatalf("tmux outage must be reported: err=%v report=%+v", err, report)
 	}
@@ -407,7 +408,7 @@ func TestReconcileSessionIdentityBadges_GenerationRaceWithdrawsBadge(t *testing.
 	fake := &fakeBadgeTmux{panes: fixturePanes(session), windows: singleWindow(), publishPID: map[string]int{"%1": 9999}}
 	installFakeBadgeTmux(t, fake)
 
-	report, err := reconcileSessionIdentityBadges(context.Background(), badgeReconcileOptions{Session: session})
+	report, err := reconcileSessionBadges(context.Background(), session)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -441,7 +442,7 @@ func TestReconcileSessionIdentityBadges_PublishFailureWarnsOnly(t *testing.T) {
 	fake := &fakeBadgeTmux{panes: fixturePanes(session), windows: singleWindow(), publishErr: errors.New("set-option: permission denied")}
 	installFakeBadgeTmux(t, fake)
 
-	report, err := reconcileSessionIdentityBadges(context.Background(), badgeReconcileOptions{Session: session})
+	report, err := reconcileSessionBadges(context.Background(), session)
 	if err != nil {
 		t.Fatalf("publication failures must not fail the pass: %v", err)
 	}
@@ -464,7 +465,7 @@ func TestReconcileSessionIdentityBadges_MissingPaneIsADiscrepancy(t *testing.T) 
 	fake := &fakeBadgeTmux{panes: panes, windows: singleWindow()}
 	installFakeBadgeTmux(t, fake)
 
-	report, err := reconcileSessionIdentityBadges(context.Background(), badgeReconcileOptions{Session: session})
+	report, err := reconcileSessionBadges(context.Background(), session)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -494,7 +495,7 @@ func TestReconcileSessionIdentityBadges_StalePaneNotShownAsCurrent(t *testing.T)
 	fake := &fakeBadgeTmux{panes: panes, windows: singleWindow()}
 	installFakeBadgeTmux(t, fake)
 
-	if _, err := reconcileSessionIdentityBadges(context.Background(), badgeReconcileOptions{Session: session}); err != nil {
+	if _, err := reconcileSessionBadges(context.Background(), session); err != nil {
 		t.Fatal(err)
 	}
 	badge, ok := fake.badgeFor("%1")
@@ -504,7 +505,7 @@ func TestReconcileSessionIdentityBadges_StalePaneNotShownAsCurrent(t *testing.T)
 }
 
 // TestSpawnIdentityCoordinator_PublishesStartingBadgeBeforeLaunch: on the
-// spawn path the badge is written as part of prepareAgent (which runs before
+// spawn path the badge is written as part of PrepareAgent (which runs before
 // send-keys) with lifecycle=starting; the batch path publishes nothing per
 // pane and reconciles once at the end with the observed lifecycle.
 func TestSpawnIdentityCoordinator_PublishesStartingBadgeBeforeLaunch(t *testing.T) {
@@ -524,14 +525,13 @@ func TestSpawnIdentityCoordinator_PublishesStartingBadgeBeforeLaunch(t *testing.
 	fake := &fakeBadgeTmux{panes: panes, windows: singleWindow()}
 	installFakeBadgeTmux(t, fake)
 
-	coordinator := newSpawnIdentityCoordinator(projectKey, session)
-	coordinator.preLaunch = true
-	coordinator.prepareAgent(context.Background(), spawnedAgentInfo{
-		paneIndex: 1, paneID: "%7", paneTitle: session + "__cc_1", agentType: "cc", model: "opus",
+	coordinator := newSpawnIdentityCoordinator(projectKey, session, true)
+	coordinator.PrepareAgent(context.Background(), spawnidentity.Agent{
+		PaneIndex: 1, PaneID: "%7", PaneTitle: session + "__cc_1", AgentType: "cc", Model: "opus",
 	})
 	badge, ok := fake.badgeFor("%7")
 	if !ok {
-		t.Fatal("prepareAgent published no badge before launch")
+		t.Fatal("PrepareAgent published no badge before launch")
 	}
 	if badge.Name != "BraveFalcon" || badge.Lifecycle != "starting" || badge.Label != "[BraveFalcon] (starting)" {
 		t.Fatalf("pre-launch badge = %+v", badge)
@@ -543,7 +543,7 @@ func TestSpawnIdentityCoordinator_PublishesStartingBadgeBeforeLaunch(t *testing.
 	// After launch the pane runs the agent: the full pass drops "starting".
 	fake.panes[1].Command = "claude"
 	fake.published = nil
-	if report := coordinator.reconcileBadges(context.Background()); report == nil || report.Published != 1 {
+	if report := coordinator.ReconcileBadges(context.Background()); report == nil || report.Published != 1 {
 		t.Fatalf("post-launch reconcile = %+v", report)
 	}
 	badge, _ = fake.badgeFor("%7")
@@ -551,14 +551,14 @@ func TestSpawnIdentityCoordinator_PublishesStartingBadgeBeforeLaunch(t *testing.
 		t.Fatalf("post-launch badge = %+v", badge)
 	}
 
-	// Batch path: no per-pane publication inside prepareAgent.
-	batch := newSpawnIdentityCoordinator(projectKey, session)
+	// Batch path: no per-pane publication inside PrepareAgent.
+	batch := newSpawnIdentityCoordinator(projectKey, session, false)
 	fake.published = nil
-	batch.prepareAgent(context.Background(), spawnedAgentInfo{
-		paneIndex: 1, paneID: "%7", paneTitle: session + "__cc_1", agentType: "cc", model: "opus",
+	batch.PrepareAgent(context.Background(), spawnidentity.Agent{
+		PaneIndex: 1, PaneID: "%7", PaneTitle: session + "__cc_1", AgentType: "cc", Model: "opus",
 	})
 	if len(fake.published) != 0 {
-		t.Fatalf("batch prepareAgent published %+v; the batch path reconciles once at the end", fake.published)
+		t.Fatalf("batch PrepareAgent published %+v; the batch path reconciles once at the end", fake.published)
 	}
 }
 
@@ -578,16 +578,15 @@ func TestSpawnIdentityCoordinator_BadgesOffPublishesNothing(t *testing.T) {
 	fake := &fakeBadgeTmux{panes: panes, windows: singleWindow()}
 	installFakeBadgeTmux(t, fake)
 
-	coordinator := newSpawnIdentityCoordinator(projectKey, session)
-	coordinator.preLaunch = true
-	coordinator.prepareAgent(context.Background(), spawnedAgentInfo{paneIndex: 1, paneID: "%7", paneTitle: session + "__cc_1", agentType: "cc", model: "opus"})
-	if report := coordinator.reconcileBadges(context.Background()); report != nil {
-		t.Fatalf("reconcileBadges ran with badges off: %+v", report)
+	coordinator := newSpawnIdentityCoordinator(projectKey, session, true)
+	coordinator.PrepareAgent(context.Background(), spawnidentity.Agent{PaneIndex: 1, PaneID: "%7", PaneTitle: session + "__cc_1", AgentType: "cc", Model: "opus"})
+	if report := coordinator.ReconcileBadges(context.Background()); report != nil {
+		t.Fatalf("ReconcileBadges ran with badges off: %+v", report)
 	}
 	if len(fake.published) != 0 || len(fake.enabled) != 0 || len(fake.cleared) != 0 || len(fake.disabled) != 0 {
 		t.Fatalf("tmux touched with badges off: %+v", fake)
 	}
-	if status := coordinator.finalStatus(); status == nil || status.AgentsRegistered != 1 {
+	if status := coordinator.Status(); status == nil || status.AgentsRegistered != 1 {
 		t.Fatalf("registration unaffected? %+v", status)
 	}
 }
@@ -638,7 +637,7 @@ func TestReconcileSessionIdentityBadges_NoRegistryPublishesNothing(t *testing.T)
 	fake := &fakeBadgeTmux{panes: panes, windows: singleWindow()}
 	installFakeBadgeTmux(t, fake)
 
-	report, err := reconcileSessionIdentityBadges(context.Background(), badgeReconcileOptions{Session: session})
+	report, err := reconcileSessionBadges(context.Background(), session)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -661,7 +660,7 @@ func TestReconcileSessionIdentityBadges_NoRegistryPublishesNothing(t *testing.T)
 		t.Fatal(err)
 	}
 	fake.owned = map[string]bool{"@1": true}
-	report, _ = reconcileSessionIdentityBadges(context.Background(), badgeReconcileOptions{Session: session})
+	report, _ = reconcileSessionBadges(context.Background(), session)
 	if report.Cleared != 1 || len(fake.cleared) != 1 || report.WindowsRestored != 1 {
 		t.Fatalf("stale badge not withdrawn: %+v (fake %+v)", report, fake)
 	}

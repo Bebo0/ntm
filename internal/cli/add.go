@@ -28,6 +28,7 @@ import (
 	"github.com/Dicklesworthstone/ntm/internal/ratelimit"
 	"github.com/Dicklesworthstone/ntm/internal/resilience"
 	"github.com/Dicklesworthstone/ntm/internal/robot"
+	"github.com/Dicklesworthstone/ntm/internal/spawnidentity"
 	"github.com/Dicklesworthstone/ntm/internal/swarm"
 	"github.com/Dicklesworthstone/ntm/internal/tmux"
 	"github.com/Dicklesworthstone/ntm/internal/webhook"
@@ -612,7 +613,7 @@ func executeAdd(ctx context.Context, opts AddOptions, emitResult bool) error {
 	// the launch loop, exactly like spawn does (#240). Without this, panes
 	// added to a live session never got an Agent Mail identity, so they could
 	// not send or receive mail and `ntm lock` had no identity to attribute.
-	var addedAgents []spawnedAgentInfo
+	var addedAgents []spawnidentity.Agent
 
 	// Get existing panes to determine next indices
 	panes, err := tmux.GetPanesContext(ctx, session)
@@ -1095,13 +1096,13 @@ func executeAdd(ctx context.Context, opts AddOptions, emitResult bool) error {
 		})
 
 		// Track for Agent Mail registration (#240)
-		addedAgents = append(addedAgents, spawnedAgentInfo{
-			paneIndex:     num,
-			paneID:        paneID,
-			paneTitle:     title,
-			agentType:     agentTypeStr,
-			model:         agent.Model,
-			resolvedModel: resolvedModel,
+		addedAgents = append(addedAgents, spawnidentity.Agent{
+			PaneIndex:     num,
+			PaneID:        paneID,
+			PaneTitle:     title,
+			AgentType:     agentTypeStr,
+			Model:         agent.Model,
+			ResolvedModel: resolvedModel,
 		})
 	}
 
@@ -1128,7 +1129,7 @@ func executeAdd(ctx context.Context, opts AddOptions, emitResult bool) error {
 	// helper self-guards on a disabled config or an unreachable server, and it
 	// merges into the session's existing registry rather than replacing it, so
 	// identities created by the original spawn are preserved.
-	var agentMailStatus *output.AgentMailSpawnStatus
+	var agentMailStatus *spawnidentity.AgentMailSpawnStatus
 	if len(addedAgents) > 0 {
 		// Session-level identity first, mirroring spawn (bd-vb7s3): idempotent
 		// (reuses a previously registered coordinator identity) and best-effort,

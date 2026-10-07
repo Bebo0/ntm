@@ -11865,6 +11865,40 @@
           }
         }
       },
+      "AgentMailSpawnStatus": {
+        "type": "object",
+        "properties": {
+          "agent_map": {
+            "type": "object",
+            "description": "Agent map",
+            "additionalProperties": {
+              "type": "string"
+            }
+          },
+          "agents_failed": {
+            "type": "integer",
+            "description": "Agents failed"
+          },
+          "agents_registered": {
+            "type": "integer",
+            "description": "Agents registered"
+          },
+          "available": {
+            "type": "boolean",
+            "description": "Available"
+          },
+          "project_registered": {
+            "type": "boolean",
+            "description": "Project registered"
+          }
+        },
+        "required": [
+          "available",
+          "project_registered",
+          "agents_registered",
+          "agents_failed"
+        ]
+      },
       "AgentMailSummary": {
         "type": "object",
         "properties": {
@@ -16837,6 +16871,10 @@
           "admission": {
             "description": "Admission",
             "$ref": "#/components/schemas/SpawnAdmission"
+          },
+          "agent_mail": {
+            "description": "Agent mail",
+            "$ref": "#/components/schemas/AgentMailSpawnStatus"
           },
           "agents": {
             "type": "array",

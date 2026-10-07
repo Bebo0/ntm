@@ -11,6 +11,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/Dicklesworthstone/ntm/internal/agentmail"
 	"github.com/Dicklesworthstone/ntm/internal/config"
 	"github.com/Dicklesworthstone/ntm/internal/resilience"
 	"github.com/Dicklesworthstone/ntm/internal/robot"
@@ -69,6 +70,10 @@ model = "http-project-model"
 func TestConfiguredSwarmJobUsesSelectedLaunchCommand(t *testing.T) {
 	t.Setenv("NTM_CONFIG", "")
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	// The selected config leaves Agent Mail registration on (the default),
+	// so the shared spawn engine provisions pane identities: keep it off any
+	// real Agent Mail server.
+	t.Setenv("AGENT_MAIL_URL", "http://127.0.0.1:1/mcp/")
 	selected := filepath.Join(t.TempDir(), "operator.toml")
 	if err := os.WriteFile(selected, []byte("[spawn_pacing]\nenabled = false\n[agents]\nclaude = 'operator-claude --model {{shellQuote .Model}}'\n"), 0o600); err != nil {
 		t.Fatal(err)
@@ -115,6 +120,103 @@ func TestConfiguredSwarmJobUsesSelectedLaunchCommand(t *testing.T) {
 		}
 	default:
 		t.Fatal("no agent was launched")
+	}
+}
+
+// TestRESTSpawnProvisionsAgentMailIdentity: the synchronous REST spawn
+// endpoint reaches the shared robot spawn engine, so each launched pane gets
+// its Agent Mail identity before the launch port runs and the response carries
+// the same agent_mail status object as `ntm spawn --json`. Real strict config
+// loading and the real router; only tmux ports and Agent Mail are stubbed.
+func TestRESTSpawnProvisionsAgentMailIdentity(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("NTM_CONFIG", "")
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	t.Setenv("XDG_STATE_HOME", filepath.Join(home, ".state"))
+	t.Setenv("XDG_DATA_HOME", filepath.Join(home, ".data"))
+
+	mail := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			ID     interface{} `json:"id"`
+			Params struct {
+				Name      string                 `json:"name"`
+				Arguments map[string]interface{} `json:"arguments"`
+			} `json:"params"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		var result interface{}
+		switch req.Params.Name {
+		case "ensure_project":
+			result = map[string]interface{}{"id": 3, "slug": "proj", "human_key": req.Params.Arguments["project_key"]}
+		case "create_agent_identity":
+			result = map[string]interface{}{"id": 9, "name": "AmberHeron", "program": req.Params.Arguments["program"], "model": req.Params.Arguments["model"]}
+		default:
+			t.Errorf("unexpected Agent Mail tool %q", req.Params.Name)
+		}
+		raw, _ := json.Marshal(result)
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{"jsonrpc": "2.0", "id": req.ID, "result": json.RawMessage(raw)})
+	}))
+	t.Cleanup(mail.Close)
+	t.Setenv("AGENT_MAIL_URL", mail.URL+"/")
+
+	selected := filepath.Join(t.TempDir(), "operator.toml")
+	if err := os.WriteFile(selected, []byte("[spawn_pacing]\nenabled = false\n[agent_mail]\nenabled = true\nauto_register = true\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	project := t.TempDir()
+	srv := NewHermeticServer("spawn-identity")
+	defer srv.Stop()
+	srv.projectDir = project
+	if err := srv.ConfigureSpawnPolicy(selected, true); err != nil {
+		t.Fatal(err)
+	}
+	identityAtLaunch := ""
+	configured := srv.spawnAgents
+	srv.spawnAgents = func(ctx context.Context, opts robot.SpawnOptions) (*robot.SpawnOutput, error) {
+		opts.LifecycleDeps = &robot.SpawnLifecycleDependencies{
+			IsTMUXInstalled: func() bool { return true },
+			GetAllPanes:     func(context.Context) (map[string][]tmux.Pane, error) { return map[string][]tmux.Pane{}, nil },
+			SessionExists:   func(context.Context, string) (bool, error) { return true, nil },
+			GetPanes: func(context.Context, string) ([]tmux.Pane, error) {
+				return []tmux.Pane{{ID: "%4", Index: 0, PID: 40}, {ID: "%5", Index: 1, PID: 50}}, nil
+			},
+			ApplyTiledLayout: func(context.Context, string) error { return nil },
+			LaunchAgent: func(_ context.Context, pane tmux.Pane, _ string, kind string, _ int, _ string, _ string) (robot.SpawnedAgent, error) {
+				identityAtLaunch, _ = agentmail.ResolveIdentity(project, pane.ID)
+				return robot.SpawnedAgent{Pane: "0.1", Type: kind}, nil
+			},
+			StartSessionMonitor: func(context.Context, resilience.SpawnMonitorRequest) (*resilience.SpawnMonitorResult, error) {
+				return &resilience.SpawnMonitorResult{}, nil
+			},
+		}
+		return configured(ctx, opts)
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/sessions/identity-workers/agents/spawn", strings.NewReader(`{"cc_count":1}`))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	srv.Router().ServeHTTP(rec, req)
+	var body struct {
+		Success   bool `json:"success"`
+		AgentMail *struct {
+			Available        bool              `json:"available"`
+			AgentsRegistered int               `json:"agents_registered"`
+			AgentMap         map[string]string `json:"agent_map"`
+		} `json:"agent_mail"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil || !body.Success {
+		t.Fatalf("REST spawn = %d %s (%v)", rec.Code, rec.Body.String(), err)
+	}
+	if identityAtLaunch != "AmberHeron" {
+		t.Fatalf("identity resolvable at launch = %q, want AmberHeron (published before the agent command)", identityAtLaunch)
+	}
+	if body.AgentMail == nil || !body.AgentMail.Available || body.AgentMail.AgentsRegistered != 1 || body.AgentMail.AgentMap["%5"] != "AmberHeron" {
+		t.Fatalf("REST spawn agent_mail = %+v, want AmberHeron registered for %%5: %s", body.AgentMail, rec.Body.String())
 	}
 }
 

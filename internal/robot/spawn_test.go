@@ -88,6 +88,9 @@ func testSpawnLifecycleDependencies(panes []tmux.Pane) *SpawnLifecycleDependenci
 func testSpawnConfig() *config.Config {
 	cfg := config.Default()
 	cfg.SpawnPacing.Enabled = false
+	// Lifecycle-contract tests stay off Agent Mail identity provisioning;
+	// spawn_agentmail_identity_test.go enables it explicitly.
+	cfg.AgentMail.Enabled = false
 	return cfg
 }
 

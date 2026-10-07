@@ -19,11 +19,11 @@ func TestRelaunchRegistrationInputs(t *testing.T) {
 	if len(got) != 2 {
 		t.Fatalf("inputs = %d, want 2", len(got))
 	}
-	if got[0].paneID != "%3" || got[0].paneIndex != 1 || got[0].paneTitle != "demo__cc_1" ||
-		got[0].agentType != "cc" || got[0].model != "sonnet" {
+	if got[0].PaneID != "%3" || got[0].PaneIndex != 1 || got[0].PaneTitle != "demo__cc_1" ||
+		got[0].AgentType != "cc" || got[0].Model != "sonnet" {
 		t.Fatalf("first input = %+v, want the Claude pane with variant carried as model", got[0])
 	}
-	if got[1].paneID != "%4" || got[1].agentType != "cod" || got[1].model != "" {
+	if got[1].PaneID != "%4" || got[1].AgentType != "cod" || got[1].Model != "" {
 		t.Fatalf("second input = %+v, want the Codex pane with empty model", got[1])
 	}
 }

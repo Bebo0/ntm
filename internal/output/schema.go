@@ -4,6 +4,7 @@ import (
 	"time"
 
 	"github.com/Dicklesworthstone/ntm/internal/robot"
+	"github.com/Dicklesworthstone/ntm/internal/spawnidentity"
 )
 
 // ErrorResponse is the standard JSON error format
@@ -129,15 +130,6 @@ type StaggerConfig struct {
 	IntervalMs int64  `json:"interval_ms,omitempty"`
 }
 
-// AgentMailSpawnStatus represents Agent Mail registration status for a spawn operation
-type AgentMailSpawnStatus struct {
-	Available         bool              `json:"available"`
-	ProjectRegistered bool              `json:"project_registered"`
-	AgentsRegistered  int               `json:"agents_registered"`
-	AgentsFailed      int               `json:"agents_failed"`
-	AgentMap          map[string]string `json:"agent_map,omitempty"` // stable %pane_id -> agent name
-}
-
 // RecoverySpawnStatus reports whether configured session recovery produced
 // prompt content and which optional sources degraded.
 type RecoverySpawnStatus struct {
@@ -153,14 +145,14 @@ type RecoverySpawnStatus struct {
 // SpawnResponse is the output format for spawn command (with agents)
 type SpawnResponse struct {
 	TimestampedResponse
-	Session          string                `json:"session"`
-	Created          bool                  `json:"created"`
-	WorkingDirectory string                `json:"working_directory,omitempty"`
-	Panes            []PaneResponse        `json:"panes"`
-	AgentCounts      AgentCountsResponse   `json:"agent_counts"`
-	Stagger          *StaggerConfig        `json:"stagger,omitempty"`
-	AgentMail        *AgentMailSpawnStatus `json:"agent_mail,omitempty"`
-	Recovery         *RecoverySpawnStatus  `json:"recovery,omitempty"`
+	Session          string                              `json:"session"`
+	Created          bool                                `json:"created"`
+	WorkingDirectory string                              `json:"working_directory,omitempty"`
+	Panes            []PaneResponse                      `json:"panes"`
+	AgentCounts      AgentCountsResponse                 `json:"agent_counts"`
+	Stagger          *StaggerConfig                      `json:"stagger,omitempty"`
+	AgentMail        *spawnidentity.AgentMailSpawnStatus `json:"agent_mail,omitempty"`
+	Recovery         *RecoverySpawnStatus                `json:"recovery,omitempty"`
 	// ProfileSet is the --profile-set name when the session was spawned from a
 	// persona set. Combined with each pane's `persona` field this gives an
 	// orchestrator a deterministic persona→pane mapping (ntm#149).
@@ -215,7 +207,7 @@ type AddResponse struct {
 	// AgentMail mirrors SpawnResponse.AgentMail: added panes are registered
 	// with Agent Mail too, so automation can read back the pane_id -> agent
 	// name mapping for panes that joined an existing session (#240).
-	AgentMail *AgentMailSpawnStatus `json:"agent_mail,omitempty"`
+	AgentMail *spawnidentity.AgentMailSpawnStatus `json:"agent_mail,omitempty"`
 	// SeatSkips mirrors SpawnResponse.SeatSkips: panes CAAM seat selection
 	// refused to launch, with the reason (ntm#319). Omitted entirely unless
 	// seat_selection is on and a pool could not be ranked.

@@ -288,7 +288,7 @@ See ntm#139, ntm#312.`,
 			// assignment with its canonical identity file, publish badges
 			// when enabled (or withdraw them when disabled), and report
 			// discrepancies. Failures here never fail the mapping.
-			report, reconcileErr := reconcileSessionIdentityBadges(cmd.Context(), badgeReconcileOptions{Session: sessionFlag})
+			report, reconcileErr := reconcileSessionBadges(cmd.Context(), sessionFlag)
 			if report != nil {
 				byPane := make(map[string]agentmail.PaneBadgeRecord, len(report.Records))
 				for _, rec := range report.Records {

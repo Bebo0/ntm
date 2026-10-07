@@ -11,6 +11,7 @@ import (
 
 	agentpkg "github.com/Dicklesworthstone/ntm/internal/agent"
 	"github.com/Dicklesworthstone/ntm/internal/output"
+	"github.com/Dicklesworthstone/ntm/internal/spawnidentity"
 	"github.com/Dicklesworthstone/ntm/internal/tmux"
 	"github.com/Dicklesworthstone/ntm/internal/tui/theme"
 )
@@ -545,8 +546,8 @@ func runAdopt(opts AdoptOptions) error {
 // registration input used by spawn and add. Adopt does not launch an agent, so
 // its model is intentionally unknown; the canonical pane ID and effective
 // title are sufficient to create and persist a resolvable Agent Mail identity.
-func adoptedAgentMailRegistrations(adopted []AdoptedPaneInfo, autoName bool) []spawnedAgentInfo {
-	registrations := make([]spawnedAgentInfo, 0, len(adopted))
+func adoptedAgentMailRegistrations(adopted []AdoptedPaneInfo, autoName bool) []spawnidentity.Agent {
+	registrations := make([]spawnidentity.Agent, 0, len(adopted))
 	for _, pane := range adopted {
 		if pane.AgentType == agentpkg.AgentTypeUser.String() {
 			continue
@@ -555,11 +556,11 @@ func adoptedAgentMailRegistrations(adopted []AdoptedPaneInfo, autoName bool) []s
 		if autoName {
 			title = pane.NewTitle
 		}
-		registrations = append(registrations, spawnedAgentInfo{
-			paneIndex: pane.PaneIndex,
-			paneID:    pane.PaneID,
-			paneTitle: title,
-			agentType: pane.AgentType,
+		registrations = append(registrations, spawnidentity.Agent{
+			PaneIndex: pane.PaneIndex,
+			PaneID:    pane.PaneID,
+			PaneTitle: title,
+			AgentType: pane.AgentType,
 		})
 	}
 	return registrations
