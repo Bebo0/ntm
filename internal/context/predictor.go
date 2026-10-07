@@ -48,8 +48,7 @@ type ContextPredictor struct {
 }
 
 // DefaultPredictorConfig returns the default configuration for ContextPredictor.
-// Test-only hook: retained because external test packages (tests/e2e) construct
-// predictors directly; production receives predictors via wiring.
+// These defaults also govern the coordinator's advisory exhaustion forecasts.
 func DefaultPredictorConfig() PredictorConfig {
 	return PredictorConfig{
 		Window:         5 * time.Minute,  // Velocity averaging window
@@ -64,7 +63,6 @@ func DefaultPredictorConfig() PredictorConfig {
 }
 
 // NewContextPredictor creates a new predictor with the given configuration.
-// Test-only hook: see DefaultPredictorConfig.
 func NewContextPredictor(cfg PredictorConfig) *ContextPredictor {
 	if cfg.MaxSamples <= 0 {
 		cfg.MaxSamples = 64
@@ -107,6 +105,12 @@ func (p *ContextPredictor) AddSampleAt(tokens int64, timestamp time.Time) {
 // PredictExhaustion calculates the predicted time to context exhaustion.
 // Returns nil if insufficient data is available for prediction.
 func (p *ContextPredictor) PredictExhaustion(modelLimit int64) *Prediction {
+	return p.PredictExhaustionAt(modelLimit, time.Now())
+}
+
+// PredictExhaustionAt evaluates the same prediction at an explicit observation
+// time. Future samples cannot contribute to a historical or live forecast.
+func (p *ContextPredictor) PredictExhaustionAt(modelLimit int64, now time.Time) *Prediction {
 	if modelLimit <= 0 {
 		return nil
 	}
@@ -119,8 +123,15 @@ func (p *ContextPredictor) PredictExhaustion(modelLimit int64) *Prediction {
 	}
 
 	// Get samples within the window
-	windowStart := time.Now().Add(-p.config.Window)
+	windowStart := now.Add(-p.config.Window)
 	samples := p.getSamplesInWindow(windowStart)
+	current := samples[:0]
+	for _, sample := range samples {
+		if !sample.Timestamp.After(now) {
+			current = append(current, sample)
+		}
+	}
+	samples = current
 
 	if len(samples) < p.config.MinSamples {
 		return nil

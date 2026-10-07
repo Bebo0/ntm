@@ -71,6 +71,7 @@ type rotationChecker struct {
 
 	rotator    *ntmctx.Rotator
 	ctxMonitor *ntmctx.ContextMonitor
+	forecaster *ntmctx.ExhaustionForecaster
 
 	// Seams (default to real implementations).
 	getPanes        func(session string) ([]tmux.Pane, error)
@@ -84,6 +85,7 @@ type rotationChecker struct {
 	enqueue         func(agentID, paneID string, usagePct float64) *ntmctx.PendingRotation
 	confirm         func(ctx context.Context, agentID string) ntmctx.RotationResult
 	publish         func(record robot.ActuationRecord)
+	publishForecast func(event robot.AttentionEvent)
 	now             func() time.Time
 }
 
@@ -146,6 +148,9 @@ func newRotationChecker(session, workDir string, coordCfg CoordinatorConfig, ntm
 		publish: func(record robot.ActuationRecord) {
 			robot.GetAttentionFeed().PublishActuation(record)
 		},
+		publishForecast: func(event robot.AttentionEvent) {
+			robot.GetAttentionFeed().Append(event)
+		},
 		now: time.Now,
 	}
 	rc.enqueue = func(agentID, paneID string, usagePct float64) *ntmctx.PendingRotation {
@@ -159,8 +164,8 @@ func newRotationChecker(session, workDir string, coordCfg CoordinatorConfig, ntm
 
 // runOnce executes one rotation check pass and returns the decisions made.
 // Panes without an unambiguous transcript-sourced usage reading are ignored
-// entirely (the fixed minimum-confidence gate), as are panes at or below the
-// threshold.
+// entirely (the fixed minimum-confidence gate). Below-threshold panes may
+// publish advisory forecasts, but forecasts never trigger rotation.
 func (rc *rotationChecker) runOnce(ctx context.Context) []rotationDecision {
 	if rc == nil || rc.threshold <= 0 {
 		return nil
@@ -171,12 +176,17 @@ func (rc *rotationChecker) runOnce(ctx context.Context) []rotationDecision {
 
 	panes, err := rc.getPanes(rc.session)
 	if err != nil {
+		rc.reportContextForecasts(nil, nil)
 		slog.Warn("context rotation check could not list panes",
 			"session", rc.session, "error", err)
 		return nil
 	}
 
 	usages := rc.resolvePaneTranscripts(panes)
+	if ctx != nil && ctx.Err() != nil {
+		return nil
+	}
+	rc.reportContextForecasts(panes, usages)
 	if len(usages) == 0 {
 		return nil
 	}
