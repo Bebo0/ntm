@@ -157,9 +157,11 @@ How a run works:
    role. Parallel coordination (and `parallel_within_stage`) engages every
    pane of the acting role.
 5. The run ends when the flow reaches a stage with no outgoing transitions,
-   after `--max-transitions` stage changes, or at `--timeout`. `--json`
-   emits a machine-readable result (stages visited, transitions, role→pane
-   mapping).
+   after `--max-transitions` stage changes, at `--timeout`, or when the
+   template's error handling pauses or aborts it (see
+   [Agent Crashes, Errors, and Timeouts](#agent-crashes-errors-and-timeouts)).
+   `--json` emits a machine-readable result (stages visited, transitions,
+   role→pane mapping, agent faults and restarts).
 
 Useful flags: `--fire-manual` fires `manual` triggers automatically,
 `--interval` sets the trigger poll cadence, `--trigger-timeout` bounds
@@ -209,6 +211,54 @@ Note: `ntm spawn -t <template>` uses only the template's agent COUNTS to
 size a new session — it does not run the coordination. Spawn the session
 first, then `ntm workflow run <template>` inside it.
 
+### Agent Crashes, Errors, and Timeouts
+
+A template's `[workflows.error_handling]` table tells `ntm workflow run` what
+to do when an agent fails or a stage stalls:
+
+```toml
+[workflows.error_handling]
+on_agent_crash = "restart_agent"
+on_agent_error = "pause"
+stage_timeout_minutes = 60
+on_timeout = "notify"
+max_retries_per_stage = 2
+```
+
+While a flow runs, every poll checks all of the workflow's agent panes, not
+only the panes the current stage prompted:
+
+- **Agent crash** (`on_agent_crash`): the pane left the session, its process
+  died (`pane_dead`), or its shell has no live child process, meaning the
+  agent CLI exited back to the shell. These are process facts, so a crash is
+  raised on the first poll that sees it. On a remote (SSH) tmux server, pane
+  PIDs cannot be inspected, so only a missing or dead pane counts.
+- **Agent error** (`on_agent_error`): the classification `ntm health` reports:
+  the agent is rate limited, has an authentication error, is waiting on an
+  interactive gate such as a trust or login dialog, or the status detector
+  reports an error state. These come from pane text, so the state must last
+  for `[resilience] crash_threshold` consecutive polls (default 3).
+
+A fault is raised once per episode. The same fault is raised again only after
+the pane recovers or is restarted. Each raised fault is recorded in the
+checkpoint's `errors` list and in the `faults` list of the `--json` result
+(pane, role, stage, type, reason, action).
+
+| Action | Effect |
+|--------|--------|
+| `restart_agent` | Restarts the faulted pane with the same engine as `ntm respawn`: respawns the pane, replays its saved launch command, and waits until the agent is ready. The run then binds to the replacement process. If the pane had already received the current stage's prompt, the prompt is sent again, and any verdict the previous process gave in this stage is discarded. Each pane may restart at most `[resilience] max_restarts` times per run (default 3); the next fault aborts the run, so a crash loop cannot restart forever. If a restart does not end with a ready agent, the run stops with reason `restart-failed`. Not valid for `on_timeout`, because a timeout names no agent. |
+| `pause` | Saves a paused checkpoint and stops with reason `paused`. Continue with `--resume` once the agent is healthy. |
+| `abort` | Stops with reason `aborted`. |
+| `notify` | Reports the fault and keeps running. An unset `on_agent_crash` or `on_agent_error` behaves the same way. |
+| `skip_stage` | Leaves the current stage through its first usable outgoing transition. |
+| `retry` | Sends the current stage prompt to its panes again, up to `max_retries_per_stage` times, then aborts. It does not restart a crashed agent. |
+
+`stage_timeout_minutes` starts a timer for each stage. If the stage is still
+current when the timer expires, `on_timeout` runs; it accepts any action
+except `restart_agent`. A `parallel` template without a flow sends its
+prompts once and completes, so its agents are checked once, just before that
+dispatch, and that single check acts only on confirmed crashes.
+
 ### Best Practices
 
 - Start with a built-in template and change one coordination concern at a time.
@@ -235,6 +285,10 @@ first, then `ntm workflow run <template>` inside it.
 - **Flow does not advance:** check that the trigger type has all required
   fields (for example `idle_minutes` for `all_agents_idle`) and that the
   trigger's role matches the stage role.
+- **Run aborted after agent restarts:** a pane used up its
+  `[resilience] max_restarts` restart budget. Check the `faults` list in the
+  `--json` result (or the checkpoint's `errors`) to find the agent that keeps
+  crashing before you start the workflow again.
 
 ## Root Structure
 

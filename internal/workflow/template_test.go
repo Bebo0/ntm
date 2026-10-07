@@ -726,6 +726,13 @@ func TestErrorConfig_Validate(t *testing.T) {
 			wantErr: true,
 		},
 		{
+			name: "restart_agent on timeout names no agent",
+			config: ErrorConfig{
+				OnTimeout: ErrorActionRestartAgent,
+			},
+			wantErr: true,
+		},
+		{
 			name: "negative timeout",
 			config: ErrorConfig{
 				StageTimeoutMinutes: -1,

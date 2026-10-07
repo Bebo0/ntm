@@ -8,6 +8,7 @@ Practical workflow examples demonstrating NTM pipeline patterns. For schema deta
 - [Implement-Review-Revise Workflow](#implement-review-revise-workflow)
 - [Durable Per-Pane Review Sequences](#durable-per-pane-review-sequences)
 - [Error Handling with Retry](#error-handling-with-retry)
+- [Restarting Crashed Agents in Orchestration Templates](#restarting-crashed-agents-in-orchestration-templates)
 - [Loop Workflows](#loop-workflows)
 - [Best Practices](#best-practices)
 - [Troubleshooting](#troubleshooting)
@@ -421,6 +422,61 @@ ntm pipeline run error-handling-demo.yaml \
   --var api_endpoint="https://api.example.com/data" \
   --dry-run
 ```
+
+---
+
+## Restarting Crashed Agents in Orchestration Templates
+
+TOML orchestration templates run with `ntm workflow run` and handle agent
+failures in `[workflows.error_handling]`, not with per-step `on_error`. This
+template restarts a builder whose agent CLI crashes and pauses when an agent
+is rate limited or blocked:
+
+```toml
+[[workflows]]
+name = "resilient-build"
+description = "Build with automatic recovery from agent crashes"
+coordination = "pipeline"
+
+[[workflows.agents]]
+profile = "implementer"
+role = "build"
+
+[[workflows.agents]]
+profile = "tester"
+role = "qa"
+
+[workflows.flow]
+stages = ["build", "qa"]
+
+[[workflows.flow.transitions]]
+from = "build"
+to = "qa"
+[workflows.flow.transitions.trigger]
+type = "command_success"
+command = "go build ./..."
+
+[workflows.error_handling]
+on_agent_crash = "restart_agent"  # relaunch, then re-send the stage prompt
+on_agent_error = "pause"          # rate limit, auth error, or blocking dialog
+stage_timeout_minutes = 45
+on_timeout = "notify"
+```
+
+### Usage
+
+```bash
+ntm workflow run ./resilient-build.toml --session myproj --json
+```
+
+If the build agent exits back to its shell, the run restarts that pane with
+the same engine as `ntm respawn` and sends the `build` prompt again. Each pane
+can restart up to `[resilience] max_restarts` times per run (default 3); the
+next crash aborts the run. The `--json` result lists every handled fault in
+`faults`, and `restarts` counts successful restarts. If the run pauses, resume
+it with `--resume` after the agent is healthy. See
+[Agent Crashes, Errors, and Timeouts](WORKFLOW_SCHEMA.md#agent-crashes-errors-and-timeouts)
+for the detection rules and every action.
 
 ---
 

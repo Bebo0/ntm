@@ -25,7 +25,12 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/Dicklesworthstone/ntm/internal/config"
 	dispatchsvc "github.com/Dicklesworthstone/ntm/internal/dispatch"
+	"github.com/Dicklesworthstone/ntm/internal/health"
+	"github.com/Dicklesworthstone/ntm/internal/process"
+	"github.com/Dicklesworthstone/ntm/internal/robot"
+	"github.com/Dicklesworthstone/ntm/internal/status"
 	"github.com/Dicklesworthstone/ntm/internal/tmux"
 	"github.com/Dicklesworthstone/ntm/internal/workflow"
 )
@@ -58,8 +63,39 @@ type WorkflowRunResult struct {
 	Transitions  int                `json:"transitions"`
 	Completed    bool               `json:"completed"`
 	Resumed      bool               `json:"resumed,omitempty"`
+	Faults       []WorkflowRunFault `json:"faults,omitempty"`
+	Restarts     int                `json:"restarts,omitempty"`
 	Reason       string             `json:"reason"`
 	Error        string             `json:"error,omitempty"`
+}
+
+// WorkflowRunFault reports one agent fault raised into the template's
+// error_handling policy.
+type WorkflowRunFault struct {
+	Pane   string `json:"pane"`
+	Role   string `json:"role"`
+	Stage  string `json:"stage"`
+	Type   string `json:"type"` // agent_crash | agent_error
+	Reason string `json:"reason"`
+	Action string `json:"action"` // the error action the policy applied
+}
+
+// workflowAgentFault is one agent pane's current fault.
+type workflowAgentFault struct {
+	Kind   workflow.ErrorType // ErrorAgentCrash or ErrorAgentError
+	Reason string
+	// Confirmed marks topology or process evidence (pane gone or dead, no
+	// live agent process); it is raised on first sight. Text-classified
+	// states must persist for AgentFaultPolls consecutive observations.
+	Confirmed bool
+}
+
+// workflowFaultEpisode tracks one pane's current fault so each fault is
+// raised once, not on every poll, until the pane recovers or is restarted.
+type workflowFaultEpisode struct {
+	kind   workflow.ErrorType
+	polls  int
+	raised bool
 }
 
 // workflowRunPorts isolates the runner's side effects so unit tests can drive
@@ -73,6 +109,13 @@ type workflowRunPorts struct {
 	// validate binds production observations to the same physical pane/PID
 	// throughout the run. Custom test transports own their pane identities.
 	validate func(context.Context) error
+	// faults classifies the run's agent panes (pane → bound shell PID) with
+	// ntm's shared health observation; panes absent from the result are
+	// healthy. Nil disables agent crash/error supervision.
+	faults func(ctx context.Context, expected map[string]int) (map[string]workflowAgentFault, error)
+	// restart relaunches one pane's agent through ntm's shared restart
+	// engine and returns the replacement shell PID the run must rebind to.
+	restart func(ctx context.Context, session, paneID string) (int, error)
 	// notify surfaces progress/warnings on the human path.
 	notify func(format string, args ...any)
 	now    func() time.Time
@@ -111,6 +154,13 @@ type workflowRunOptions struct {
 	StateDir       string // defaults to <ProjectRoot>/.ntm/workflows/state
 	Resume         bool
 	Restart        bool
+
+	// MaxAgentRestarts bounds restart_agent per pane per run ([resilience]
+	// max_restarts); the next fault past the budget aborts the run.
+	MaxAgentRestarts int
+	// AgentFaultPolls is how many consecutive polls a text-classified agent
+	// error must persist before it is raised ([resilience] crash_threshold).
+	AgentFaultPolls int
 }
 
 // workflowRunner drives one coordinator instance against a live session.
@@ -140,6 +190,11 @@ type workflowRunner struct {
 	stopErr    error
 	cancel     context.CancelFunc
 
+	// supervision holds each faulted pane's current episode; healthDown
+	// suppresses repeated "health unavailable" notices. Both guarded by mu.
+	supervision map[string]*workflowFaultEpisode
+	healthDown  bool
+
 	result WorkflowRunResult
 }
 
@@ -168,6 +223,20 @@ func newWorkflowRunner(template *workflow.WorkflowTemplate, agents []workflow.Co
 	if opts.MaxTransitions <= 0 {
 		opts.MaxTransitions = 8
 	}
+	if opts.MaxAgentRestarts < 0 {
+		opts.MaxAgentRestarts = 0
+	}
+	if opts.AgentFaultPolls <= 0 {
+		opts.AgentFaultPolls = 3 // [resilience] crash_threshold default
+	}
+	// The runner owns its pane binding: restart_agent rebinds a pane to its
+	// replacement process (under dispatchMu), and every identity check reads
+	// this map rather than the caller's.
+	pids := make(map[string]int, len(opts.PanePIDs))
+	for pane, pid := range opts.PanePIDs {
+		pids[pane] = pid
+	}
+	opts.PanePIDs = pids
 	r := &workflowRunner{
 		template: template,
 		agents:   append([]workflow.CoordinatorAgent(nil), agents...),
@@ -710,17 +779,24 @@ func (r *workflowRunner) refreshDeliveryBoundary(ctx context.Context, pane strin
 	if !found {
 		return fmt.Errorf("workflow pane %s is not awaiting this stage's delivery", pane)
 	}
-	r.state.Evidence.Panes[pane] = captured
-	for index, receipts := range r.state.Evidence.Matches {
+	restartPaneEvidence(r.state.Evidence, pane, captured)
+	return r.saveCheckpointLocked()
+}
+
+// restartPaneEvidence moves one pane's output boundary to a fresh capture and
+// discards the verdicts it gave this stage, leaving other panes' boundaries
+// and votes intact.
+func restartPaneEvidence(evidence *workflow.StageEvidence, pane string, captured workflow.StagePaneEvidence) {
+	evidence.Panes[pane] = captured
+	for index, receipts := range evidence.Matches {
 		kept := make([]string, 0, len(receipts))
 		for _, receipt := range receipts {
 			if receipt != pane {
 				kept = append(kept, receipt)
 			}
 		}
-		r.state.Evidence.Matches[index] = kept
+		evidence.Matches[index] = kept
 	}
-	return r.saveCheckpointLocked()
 }
 
 // workflowNewEvidence accepts append-only text or a retained complete-line
@@ -968,13 +1044,108 @@ func (r *workflowRunner) fireManualTriggers() {
 }
 
 // workflowRunActions adapts the template's error_handling policy to this
-// runner. Actions the runner cannot honestly perform (restart_agent,
-// skip-with-no-transition) degrade to a notification.
+// runner. skip_stage from a stage with no outgoing transition degrades to a
+// notification.
 type workflowRunActions struct{ r *workflowRunner }
 
-func (a workflowRunActions) RestartAgent(_ context.Context, agentID string) error {
-	a.r.ports.notify("workflow %s: restart_agent is not supported by `ntm workflow run`; pane %s left as-is (use `ntm restart`)", a.r.template.Name, agentID)
+// RestartAgent relaunches the faulted pane's agent through ntm's shared
+// restart engine (the one behind `ntm respawn`), rebinds the run to the
+// replacement pane process, and re-sends the current stage prompt when the
+// old process had already received it. The ErrorHandler bounds how often it
+// runs per agent. Only agent faults restart (a stage timeout names no agent),
+// so this always runs on the run goroutine. A failed restart stops the run:
+// the pane may already be replaced, and its old binding is no longer valid.
+func (a workflowRunActions) RestartAgent(ctx context.Context, pane string) error {
+	r := a.r
+	r.dispatchMu.Lock()
+	defer r.dispatchMu.Unlock()
+	failRestart := func(err error) error {
+		if ctx.Err() != nil {
+			return ctx.Err() // The run loop classifies cancellation/timeout.
+		}
+		r.stop("restart-failed", err)
+		return err
+	}
+	role := ""
+	for _, agent := range r.agents {
+		if agent.ID == pane {
+			role = agent.Role
+			break
+		}
+	}
+	if role == "" {
+		return failRestart(fmt.Errorf("restart_agent: pane %s is not a workflow participant", pane))
+	}
+	if r.ports.restart == nil {
+		return failRestart(fmt.Errorf("restart_agent: no agent restart transport for pane %s", pane))
+	}
+	r.ports.notify("workflow %s: restarting agent in pane %s (%s)", r.template.Name, pane, role)
+	pid, err := r.ports.restart(ctx, r.opts.Session, pane)
+	if err != nil {
+		return failRestart(fmt.Errorf("restart agent in pane %s (%s): %w", pane, role, err))
+	}
+	stage, redeliver, err := r.rebindRestartedPaneLocked(ctx, pane, pid)
+	if err != nil {
+		return failRestart(fmt.Errorf("rebind restarted pane %s (%s): %w", pane, role, err))
+	}
+	r.result.Restarts++
+	r.ports.notify("workflow %s: agent in pane %s (%s) restarted (pid %d)", r.template.Name, pane, role, pid)
+	if !redeliver {
+		return nil
+	}
+	r.ports.notify("workflow %s: re-sending stage %s prompt to restarted pane %s (%s)", r.template.Name, stageLabel(stage), pane, role)
+	if err := r.dispatchStageLocked(ctx, stage, nil); err != nil {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		r.stop("dispatch-failed", err)
+		return err
+	}
 	return nil
+}
+
+// rebindRestartedPaneLocked adopts a restarted pane's replacement process.
+// The run's identity binding (live validation, checkpoint, stage evidence)
+// moves to the new PID, the pane's output boundary restarts at its fresh
+// screen, and verdicts the old process gave this stage are discarded. It
+// reports the stage and whether the pane must receive that stage's prompt
+// again. The caller holds dispatchMu.
+func (r *workflowRunner) rebindRestartedPaneLocked(ctx context.Context, pane string, pid int) (string, bool, error) {
+	if pid <= 0 {
+		return "", false, errors.New("restart reported no replacement pane process")
+	}
+	r.opts.PanePIDs[pane] = pid
+	captured, err := r.captureWorkflowPane(ctx, pane)
+	if err != nil {
+		return "", false, err
+	}
+	// Never acquire the coordinator lock while holding r.mu.
+	coordinatorStage := r.coordinator.CurrentStage()
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	delete(r.supervision, pane)
+	if r.state == nil {
+		return "", false, nil
+	}
+	if r.state.PanePIDs == nil {
+		r.state.PanePIDs = make(map[string]int)
+	}
+	r.state.PanePIDs[pane] = pid
+	if r.state.Evidence != nil {
+		restartPaneEvidence(r.state.Evidence, pane, captured)
+	}
+	redeliver := false
+	// A policy skip that the run loop has not recorded yet owns the next
+	// dispatch; re-sending the old stage's prompt would be wrong.
+	if !r.state.Completed && r.state.CurrentStage == coordinatorStage {
+		for i := range r.state.Dispatches {
+			if r.state.Dispatches[i].Pane == pane && r.state.Dispatches[i].Status == "delivered" {
+				r.state.Dispatches[i].Status = "pending"
+				redeliver = true
+			}
+		}
+	}
+	return r.state.CurrentStage, redeliver, r.saveCheckpointLocked()
 }
 
 func (a workflowRunActions) Pause(_ context.Context, reason string) error {
@@ -1067,6 +1238,131 @@ func (a workflowRunActions) Notify(_ context.Context, werr *workflow.WorkflowErr
 	return nil
 }
 
+// agentFaultAction is the policy for an agent fault: the template's
+// on_agent_crash / on_agent_error, or notify when unset, so a fault is never
+// silently ignored.
+func (r *workflowRunner) agentFaultAction(kind workflow.ErrorType) workflow.ErrorAction {
+	var action workflow.ErrorAction
+	if eh := r.template.ErrorHandling; eh != nil {
+		switch kind {
+		case workflow.ErrorAgentCrash:
+			action = eh.OnAgentCrash
+		case workflow.ErrorAgentError:
+			action = eh.OnAgentError
+		}
+	}
+	if action == "" {
+		action = workflow.ErrorActionNotify
+	}
+	return action
+}
+
+// superviseAgents observes every workflow pane — not only the current
+// stage's — and raises crash/error faults into the template's error_handling
+// policy, so on_agent_crash and on_agent_error actions actually run. Each
+// fault is raised once per episode: the pane must recover or be restarted
+// before it is raised again. Raised faults are checkpointed. It returns an
+// error only when the policy itself failed; stop reasons recorded by actions
+// (paused, aborted, restart-failed, ...) are classified by the caller.
+func (r *workflowRunner) superviseAgents(ctx context.Context) error {
+	if r.ports.faults == nil || r.errorHandler == nil {
+		return nil
+	}
+	r.dispatchMu.Lock()
+	expected := make(map[string]int, len(r.agents))
+	for _, agent := range r.agents {
+		expected[agent.ID] = r.opts.PanePIDs[agent.ID]
+	}
+	r.dispatchMu.Unlock()
+	faults, err := r.ports.faults(ctx, expected)
+	if err != nil {
+		if ctx.Err() != nil {
+			return nil
+		}
+		r.mu.Lock()
+		first := !r.healthDown
+		r.healthDown = true
+		r.mu.Unlock()
+		if first {
+			r.ports.notify("workflow %s: agent health unavailable; crash/error detection resumes when it recovers: %v", r.template.Name, err)
+		}
+		return nil
+	}
+	stage := r.coordinator.CurrentStage()
+	now := r.ports.now()
+	var raised []*workflow.WorkflowError
+	r.mu.Lock()
+	r.healthDown = false
+	if r.supervision == nil {
+		r.supervision = make(map[string]*workflowFaultEpisode)
+	}
+	for _, agent := range r.agents {
+		fault, faulted := faults[agent.ID]
+		if !faulted {
+			delete(r.supervision, agent.ID) // Recovered: a later fault is a new episode.
+			continue
+		}
+		episode := r.supervision[agent.ID]
+		if episode == nil || episode.kind != fault.Kind {
+			episode = &workflowFaultEpisode{kind: fault.Kind}
+			r.supervision[agent.ID] = episode
+		}
+		episode.polls++
+		threshold := r.opts.AgentFaultPolls
+		if fault.Confirmed {
+			threshold = 1
+		}
+		if episode.raised || episode.polls < threshold {
+			continue
+		}
+		episode.raised = true
+		werr := &workflow.WorkflowError{
+			Type: fault.Kind, Stage: stage, AgentID: agent.ID, Timestamp: now,
+			Message: fmt.Sprintf("pane %s (%s): %s", agent.ID, agent.Role, fault.Reason),
+		}
+		raised = append(raised, werr)
+		r.result.Faults = append(r.result.Faults, WorkflowRunFault{
+			Pane: agent.ID, Role: agent.Role, Stage: stageLabel(stage), Type: string(fault.Kind),
+			Reason: fault.Reason, Action: string(r.agentFaultAction(fault.Kind)),
+		})
+		if r.state != nil {
+			r.state.Errors = append(r.state.Errors, *werr)
+		}
+	}
+	var saveErr error
+	if len(raised) > 0 && r.state != nil {
+		saveErr = r.saveCheckpointLocked()
+	}
+	r.mu.Unlock()
+	if saveErr != nil {
+		r.stop("checkpoint-failed", saveErr)
+		return nil
+	}
+	for _, werr := range raised {
+		if reason, _ := r.stopped(); reason != "" || ctx.Err() != nil {
+			return nil
+		}
+		r.ports.notify("workflow %s: %s at stage %s: %s (on_%s = %s)", r.template.Name, werr.Type, stageLabel(werr.Stage), werr.Message, werr.Type, r.agentFaultAction(werr.Type))
+		if err := r.errorHandler.Handle(ctx, werr); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// superviseOrStop runs agent supervision and reports the stop reason, if
+// any, that the run must end with.
+func (r *workflowRunner) superviseOrStop(ctx context.Context) (string, error) {
+	err := r.superviseAgents(ctx)
+	if reason, stopErr := r.stopped(); reason != "" {
+		return reason, stopErr
+	}
+	if err != nil && ctx.Err() == nil {
+		return "error-handler-failed", err
+	}
+	return "", nil
+}
+
 // stop records the terminal reason once and cancels the run loop.
 func (r *workflowRunner) stop(reason string, err error) {
 	r.mu.Lock()
@@ -1154,19 +1450,24 @@ func (r *workflowRunner) Run(ctx context.Context) (WorkflowRunResult, error) {
 	}
 	result.Resumed = r.opts.Resume
 
-	// Error handling per template policy.
-	if eh := r.template.ErrorHandling; eh != nil {
-		r.errorHandler = workflow.NewErrorHandler(workflow.ErrorHandlingConfig{
-			OnAgentCrash:       eh.OnAgentCrash,
-			OnAgentError:       eh.OnAgentError,
-			OnTriggerFailed:    workflow.ErrorActionAbort,
-			OnTimeout:          eh.OnTimeout,
-			MaxRetriesPerStage: eh.MaxRetriesPerStage,
-		}, workflowRunActions{r: r})
-		if eh.StageTimeoutMinutes > 0 {
-			r.timeoutMonitor = workflow.NewTimeoutMonitor(
-				time.Duration(eh.StageTimeoutMinutes)*time.Minute, r.errorHandler, r.coordinator.CurrentStage)
-		}
+	// Error handling per template policy. Agent faults always have a policy
+	// (unset actions notify); trigger failures use it only when the template
+	// declares error_handling.
+	eh := r.template.ErrorHandling
+	if eh == nil {
+		eh = &workflow.ErrorConfig{}
+	}
+	r.errorHandler = workflow.NewErrorHandler(workflow.ErrorHandlingConfig{
+		OnAgentCrash:        r.agentFaultAction(workflow.ErrorAgentCrash),
+		OnAgentError:        r.agentFaultAction(workflow.ErrorAgentError),
+		OnTriggerFailed:     workflow.ErrorActionAbort,
+		OnTimeout:           eh.OnTimeout,
+		MaxRetriesPerStage:  eh.MaxRetriesPerStage,
+		MaxRestartsPerAgent: r.opts.MaxAgentRestarts,
+	}, workflowRunActions{r: r})
+	if eh.StageTimeoutMinutes > 0 {
+		r.timeoutMonitor = workflow.NewTimeoutMonitor(
+			time.Duration(eh.StageTimeoutMinutes)*time.Minute, r.errorHandler, r.coordinator.CurrentStage)
 	}
 
 	tctx := &workflow.TriggerContext{
@@ -1242,8 +1543,13 @@ func (r *workflowRunner) Run(ctx context.Context) (WorkflowRunResult, error) {
 		}
 	}
 
-	// Parallel workflows without a flow dispatch everyone and are done.
+	// Parallel workflows without a flow dispatch everyone and are done. There
+	// is no poll loop to supervise, so agents are checked once, just before
+	// the dispatch (a single check acts on confirmed crashes only).
 	if parallel, ok := r.coordinator.(*workflow.ParallelCoordinator); ok && r.template.Flow == nil {
+		if reason, err := r.superviseOrStop(runCtx); reason != "" {
+			return fail(reason, err)
+		}
 		if err := r.dispatchStage(runCtx, stage, parallel.Agents()); err != nil {
 			return fail("dispatch-failed", err)
 		}
@@ -1302,6 +1608,15 @@ func (r *workflowRunner) Run(ctx context.Context) (WorkflowRunResult, error) {
 			r.fireManualTriggers()
 		}
 
+		// Crashed or errored agents run the template's on_agent_crash /
+		// on_agent_error policy before their output is trusted again.
+		if reason, err := r.superviseOrStop(runCtx); reason != "" {
+			return fail(reason, err)
+		}
+		if runCtx.Err() != nil {
+			continue
+		}
+
 		observed, err := r.observe(runCtx)
 		if err != nil {
 			if runCtx.Err() != nil {
@@ -1324,7 +1639,7 @@ func (r *workflowRunner) Run(ctx context.Context) (WorkflowRunResult, error) {
 			if runCtx.Err() != nil {
 				continue // Preserve the stop policy or cancellation/timeout reason.
 			}
-			if r.errorHandler != nil {
+			if r.template.ErrorHandling != nil {
 				if handleErr := r.errorHandler.Handle(runCtx, &workflow.WorkflowError{
 					Type: workflow.ErrorTriggerFailed, Stage: stage, Message: err.Error(), Timestamp: r.ports.now(),
 				}); handleErr != nil {
@@ -1567,6 +1882,130 @@ func validateWorkflowPaneLifetimes(ctx context.Context, session string, expected
 	return ctx.Err()
 }
 
+// workflowAgentFaults is the production fault port. It classifies the run's
+// panes with the observation behind `ntm health` and the [resilience]
+// monitor. A crash is confirmed evidence: the pane left the session, its
+// process died (pane_dead), or — on a local tmux server, where pane PIDs are
+// inspectable — its shell has no live child, i.e. the agent CLI exited back
+// to the shell. A pane whose PID no longer matches the run's binding is left
+// to the identity check, which stops the run.
+func workflowAgentFaults(ctx context.Context, session string, expected map[string]int) (map[string]workflowAgentFault, error) {
+	panes, err := tmux.GetPanesContext(ctx, session)
+	if err != nil {
+		return nil, err
+	}
+	live := make(map[string]tmux.Pane, len(panes))
+	for _, pane := range panes {
+		live[pane.ID] = pane
+	}
+	faults := make(map[string]workflowAgentFault)
+	for id := range expected {
+		pane, ok := live[id]
+		switch {
+		case !ok:
+			faults[id] = workflowAgentFault{Kind: workflow.ErrorAgentCrash, Reason: "pane no longer exists", Confirmed: true}
+		case pane.Dead:
+			faults[id] = workflowAgentFault{Kind: workflow.ErrorAgentCrash, Reason: "pane process exited (pane is dead)", Confirmed: true}
+		}
+	}
+	if len(faults) == len(expected) {
+		return faults, nil
+	}
+	report, err := health.CheckSession(ctx, session)
+	if err != nil {
+		return nil, err
+	}
+	local := tmux.DefaultClient.Remote == ""
+	for _, row := range report.Agents {
+		pid, ok := expected[row.PaneID]
+		if !ok || pid <= 0 || row.ShellPID != pid {
+			continue
+		}
+		if _, known := faults[row.PaneID]; known {
+			continue
+		}
+		if fault, faulted := classifyWorkflowAgentHealth(row, local, process.HasChildAlive); faulted {
+			faults[row.PaneID] = fault
+		}
+	}
+	return faults, nil
+}
+
+// classifyWorkflowAgentHealth maps one `ntm health` row onto the workflow's
+// fault kinds. Process liveness is authoritative and only inspectable for a
+// local tmux server (remote PIDs are identifiers). An agent error is the
+// health classification's error state: rate limited, an authentication
+// failure, a blocking interactive gate, or the status detector's error state.
+// Those are text classifications, so they require a fresh observation and
+// are debounced by the caller.
+func classifyWorkflowAgentHealth(row health.AgentHealth, local bool, hasChildAlive func(int) bool) (workflowAgentFault, bool) {
+	if local && row.ShellPID > 0 && !hasChildAlive(row.ShellPID) {
+		return workflowAgentFault{Kind: workflow.ErrorAgentCrash, Reason: "agent process exited; the pane is back at its shell", Confirmed: true}, true
+	}
+	if row.ObservationFreshness != status.FreshnessFresh {
+		return workflowAgentFault{}, false
+	}
+	if row.RateLimited {
+		return workflowAgentFault{Kind: workflow.ErrorAgentError, Reason: "agent is rate limited"}, true
+	}
+	for _, issue := range row.Issues {
+		switch issue.Type {
+		case "auth_error", "trust_prompt", "interactive_gate":
+			return workflowAgentFault{Kind: workflow.ErrorAgentError, Reason: issue.Message}, true
+		}
+	}
+	if row.ObservedState == status.StateError {
+		reason := "agent is in an error state"
+		if len(row.Issues) > 0 {
+			reason += ": " + row.Issues[0].Message
+		}
+		return workflowAgentFault{Kind: workflow.ErrorAgentError, Reason: reason}, true
+	}
+	return workflowAgentFault{}, false
+}
+
+// workflowRestartAgent is the production restart port: the shared restart
+// engine behind `ntm respawn` and --robot-restart-pane (respawn-pane -k,
+// saved launch-spec replay, agent ready gate), applied to one pane.
+func workflowRestartAgent(ctx context.Context, session, paneID string) (int, error) {
+	out, err := robot.GetRestartPaneContext(ctx, robot.RestartPaneOptions{
+		Session: session,
+		Panes:   []string{paneID},
+		Config:  cfg,
+	})
+	if err != nil {
+		return 0, err
+	}
+	return workflowRestartOutcome(out)
+}
+
+// workflowRestartOutcome accepts only a verified relaunch — exactly one pane
+// respawned onto a new shell PID with its agent CLI ready — and returns that
+// PID for the run to rebind to.
+func workflowRestartOutcome(out *robot.RestartPaneOutput) (int, error) {
+	if out == nil {
+		return 0, errors.New("restart engine returned no result")
+	}
+	if out.Success && len(out.Restarted) == 1 {
+		key := out.Restarted[0]
+		pids := out.PaneShellPIDs[key]
+		if out.AgentRelaunchStatus[key] == robot.RestartAgentRelaunchReady && pids.After > 0 && pids.After != pids.Before {
+			return pids.After, nil
+		}
+	}
+	reasons := make([]string, 0, len(out.Failed)+1)
+	for _, failure := range out.Failed {
+		reasons = append(reasons, failure.Pane+": "+failure.Reason)
+	}
+	if len(reasons) == 0 && out.Error != "" {
+		reasons = append(reasons, out.Error)
+	}
+	if len(reasons) == 0 {
+		reasons = append(reasons, "no pane was respawned with a ready agent")
+	}
+	return 0, errors.New(strings.Join(reasons, "; "))
+}
+
 func newWorkflowsRunCmd() *cobra.Command {
 	var (
 		sessionFlag    string
@@ -1612,6 +2051,15 @@ pane lifetimes. Confirmed prompts are not sent again; pending prompts resume
 their saved plan. An interrupted send with an unknown outcome is refused.
 Unfinished checkpoints require --resume, or --restart to deliberately repeat
 the entire workflow. --resume never silently means restart.
+
+Every poll checks all of the workflow's agent panes. A crash (the pane left
+the session or died, or the agent CLI exited back to its shell) runs the
+template's error_handling on_agent_crash action; an agent error (rate limited,
+authentication failure, a blocking dialog, or the status detector's error
+state, lasting [resilience] crash_threshold polls) runs on_agent_error. Unset
+actions only report the fault. restart_agent restarts the pane with the same
+engine as 'ntm respawn' and sends the current stage prompt again, at most
+[resilience] max_restarts times per pane per run; the next fault aborts.
 
 Examples:
   ntm workflow run red-green --var feature="parser rewrite"
@@ -1728,10 +2176,7 @@ func runWorkflowRun(ctx context.Context, ref string, flags workflowRunCLIFlags) 
 			}
 		}
 	}
-	validatePanes := func(ctx context.Context) error {
-		return validateWorkflowPaneLifetimes(ctx, session, panePIDs)
-	}
-	if err := validatePanes(ctx); err != nil {
+	if err := validateWorkflowPaneLifetimes(ctx, session, panePIDs); err != nil {
 		return failEarly(err)
 	}
 
@@ -1743,18 +2188,26 @@ func runWorkflowRun(ctx context.Context, ref string, flags workflowRunCLIFlags) 
 		projectRoot, _ = os.Getwd()
 	}
 
+	// restart_agent's budget and the agent-error debounce reuse the
+	// [resilience] auto-restart settings.
+	resilienceCfg := config.Default().Resilience
+	if cfg != nil {
+		resilienceCfg = cfg.Resilience
+	}
 	opts := workflowRunOptions{
-		Session:        session,
-		ProjectRoot:    projectRoot,
-		Vars:           vars,
-		PanePIDs:       panePIDs,
-		MaxTransitions: flags.MaxTransitions,
-		Interval:       flags.Interval,
-		FireManual:     flags.FireManual,
-		TriggerTimeout: flags.TriggerTimeout,
-		StateDir:       filepath.Join(projectRoot, ".ntm", "workflows", "state"),
-		Resume:         flags.Resume,
-		Restart:        flags.Restart,
+		Session:          session,
+		ProjectRoot:      projectRoot,
+		Vars:             vars,
+		PanePIDs:         panePIDs,
+		MaxAgentRestarts: resilienceCfg.MaxRestarts,
+		AgentFaultPolls:  resilienceCfg.CrashThreshold,
+		MaxTransitions:   flags.MaxTransitions,
+		Interval:         flags.Interval,
+		FireManual:       flags.FireManual,
+		TriggerTimeout:   flags.TriggerTimeout,
+		StateDir:         filepath.Join(projectRoot, ".ntm", "workflows", "state"),
+		Resume:           flags.Resume,
+		Restart:          flags.Restart,
 	}
 
 	notify := func(format string, args ...any) {
@@ -1763,6 +2216,11 @@ func runWorkflowRun(ctx context.Context, ref string, flags workflowRunCLIFlags) 
 		}
 	}
 	var runner *workflowRunner
+	// Identity checks read the runner's pane binding, which restart_agent
+	// moves to a replacement process. Every caller holds runner.dispatchMu.
+	validatePanes := func(ctx context.Context) error {
+		return validateWorkflowPaneLifetimes(ctx, session, runner.opts.PanePIDs)
+	}
 	beforeDispatch := func(ctx context.Context, request dispatchsvc.Request, deliveries []dispatchsvc.Delivery) error {
 		if request.Session != session || len(deliveries) != 1 {
 			return errors.New("workflow dispatch changed its session or single-pane target")
@@ -1779,7 +2237,7 @@ func runWorkflowRun(ctx context.Context, ref string, flags workflowRunCLIFlags) 
 		}
 		for _, delivery := range deliveries {
 			pane := delivery.Target.Pane
-			if pid, ok := panePIDs[pane.ID]; !ok || pid <= 0 || pane.PID != pid {
+			if pid, ok := runner.opts.PanePIDs[pane.ID]; !ok || pid <= 0 || pane.PID != pid {
 				return fmt.Errorf("prepared workflow delivery changed pane %s lifetime", pane.ID)
 			}
 			role := ""
@@ -1802,7 +2260,11 @@ func runWorkflowRun(ctx context.Context, ref string, flags workflowRunCLIFlags) 
 		dispatch: workflowGatedDispatch(template.Name, beforeDispatch),
 		capture:  tmux.CapturePaneOutputContext,
 		validate: validatePanes,
-		notify:   notify,
+		faults: func(ctx context.Context, expected map[string]int) (map[string]workflowAgentFault, error) {
+			return workflowAgentFaults(ctx, session, expected)
+		},
+		restart: workflowRestartAgent,
+		notify:  notify,
 	})
 	if err != nil {
 		return failEarly(err)

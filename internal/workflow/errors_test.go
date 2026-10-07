@@ -2,6 +2,7 @@ package workflow
 
 import (
 	"context"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -37,8 +38,8 @@ func (a *recordingActions) Notify(context.Context, *WorkflowError, string) error
 
 func TestErrorHandlerActionsAndRetries(t *testing.T) {
 	actions := &recordingActions{}
-	h := NewErrorHandler(ErrorHandlingConfig{OnAgentCrash: ErrorActionRestartAgent, OnAgentError: ErrorActionPause, OnTriggerFailed: ErrorActionSkipStage, OnTimeout: ErrorActionRetry, MaxRetriesPerStage: 1}, actions)
-	for _, err := range []*WorkflowError{{Type: ErrorAgentCrash}, {Type: ErrorAgentError}, {Type: ErrorTriggerFailed}, {Type: ErrorTimeout, Stage: "build"}, {Type: ErrorTimeout, Stage: "build"}} {
+	h := NewErrorHandler(ErrorHandlingConfig{OnAgentCrash: ErrorActionRestartAgent, OnAgentError: ErrorActionPause, OnTriggerFailed: ErrorActionSkipStage, OnTimeout: ErrorActionRetry, MaxRetriesPerStage: 1, MaxRestartsPerAgent: 1}, actions)
+	for _, err := range []*WorkflowError{{Type: ErrorAgentCrash, AgentID: "%1"}, {Type: ErrorAgentError, AgentID: "%1"}, {Type: ErrorTriggerFailed}, {Type: ErrorTimeout, Stage: "build"}, {Type: ErrorTimeout, Stage: "build"}} {
 		if got := h.Handle(context.Background(), err); got != nil {
 			t.Fatal(got)
 		}
@@ -54,6 +55,39 @@ func TestErrorHandlerActionsAndRetries(t *testing.T) {
 		}
 	}
 }
+
+// restart_agent is bounded per agent: a crash loop restarts each agent at
+// most MaxRestartsPerAgent times, then aborts. Budgets are independent per
+// agent, and an error without a faulted agent cannot restart anything.
+func TestErrorHandlerRestartBudgetIsPerAgent(t *testing.T) {
+	actions := &recordingActions{}
+	h := NewErrorHandler(ErrorHandlingConfig{OnAgentCrash: ErrorActionRestartAgent, OnAgentError: ErrorActionRestartAgent, MaxRestartsPerAgent: 2}, actions)
+	for _, err := range []*WorkflowError{
+		{Type: ErrorAgentCrash, AgentID: "%1"},
+		{Type: ErrorAgentError, AgentID: "%1"}, // same agent, different fault kind: shared budget
+		{Type: ErrorAgentCrash, AgentID: "%2"},
+		{Type: ErrorAgentCrash, AgentID: "%1"}, // third fault of %1: budget exhausted
+	} {
+		if got := h.Handle(context.Background(), err); got != nil {
+			t.Fatal(got)
+		}
+	}
+	want := []string{"restart", "restart", "restart", "abort"}
+	if calls := actions.snapshot(); strings.Join(calls, ",") != strings.Join(want, ",") {
+		t.Fatalf("calls=%v, want %v", calls, want)
+	}
+	if err := h.Handle(context.Background(), &WorkflowError{Type: ErrorAgentCrash}); err == nil || !strings.Contains(err.Error(), "names none") {
+		t.Fatalf("restart without a faulted agent = %v, want refusal", err)
+	}
+	none := NewErrorHandler(ErrorHandlingConfig{OnAgentCrash: ErrorActionRestartAgent}, actions)
+	if err := none.Handle(context.Background(), &WorkflowError{Type: ErrorAgentCrash, AgentID: "%3"}); err != nil {
+		t.Fatal(err)
+	}
+	if calls := actions.snapshot(); calls[len(calls)-1] != "abort" {
+		t.Fatalf("zero restart budget must abort, calls=%v", calls)
+	}
+}
+
 func TestTimeoutMonitorFiresOnlyForCurrentStage(t *testing.T) {
 	actions := &recordingActions{}
 	h := NewErrorHandler(ErrorHandlingConfig{OnTimeout: ErrorActionNotify}, actions)

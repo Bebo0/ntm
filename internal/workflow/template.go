@@ -338,6 +338,11 @@ func (e *ErrorConfig) Validate() error {
 			return fmt.Errorf("invalid error action: %q", action)
 		}
 	}
+	if e.OnTimeout == ErrorActionRestartAgent {
+		// A stage timeout names no faulted agent; restart_agent only applies
+		// to on_agent_crash and on_agent_error.
+		return fmt.Errorf("on_timeout cannot be %q: a stage timeout names no agent to restart", ErrorActionRestartAgent)
+	}
 	if e.StageTimeoutMinutes < 0 {
 		return fmt.Errorf("stage_timeout_minutes cannot be negative")
 	}
