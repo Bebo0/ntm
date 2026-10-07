@@ -131,7 +131,7 @@ func TestWireReservationAffinity_RankingFlip(t *testing.T) {
 
 	// Wired: cache populated from the stub Agent Mail server at scorer setup.
 	scorer := NewAgentScorerFromConfig(cfg)
-	scorer.wireReservationAffinity(cfg, "ntm-c3-wire-test-session")
+	scorer.wireReservationAffinity(cfg, "ntm-c3-wire-test-session", StrategyLeastLoaded)
 	if scorer.reservationCache == nil {
 		t.Fatal("wireReservationAffinity did not set the reservation cache")
 	}
@@ -147,30 +147,35 @@ func TestWireReservationAffinity_RankingFlip(t *testing.T) {
 }
 
 // TestWireReservationAffinity_GatedOff verifies the wiring is a no-op unless
-// BOTH [routing] affinity_enabled AND [agent_mail] enabled are true, and for
-// a nil config.
+// [agent_mail] enabled is true AND the signal is wanted — [routing]
+// affinity_enabled, or an explicit affinity strategy — and for a nil config.
 func TestWireReservationAffinity_GatedOff(t *testing.T) {
 	t.Setenv("AGENT_MAIL_URL", "")
 	t.Setenv("AGENT_MAIL_TOKEN", "")
 
 	cases := []struct {
-		name string
-		cfg  *config.Config
+		name     string
+		cfg      *config.Config
+		strategy StrategyName
 	}{
-		{"nil config", nil},
+		{"nil config", nil, StrategyAffinity},
 		{"affinity disabled", &config.Config{
 			Routing:   config.RoutingConfig{AffinityEnabled: false},
 			AgentMail: config.AgentMailConfig{Enabled: true, URL: "http://127.0.0.1:1"},
-		}},
+		}, StrategyLeastLoaded},
 		{"agent mail disabled", &config.Config{
 			Routing:   config.RoutingConfig{AffinityEnabled: true},
 			AgentMail: config.AgentMailConfig{Enabled: false, URL: "http://127.0.0.1:1"},
-		}},
+		}, StrategyLeastLoaded},
+		{"affinity strategy without agent mail", &config.Config{
+			Routing:   config.RoutingConfig{AffinityEnabled: false},
+			AgentMail: config.AgentMailConfig{Enabled: false, URL: "http://127.0.0.1:1"},
+		}, StrategyAffinity},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			scorer := NewAgentScorerFromConfig(tc.cfg)
-			scorer.wireReservationAffinity(tc.cfg, "ntm-c3-gate-test")
+			scorer.wireReservationAffinity(tc.cfg, "ntm-c3-gate-test", tc.strategy)
 			if scorer.reservationCache != nil {
 				t.Fatal("reservation cache should not be constructed when gated off")
 			}
@@ -178,6 +183,50 @@ func TestWireReservationAffinity_GatedOff(t *testing.T) {
 				t.Fatal("scorer AgentMail.Enabled should stay false when gated off")
 			}
 		})
+	}
+}
+
+// TestWireReservationAffinity_AffinityStrategyOptsIn proves that explicitly
+// routing with the affinity strategy is itself the opt-in for the signal:
+// with [routing] affinity_enabled=false (the default) the reservation cache
+// is still wired, so the holder's AffinityMatch is measured for the strategy
+// to rank by — while the score BONUS stays off, because affinity_enabled
+// governs mixing the bonus into every strategy's score.
+func TestWireReservationAffinity_AffinityStrategyOptsIn(t *testing.T) {
+	t.Setenv("AGENT_MAIL_URL", "")
+	t.Setenv("AGENT_MAIL_TOKEN", "")
+	resetSharedReservationCaches(t)
+
+	expires := time.Now().Add(1 * time.Hour).UTC().Format(time.RFC3339)
+	created := time.Now().Add(-1 * time.Hour).UTC().Format(time.RFC3339)
+	server := newStubAgentMailReservationServer(t, fmt.Sprintf(
+		`[{"id":1,"agent":"GreenCastle","path_pattern":"internal/robot/*.go","exclusive":true,"reason":"affinity","created_ts":%q,"expires_ts":%q}]`,
+		created, expires))
+
+	cfg := affinityWireConfig(server.URL)
+	cfg.Routing.AffinityEnabled = false
+
+	// A non-affinity strategy with the bonus off must not wire anything.
+	unwired := NewAgentScorerFromConfig(cfg)
+	unwired.wireReservationAffinity(cfg, "ntm-affinity-optin-test", StrategyLeastLoaded)
+	if unwired.reservationCache != nil {
+		t.Fatal("least-loaded with affinity_enabled=false wired reservations; the bonus gate leaked")
+	}
+
+	scorer := NewAgentScorerFromConfig(cfg)
+	scorer.wireReservationAffinity(cfg, "ntm-affinity-optin-test", StrategyAffinity)
+	if scorer.reservationCache == nil {
+		t.Fatal("affinity strategy did not wire the reservation cache")
+	}
+	scorer.MapPaneToAgent("%1", "GreenCastle")
+
+	holder := ScoredAgent{PaneID: "%1", AgentType: "cc", PaneIndex: 1, State: StateWaiting}
+	breakdown := scorer.calculateScoreComponents(&holder, "Fix the scoring bug in internal/robot/routing.go")
+	if breakdown.AffinityMatch != 1 {
+		t.Fatalf("holder AffinityMatch = %v, want 1", breakdown.AffinityMatch)
+	}
+	if breakdown.AffinityBonus != 0 {
+		t.Fatalf("holder AffinityBonus = %v, want 0 with affinity_enabled=false", breakdown.AffinityBonus)
 	}
 }
 
@@ -192,7 +241,7 @@ func TestWireReservationAffinity_AgentMailAway(t *testing.T) {
 	// Reserved port with no listener: connection refused, fast.
 	cfg := affinityWireConfig("http://127.0.0.1:1/mcp/")
 	scorer := NewAgentScorerFromConfig(cfg)
-	scorer.wireReservationAffinity(cfg, "ntm-c3-degraded-test")
+	scorer.wireReservationAffinity(cfg, "ntm-c3-degraded-test", StrategyLeastLoaded)
 	if scorer.reservationCache == nil {
 		t.Fatal("cache should be constructed even when the server is away")
 	}

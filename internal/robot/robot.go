@@ -2051,7 +2051,7 @@ Common Modifiers:
 --poll=VALUE    Shared polling interval for wait/ack/send --track
 --strategy=NAME Strategy override for assign, route, and spawn --spawn-assign-work
 --exclude=X,Y   Exclude pane indices for commands that support it
---msg=TEXT      Shared message payload for send, ack echo detection, and interrupt retasks
+--msg=TEXT      Shared message payload for send, ack echo detection, interrupt retasks, and route affinity
 --panes=X,Y     Pane filter (comma-separated indices)
 --all           Include the user pane for commands that support it
 --force         Force commands that support it past their normal safety checks

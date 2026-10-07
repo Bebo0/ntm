@@ -6,7 +6,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Dicklesworthstone/ntm/internal/agentmail"
 	"github.com/Dicklesworthstone/ntm/internal/tmux"
+	"github.com/Dicklesworthstone/ntm/tests/testutil"
 )
 
 func TestParseExcludePanes(t *testing.T) {
@@ -280,12 +282,26 @@ func TestGenerateRouteHints(t *testing.T) {
 			t.Error("Should mention fallback was used")
 		}
 	})
+
+	t.Run("affinity fallback explains the missing holder", func(t *testing.T) {
+		opts := RouteOptions{Session: "test", Strategy: StrategyAffinity}
+		output := RouteOutput{
+			FallbackUsed: true,
+			Candidates:   []RouteCandidate{{PaneID: "cc_1"}},
+		}
+
+		hints := generateRouteHints(opts, output)
+		joined := strings.Join(hints.Suggestions, "\n")
+		if !strings.Contains(joined, "No available agent holds Agent Mail reservations") || !strings.Contains(joined, "least-loaded fallback") {
+			t.Errorf("affinity fallback suggestions = %q, want the no-holder explanation", hints.Suggestions)
+		}
+	})
 }
 
 func TestRouteStrategyNames(t *testing.T) {
 	names := strategyNames()
-	if len(names) != 7 {
-		t.Errorf("strategyNames() returned %d names, want 7", len(names))
+	if len(names) != 8 {
+		t.Errorf("strategyNames() returned %d names, want 8", len(names))
 	}
 
 	expected := map[string]bool{
@@ -296,6 +312,7 @@ func TestRouteStrategyNames(t *testing.T) {
 		"random":                true,
 		"sticky":                true,
 		"explicit":              true,
+		"affinity":              true,
 	}
 
 	for _, name := range names {
@@ -340,6 +357,36 @@ func TestGetRoute_InvalidStrategy(t *testing.T) {
 	}
 }
 
+// TestGetRoute_AffinityRequiresMessage: affinity ranks agents by the files
+// the routed message names, so an affinity route with no message could only
+// ever fall back to least-loaded. It must fail as INVALID_ARGS (before any
+// tmux lookup) rather than quietly answer a different question.
+func TestGetRoute_AffinityRequiresMessage(t *testing.T) {
+	for _, prompt := range []string{"", "   \n\t"} {
+		out, code := GetRoute(RouteOptions{
+			Session:  "fake-session",
+			Strategy: StrategyAffinity,
+			Prompt:   prompt,
+		})
+		if code == 0 || out.Success {
+			t.Fatalf("prompt %q: affinity route without a message succeeded (code %d)", prompt, code)
+		}
+		if out.ErrorCode != ErrCodeInvalidArgs {
+			t.Errorf("prompt %q: ErrorCode = %q, want %q", prompt, out.ErrorCode, ErrCodeInvalidArgs)
+		}
+		if !strings.Contains(out.Error, "needs the message being routed") || !strings.Contains(out.Hint, "--msg") {
+			t.Errorf("prompt %q: error/hint do not explain the missing message: %q / %q", prompt, out.Error, out.Hint)
+		}
+	}
+
+	// With a message the request is valid and proceeds to the session check.
+	session := fmt.Sprintf("ntm-missing-%d", time.Now().UnixNano())
+	out, _ := GetRoute(RouteOptions{Session: session, Strategy: StrategyAffinity, Prompt: "Fix internal/robot/routing.go"})
+	if out.ErrorCode != ErrCodeSessionNotFound {
+		t.Fatalf("affinity route with a message: ErrorCode = %q, want %q (validation must pass)", out.ErrorCode, ErrCodeSessionNotFound)
+	}
+}
+
 func TestGetRoute_SessionNotFound(t *testing.T) {
 	session := fmt.Sprintf("ntm-missing-%d", time.Now().UnixNano())
 	out, code := GetRoute(RouteOptions{
@@ -372,11 +419,123 @@ func TestGetRouteRecommendation_Errors(t *testing.T) {
 		t.Fatal("expected error for invalid strategy")
 	}
 
+	if _, err := GetRouteRecommendation(RouteOptions{
+		Session:  "fake-session",
+		Strategy: StrategyAffinity,
+	}); err == nil || !strings.Contains(err.Error(), "needs the message being routed") {
+		t.Fatalf("affinity recommendation without a prompt: err = %v, want the missing-message error", err)
+	}
+
 	session := fmt.Sprintf("ntm-missing-%d", time.Now().UnixNano())
 	if _, err := GetRouteRecommendation(RouteOptions{
 		Session:  session,
 		Strategy: StrategyLeastLoaded,
 	}); err == nil {
 		t.Fatal("expected error for missing session")
+	}
+}
+
+// TestGetRoute_AffinityRoutesToReservationHolder is the end-to-end proof for
+// the affinity strategy on the --robot-route surface: a real tmux session
+// with two claude panes, a stub Agent Mail server holding a live reservation
+// on internal/robot/*.go for GreenCastle, and the persisted session agent
+// registry mapping GreenCastle to the pane least-loaded passes over. With
+// [routing] affinity_enabled left off, affinity must still route a prompt
+// naming a reserved file to the holder as its primary selection, and a
+// prompt naming no reserved file must fall back to least-loaded, saying so.
+func TestGetRoute_AffinityRoutesToReservationHolder(t *testing.T) {
+	testutil.RequireTmuxThrottled(t)
+	hermeticGlobalConfig(t)
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	t.Setenv("AGENT_MAIL_URL", "")
+	t.Setenv("AGENT_MAIL_TOKEN", "")
+	resetSharedReservationCaches(t)
+
+	session := fmt.Sprintf("ntm-affinity-route-%d", time.Now().UnixNano())
+	if err := tmux.CreateSession(session, ""); err != nil {
+		t.Fatalf("create tmux session: %v", err)
+	}
+	t.Cleanup(func() { _ = tmux.KillSession(session) })
+	if _, err := tmux.DefaultClient.Run("split-window", "-d", "-t", session); err != nil {
+		t.Fatalf("split window: %v", err)
+	}
+	panes, err := tmux.GetPanes(session)
+	if err != nil {
+		t.Fatalf("get panes: %v", err)
+	}
+	if len(panes) != 2 {
+		t.Fatalf("setup produced %d panes, want 2: %+v", len(panes), panes)
+	}
+	for _, pane := range panes {
+		if _, err := tmux.DefaultClient.Run("respawn-pane", "-k", "-t", pane.ID, "cat"); err != nil {
+			t.Fatalf("respawn %s: %v", pane.ID, err)
+		}
+		if err := tmux.DefaultClient.SetPaneAgentType(pane.ID, tmux.AgentClaude); err != nil {
+			t.Fatalf("record agent type on %s: %v", pane.ID, err)
+		}
+	}
+
+	expires := time.Now().Add(1 * time.Hour).UTC().Format(time.RFC3339)
+	created := time.Now().Add(-1 * time.Hour).UTC().Format(time.RFC3339)
+	server := newStubAgentMailReservationServer(t, fmt.Sprintf(
+		`[{"id":1,"agent":"GreenCastle","path_pattern":"internal/robot/*.go","exclusive":true,"reason":"affinity","created_ts":%q,"expires_ts":%q}]`,
+		created, expires))
+	cfg := affinityWireConfig(server.URL)
+	cfg.Routing.AffinityEnabled = false // the affinity strategy is its own opt-in
+
+	baseline, code := GetRoute(RouteOptions{Session: session, Strategy: StrategyLeastLoaded, Config: cfg})
+	if code != 0 || baseline.Recommendation == nil || len(baseline.Candidates) != 2 {
+		t.Fatalf("least-loaded baseline = code %d recommendation %+v candidates %+v excluded %+v, want a pick over 2 candidates",
+			code, baseline.Recommendation, baseline.Candidates, baseline.Excluded)
+	}
+	holderID := ""
+	for _, candidate := range baseline.Candidates {
+		if candidate.PaneID != baseline.Recommendation.PaneID {
+			holderID = candidate.PaneID
+		}
+	}
+	if err := agentmail.SaveSessionAgentRegistry(&agentmail.SessionAgentRegistry{
+		SessionName: session,
+		ProjectKey:  t.TempDir(),
+		PaneIDMap:   map[string]string{holderID: "GreenCastle"},
+	}); err != nil {
+		t.Fatalf("save session agent registry: %v", err)
+	}
+
+	routed, code := GetRoute(RouteOptions{
+		Session:  session,
+		Strategy: StrategyAffinity,
+		Prompt:   "Fix the scoring bug in internal/robot/routing.go",
+		Config:   cfg,
+	})
+	if code != 0 || routed.Recommendation == nil {
+		t.Fatalf("affinity route = code %d %+v, want a recommendation", code, routed)
+	}
+	if routed.Recommendation.PaneID != holderID || routed.FallbackUsed {
+		t.Fatalf("affinity recommendation = %s (fallback_used %v), want reservation holder %s as the primary selection (least-loaded picked %s)",
+			routed.Recommendation.PaneID, routed.FallbackUsed, holderID, baseline.Recommendation.PaneID)
+	}
+	for _, candidate := range routed.Candidates {
+		want := 0.0
+		if candidate.PaneID == holderID {
+			want = 1
+		}
+		if candidate.AffinityMatch != want {
+			t.Errorf("candidate %s affinity_match = %v, want %v", candidate.PaneID, candidate.AffinityMatch, want)
+		}
+	}
+
+	unreserved, code := GetRoute(RouteOptions{
+		Session:  session,
+		Strategy: StrategyAffinity,
+		Prompt:   "Update docs/README.md",
+		Config:   cfg,
+	})
+	if code != 0 || unreserved.Recommendation == nil {
+		t.Fatalf("unreserved affinity route = code %d %+v, want a recommendation", code, unreserved)
+	}
+	if !unreserved.FallbackUsed || unreserved.Recommendation.PaneID != baseline.Recommendation.PaneID {
+		t.Fatalf("unreserved affinity route = %s (fallback_used %v), want the least-loaded fallback %s",
+			unreserved.Recommendation.PaneID, unreserved.FallbackUsed, baseline.Recommendation.PaneID)
 	}
 }

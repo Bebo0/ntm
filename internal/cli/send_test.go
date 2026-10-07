@@ -10,6 +10,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -1816,6 +1817,153 @@ func TestSendCommandRejectsIncompatiblePaneSelectors(t *testing.T) {
 				t.Fatalf("send error = %v, want substring %q", err, test.wantErr)
 			}
 		})
+	}
+}
+
+// TestSendCommandRejectsConflictingSmartRouteFlags: every combination where
+// smart routing would be silently ignored or contradicted — so the prompt
+// would go somewhere other than one routed agent — fails before touching
+// tmux, naming the flag the operator actually typed (--smart or --route).
+func TestSendCommandRejectsConflictingSmartRouteFlags(t *testing.T) {
+	tests := []struct {
+		name    string
+		args    []string
+		wantErr string
+	}{
+		{name: "route skip first", args: []string{"session", "prompt", "--route=least-loaded", "--skip-first"}, wantErr: "cannot combine --skip-first with --route"},
+		{name: "route all", args: []string{"session", "prompt", "--route=least-loaded", "--all"}, wantErr: "cannot combine --all with --route"},
+		{name: "smart all", args: []string{"session", "prompt", "--smart", "--all"}, wantErr: "cannot combine --all with --smart"},
+		{name: "route project", args: []string{"--project=myproject", "--route=sticky"}, wantErr: "cannot combine --project with --route"},
+		{name: "smart project", args: []string{"--project=myproject", "--smart"}, wantErr: "cannot combine --project with --smart"},
+		{name: "route batch", args: []string{"session", "--batch=batch.txt", "--route=round-robin"}, wantErr: "cannot combine --batch with --route"},
+		{name: "smart batch", args: []string{"session", "--batch=batch.txt", "--smart"}, wantErr: "cannot combine --batch with --smart"},
+		{name: "route distribute", args: []string{"session", "--distribute", "--route=least-loaded"}, wantErr: "cannot combine --distribute with --route"},
+		{name: "smart distribute", args: []string{"session", "--distribute", "--smart"}, wantErr: "cannot combine --distribute with --smart"},
+		{name: "unknown route strategy", args: []string{"session", "prompt", "--route=bogus"}, wantErr: "invalid routing strategy: bogus"},
+		{name: "unknown route lists affinity", args: []string{"session", "prompt", "--route=bogus"}, wantErr: "explicit, affinity)"},
+		{name: "empty route strategy", args: []string{"session", "prompt", "--route="}, wantErr: "--route requires a strategy"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			cmd := newSendCmd()
+			cmd.SilenceUsage = true
+			cmd.SilenceErrors = true
+			cmd.SetOut(io.Discard)
+			cmd.SetErr(io.Discard)
+			cmd.SetArgs(test.args)
+			err := cmd.Execute()
+			if err == nil || !strings.Contains(err.Error(), test.wantErr) {
+				t.Fatalf("send error = %v, want substring %q", err, test.wantErr)
+			}
+		})
+	}
+}
+
+// TestSendRouteFlagImpliesSmartRouting is the behavioral proof for the
+// --route-without---smart bug. docs/ORCHESTRATION_FEATURES.md promises that
+// `ntm send S --cc --route=least-loaded "..."` routes to ONE Claude agent,
+// but the strategy was only read under --smart (default false), so the
+// prompt went to every Claude pane. Driven through the real send command in
+// dry-run mode, so nothing is typed into the panes.
+func TestSendRouteFlagImpliesSmartRouting(t *testing.T) {
+	testutil.RequireTmuxThrottled(t)
+	isolateSessionAgentStorage(t)
+
+	tmpDir := t.TempDir()
+	oldCfg := cfg
+	oldJSONOutput := jsonOutput
+	t.Cleanup(func() {
+		cfg = oldCfg
+		jsonOutput = oldJSONOutput
+	})
+	cfg = newTmuxIntegrationTestConfig(tmpDir)
+	cfg.Checkpoints.Enabled = false
+	jsonOutput = true
+
+	sessionName := fmt.Sprintf("ntm-test-send-route-implies-smart-%d", time.Now().UnixNano())
+	if err := tmux.CreateSession(sessionName, tmpDir); err != nil {
+		t.Fatalf("CreateSession failed: %v", err)
+	}
+	t.Cleanup(func() { _ = tmux.KillSession(sessionName) })
+
+	var claudePaneIDs []string
+	for i := 1; i <= 2; i++ {
+		paneID, err := tmux.DefaultClient.Run("split-window", "-d", "-t", sessionName, "-c", tmpDir, "-P", "-F", "#{pane_id}", "cat")
+		if err != nil {
+			t.Fatalf("creating claude pane %d: %v", i, err)
+		}
+		paneID = strings.TrimSpace(paneID)
+		if err := tmux.SetPaneTitle(paneID, fmt.Sprintf("%s__cc_%d_test-model", sessionName, i)); err != nil {
+			t.Fatalf("titling claude pane %d: %v", i, err)
+		}
+		claudePaneIDs = append(claudePaneIDs, paneID)
+	}
+
+	send := func(extra ...string) SendDryRunResult {
+		t.Helper()
+		args := append([]string{sessionName, "--cc", "--dry-run", "--no-cass-check", "--no-hooks"}, extra...)
+		args = append(args, "route this prompt")
+
+		cmd := newSendCmd()
+		cmd.SilenceUsage = true
+		cmd.SilenceErrors = true
+		cmd.SetArgs(args)
+
+		oldStdout := os.Stdout
+		r, w, pipeErr := os.Pipe()
+		if pipeErr != nil {
+			t.Fatalf("creating stdout pipe: %v", pipeErr)
+		}
+		os.Stdout = w
+		sendErr := cmd.Execute()
+		_ = w.Close()
+		os.Stdout = oldStdout
+		output, readErr := io.ReadAll(r)
+		_ = r.Close()
+		if readErr != nil {
+			t.Fatalf("reading send output: %v", readErr)
+		}
+		if sendErr != nil {
+			t.Fatalf("send %v failed: %v (stdout=%q)", extra, sendErr, strings.TrimSpace(string(output)))
+		}
+		var result SendDryRunResult
+		if err := json.Unmarshal(output, &result); err != nil {
+			t.Fatalf("parsing send %v dry-run JSON: %v (stdout=%q)", extra, err, strings.TrimSpace(string(output)))
+		}
+		return result
+	}
+
+	// The fixture's blast radius: --cc alone addresses both Claude panes.
+	if broadcast := send(); broadcast.Total != 2 || broadcast.RoutedTo != nil {
+		t.Fatalf("--cc without routing = total %d routed_to %+v, want both Claude panes and no routing", broadcast.Total, broadcast.RoutedTo)
+	}
+
+	routed := send("--route=least-loaded")
+	if routed.Total != 1 || len(routed.WouldSend) != 1 {
+		t.Fatalf("--cc --route=least-loaded would send to %d panes (%+v), want exactly 1: --route must imply --smart", routed.Total, routed.WouldSend)
+	}
+	if routed.RoutedTo == nil || routed.RoutedTo.Strategy != string(robot.StrategyLeastLoaded) {
+		t.Fatalf("routed_to = %+v, want a least-loaded routing decision", routed.RoutedTo)
+	}
+	if target := routed.WouldSend[0].PaneID; target != routed.RoutedTo.PaneID || !slices.Contains(claudePaneIDs, target) {
+		t.Fatalf("routed send targets %s (routed_to %s), want one of the Claude panes %v", target, routed.RoutedTo.PaneID, claudePaneIDs)
+	}
+
+	// Agent Mail is off in this fixture, so no pane holds reservations:
+	// affinity is accepted, still routes to ONE pane, and says it fell back.
+	affinity := send("--route=affinity")
+	if affinity.Total != 1 || affinity.RoutedTo == nil || affinity.RoutedTo.Strategy != string(robot.StrategyAffinity) {
+		t.Fatalf("--route=affinity = total %d routed_to %+v, want one pane routed via affinity", affinity.Total, affinity.RoutedTo)
+	}
+	if !strings.Contains(affinity.RoutedTo.Reason, "fallback to least-loaded") {
+		t.Fatalf("affinity routing reason = %q, want the least-loaded fallback reported", affinity.RoutedTo.Reason)
+	}
+
+	// An explicit --pane still wins over --route, exactly as it does over --smart.
+	explicitID := claudePaneIDs[1]
+	explicit := send("--route=least-loaded", "--pane="+explicitID)
+	if explicit.Total != 1 || len(explicit.WouldSend) != 1 || explicit.WouldSend[0].PaneID != explicitID || explicit.RoutedTo != nil {
+		t.Fatalf("--route with --pane=%s = %+v (routed_to %+v), want only the explicit pane and no routing", explicitID, explicit.WouldSend, explicit.RoutedTo)
 	}
 }
 

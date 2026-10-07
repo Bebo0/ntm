@@ -2963,7 +2963,7 @@
           "type": "string",
           "required": false,
           "default": "least-loaded",
-          "description": "Strategy: least-loaded, first-available, round-robin, round-robin-available, random, sticky, explicit"
+          "description": "Strategy: least-loaded, first-available, round-robin, round-robin-available, random, sticky, explicit, affinity (prefers the holder of Agent Mail reservations on files the message names; falls back to least-loaded)"
         },
         {
           "name": "type",
@@ -2985,11 +2985,19 @@
           "type": "string",
           "required": false,
           "description": "Pane ID (%N) of the previously routed agent; anchors sticky and round-robin rotation across stateless invocations"
+        },
+        {
+          "name": "msg",
+          "flag": "--msg",
+          "type": "string",
+          "required": false,
+          "description": "Message being routed (or --msg-file); its file paths drive reservation affinity. Required with --strategy=affinity"
         }
       ],
       "examples": [
         "ntm --robot-route=proj --strategy=least-loaded --type=claude --exclude=0",
-        "ntm --robot-route=proj --strategy=round-robin --last-agent=%7"
+        "ntm --robot-route=proj --strategy=round-robin --last-agent=%7",
+        "ntm --robot-route=proj --strategy=affinity --msg='Fix internal/auth/session.go'"
       ],
       "transports": [
         {

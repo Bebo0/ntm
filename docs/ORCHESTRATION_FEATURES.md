@@ -470,7 +470,7 @@ $ ntm health myproject --verbose
 
 ## Feature 3: Smart Work Distribution
 
-**Status: Shipped** — `ntm send --smart/--route`, `--robot-route`, and `--robot-assign` are live. Shipped strategies go beyond this design: least-loaded, first-available, round-robin, round-robin-available, random, sticky, explicit.
+**Status: Shipped** — `ntm send --smart/--route`, `--robot-route`, and `--robot-assign` are live. Shipped strategies go beyond this design: least-loaded, first-available, round-robin, round-robin-available, random, sticky, explicit, affinity.
 
 ### Problem Statement
 
@@ -518,6 +518,15 @@ Rotate through agents regardless of state. Predictable distribution.
 **4. random**
 Random selection among available agents. Simple load distribution.
 
+**5. affinity**
+Pick the agent holding live Agent Mail file reservations on the files the
+prompt names (the highest fraction of named files covered; score breaks
+ties). Falls back to least-loaded — reported as `fallback_used` — when no
+available agent holds any. Needs `[agent_mail] enabled = true` and the
+session's agent registry (written when ntm registers panes with Agent Mail).
+Choosing this strategy is its own opt-in; `[routing] affinity_enabled`
+separately adds the same signal as a score bonus under every strategy.
+
 ### API Design
 
 **Get Routing Recommendation:**
@@ -555,9 +564,17 @@ ntm send myproject --cc "Fix the bug"
 # New way: send to best available Claude agent
 ntm send myproject --cc --smart "Fix the bug"
 
-# Or with explicit strategy
+# Or with explicit strategy (--route implies --smart)
 ntm send myproject --cc --route=least-loaded "Fix the bug"
+
+# Prefer the agent already holding the files the prompt names
+ntm send myproject --route=affinity "Fix internal/auth/session.go"
 ```
+
+An explicit `--pane`/`--panes` wins over routing. `--all`, `--skip-first`,
+`--project`, `--batch`, and `--distribute` are rejected alongside
+`--smart`/`--route`: each would otherwise silently ignore or contradict the
+single-agent routing decision.
 
 **Robot Mode Send with Routing:**
 
@@ -568,7 +585,14 @@ to the recommended pane:
 ```bash
 ntm --robot-route=myproject --type=claude --strategy=least-loaded
 ntm --robot-send=myproject --msg="Fix bug" --pane=%12
+
+# Affinity ranks by the files the message names, so pass the message
+ntm --robot-route=myproject --strategy=affinity --msg="Fix internal/auth/session.go"
 ```
+
+`--robot-send` rejects the route-only modifiers (`--strategy`, `--last-agent`,
+`--route-*`) with `INVALID_FLAG` instead of ignoring them and delivering to
+every matching pane.
 
 (Human CLI callers get the same composition in one step via
 `ntm send --smart`.)

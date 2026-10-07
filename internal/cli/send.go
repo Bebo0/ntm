@@ -716,9 +716,13 @@ func newSendCmd() *cobra.Command {
 		When set, JSON output includes "non_interactive_forced": true.
 
 		Smart Routing:
-		Use --smart to automatically select the best agent based on routing strategies.
-		Use --route to specify the strategy (default: least-loaded).
-		Strategies: least-loaded, first-available, round-robin, round-robin-available, random, sticky, explicit.
+		Use --smart to send to the single best agent instead of every matching pane.
+		Use --route=STRATEGY to choose the strategy; --route implies --smart (default strategy: least-loaded).
+		Strategies: least-loaded, first-available, round-robin, round-robin-available, random, sticky, explicit, affinity.
+		affinity prefers the agent holding Agent Mail reservations on files the prompt names (needs
+		[agent_mail] enabled=true) and falls back to least-loaded when no agent holds any.
+		An explicit --pane/--panes wins over routing; --all, --skip-first, --project, --batch, and
+		--distribute cannot be combined with --smart/--route.
 
 		Examples:
 		  ntm send myproject "fix the linting errors"           # All agents
@@ -742,7 +746,9 @@ func newSendCmd() *cobra.Command {
 		  ntm send myproject -t fix --var issue="null pointer" --file src/app.go  # Template with vars
 		  ntm send myproject --cc -t marching_orders --bead bd-123  # Per-pane orders for a bead
 		  ntm send myproject --smart "fix auth bug"             # Auto-select best agent
-		  ntm send myproject --smart --route=sticky "auth"      # Prefer same agent for related tasks`,
+		  ntm send myproject --cc --route=least-loaded "fix"    # One Claude agent (--route implies --smart)
+		  ntm send myproject --route=sticky "auth"              # Prefer same agent for related tasks
+		  ntm send myproject --route=affinity "fix src/auth.go" # Prefer the agent holding src/auth.go`,
 		Args: cobra.ArbitraryArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			failureSession := ""
@@ -769,8 +775,24 @@ func newSendCmd() *cobra.Command {
 			if skipFirst && (paneSelector != "" || panesSpecified) {
 				return earlyError(fmt.Errorf("cannot combine --skip-first with explicit --pane/--panes selectors"))
 			}
+			// An explicit --route is itself a request for smart routing. The
+			// strategy used to be read only under --smart (default false), so
+			// `--route=X` alone was silently ignored and the prompt went to
+			// every matching pane.
+			smartFlag := "--smart"
+			if cmd.Flags().Changed("route") {
+				smartFlag = "--route"
+				routeStrategy = strings.TrimSpace(routeStrategy)
+				if err := validateSendRouteStrategy(routeStrategy); err != nil {
+					return earlyError(err)
+				}
+				smartRoute = true
+			}
 			if skipFirst && smartRoute {
-				return earlyError(fmt.Errorf("cannot combine --skip-first with --smart"))
+				return earlyError(fmt.Errorf("cannot combine --skip-first with %s", smartFlag))
+			}
+			if targetAll && smartRoute {
+				return earlyError(fmt.Errorf("cannot combine --all with %s: --all broadcasts to every agent pane while smart routing selects one", smartFlag))
 			}
 			if err := validateSendTemplateFlags(cmd, templateName, &templateBead, projectFilter != "", codexGoal, distribute, batchFile != ""); err != nil {
 				return earlyError(err)
@@ -778,6 +800,9 @@ func newSendCmd() *cobra.Command {
 
 			// Handle --project mode: broadcast to all matching sessions (bd-3cu02.14)
 			if projectFilter != "" {
+				if smartRoute {
+					return earlyError(fmt.Errorf("cannot combine --project with %s: --project broadcasts to every matching session", smartFlag))
+				}
 				if len(args) > 0 && !strings.HasPrefix(args[0], "-") {
 					// Check if first arg looks like a session name (no spaces, no special chars)
 					// If it could be a session name, error out
@@ -825,6 +850,9 @@ func newSendCmd() *cobra.Command {
 				if skipFirst {
 					return earlyError(fmt.Errorf("cannot combine --distribute with --skip-first"))
 				}
+				if smartRoute {
+					return earlyError(fmt.Errorf("cannot combine --distribute with %s; choose the distribution strategy with --dist-strategy", smartFlag))
+				}
 				if dryRun && distributeAuto {
 					return earlyError(fmt.Errorf("cannot use --dry-run with --dist-auto"))
 				}
@@ -835,6 +863,9 @@ func newSendCmd() *cobra.Command {
 			if batchFile != "" {
 				if paneSelector != "" || panesSpecified {
 					return earlyError(fmt.Errorf("cannot combine --batch with --pane or --panes; use --agent for a specific batch target"))
+				}
+				if smartRoute {
+					return earlyError(fmt.Errorf("cannot combine --batch with %s; batch targets agents round-robin, or use --agent or --broadcast", smartFlag))
 				}
 				var delay time.Duration
 				if batchDelay != "" {
@@ -854,8 +885,6 @@ func newSendCmd() *cobra.Command {
 					ClearInput:          clearInput,
 					SkipFirst:           skipFirst,
 					Tags:                tags,
-					SmartRoute:          smartRoute,
-					RouteStrategy:       routeStrategy,
 					CassCheck:           cassCheck && !noCassCheck,
 					WithCASS:            withCASS,
 					NoCASS:              noCASS,
@@ -979,8 +1008,8 @@ func newSendCmd() *cobra.Command {
 	cmd.Flags().StringSliceVar(&tags, "tag", nil, "filter by tag (OR logic)")
 
 	// Smart routing flags
-	cmd.Flags().BoolVar(&smartRoute, "smart", false, "Use smart routing to select best agent")
-	cmd.Flags().StringVar(&routeStrategy, "route", "", "Routing strategy: least-loaded, first-available, round-robin, round-robin-available, random, sticky, explicit")
+	cmd.Flags().BoolVar(&smartRoute, "smart", false, "Send to the single best agent (smart routing) instead of every matching pane")
+	cmd.Flags().StringVar(&routeStrategy, "route", "", "Smart-routing strategy (implies --smart): least-loaded, first-available, round-robin, round-robin-available, random, sticky, explicit, affinity")
 
 	// Distribute mode flags - auto-distribute work from bv triage to agents
 	cmd.Flags().BoolVar(&distribute, "distribute", false, "Auto-distribute prioritized work from bv triage to idle agents")
@@ -1625,6 +1654,23 @@ func runSendWithTargets(opts SendOptions) error {
 	return runSendInternal(opts)
 }
 
+// validateSendRouteStrategy rejects an empty or unknown smart-routing
+// strategy, naming the valid ones.
+func validateSendRouteStrategy(name string) error {
+	names := robot.GetStrategyNames()
+	valid := make([]string, len(names))
+	for i, n := range names {
+		valid[i] = string(n)
+	}
+	if name == "" {
+		return fmt.Errorf("--route requires a strategy (valid: %s)", strings.Join(valid, ", "))
+	}
+	if !robot.IsValidStrategy(robot.StrategyName(name)) {
+		return fmt.Errorf("invalid routing strategy: %s (valid: %s)", name, strings.Join(valid, ", "))
+	}
+	return nil
+}
+
 func finishSendResult(opts SendOptions, result SendResult, cause error) error {
 	if result.Targets == nil {
 		result.Targets = []string{}
@@ -1941,9 +1987,12 @@ func runSendInternal(opts SendOptions) (err error) {
 		}
 	}()
 
-	// Smart routing: select best agent automatically.
+	// Smart routing: select best agent automatically. A routing strategy is
+	// itself a request for smart routing — reading it only under SmartRoute
+	// let a bare strategy broadcast to every matching pane.
+	smartRoute := opts.SmartRoute || strings.TrimSpace(opts.RouteStrategy) != ""
 	// Explicit pane selection (--pane/--panes) wins over automatic routing.
-	if opts.SmartRoute && (opts.PanesSpecified || paneSelector != "") {
+	if smartRoute && (opts.PanesSpecified || paneSelector != "") {
 		if !jsonOutput && !silent {
 			if opts.PanesSpecified {
 				fmt.Println("Note: --panes specified, skipping smart routing")
@@ -1951,21 +2000,15 @@ func runSendInternal(opts SendOptions) (err error) {
 				fmt.Println("Note: --pane specified, skipping smart routing")
 			}
 		}
-		opts.SmartRoute = false
+		smartRoute = false
 	}
-	if opts.SmartRoute {
+	if smartRoute {
 		strategy := robot.StrategyLeastLoaded
-		if opts.RouteStrategy != "" {
-			strategy = robot.StrategyName(opts.RouteStrategy)
-			if !robot.IsValidStrategy(strategy) {
-				validNames := robot.GetStrategyNames()
-				validStrs := make([]string, len(validNames))
-				for i, n := range validNames {
-					validStrs[i] = string(n)
-				}
-				return outputError(fmt.Errorf("invalid routing strategy: %s (valid: %s)",
-					opts.RouteStrategy, strings.Join(validStrs, ", ")))
+		if name := strings.TrimSpace(opts.RouteStrategy); name != "" {
+			if err := validateSendRouteStrategy(name); err != nil {
+				return outputError(err)
 			}
+			strategy = robot.StrategyName(name)
 		}
 
 		routeOpts := robot.RouteOptions{

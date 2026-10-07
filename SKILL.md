@@ -85,7 +85,7 @@ ntm send myproject --pane=2 "Own the auth migration."
 ntm send --project myproject "Sync to main and report conflicts."
 ntm send myproject -c internal/auth/service.go "Review this subsystem"
 ntm send myproject -t fix --var issue="nil pointer" --file internal/auth/service.go
-ntm send myproject --smart --route=affinity "Take the auth follow-up"
+ntm send myproject --route=affinity "Take the auth follow-up in internal/auth/service.go"
 ntm send myproject --distribute --dist-strategy=dependency
 
 ntm recipes list

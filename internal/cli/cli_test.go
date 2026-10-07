@@ -5935,6 +5935,8 @@ func TestRobotProcessErrorContract(t *testing.T) {
 		{name: "robot send malformed verify render", args: []string{"--robot-send=proj", "--msg=work", "--verify-render=not-a-bool"}, errorCode: robot.ErrCodeInvalidFlag, expectedExit: 1},
 		{name: "robot send missing msg", args: []string{"--robot-send=proj"}, errorCode: robot.ErrCodeInvalidArgs, expectedExit: 1},
 		{name: "robot send empty msg", args: []string{"--robot-send=proj", "--msg="}, errorCode: robot.ErrCodeInvalidArgs, expectedExit: 1},
+		{name: "robot send rejects route strategy modifier", args: []string{"--robot-send=proj", "--msg=work", "--strategy=least-loaded"}, errorCode: robot.ErrCodeInvalidFlag, expectedExit: 1, expectedCommand: "robot-send", expectedHint: "--robot-route=SESSION"},
+		{name: "robot send rejects last-agent modifier", args: []string{"--robot-send=proj", "--msg=work", "--last-agent=%1"}, errorCode: robot.ErrCodeInvalidFlag, expectedExit: 1, expectedCommand: "robot-send", expectedHint: "--robot-route=SESSION"},
 		{name: "missing session", args: []string{"--robot-agent-names=ntm-robot-contract-missing-session"}, errorCode: robot.ErrCodeSessionNotFound, expectedExit: 1},
 		{name: "unknown docs topic", args: []string{"--robot-docs=not-a-topic"}, errorCode: robot.ErrCodeInvalidFlag, expectedExit: 1},
 		{name: "unknown docs topic forces json from toon", args: []string{"--robot-docs=not-a-topic", "--robot-format=toon"}, errorCode: robot.ErrCodeInvalidFlag, expectedExit: 1},

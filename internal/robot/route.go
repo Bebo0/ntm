@@ -258,6 +258,10 @@ type RouteCandidate struct {
 	State        string  `json:"state"`
 	StateScore   float64 `json:"state_score"`
 	RecencyScore float64 `json:"recency_score"`
+	// AffinityMatch is the fraction (0-1) of files named in the routed
+	// message that this agent holds live Agent Mail reservations for;
+	// absent when the agent holds none (or reservations are not wired).
+	AffinityMatch float64 `json:"affinity_match,omitempty"`
 }
 
 // RouteExcluded represents an agent that was excluded from routing.
@@ -310,6 +314,14 @@ func GetRoute(opts RouteOptions) (*RouteOutput, int) {
 		)
 		return output, 1
 	}
+	if err := validateRoutePrompt(opts); err != nil {
+		output.RobotResponse = NewErrorResponse(
+			err,
+			ErrCodeInvalidArgs,
+			"Pass the message being routed: ntm --robot-route=SESSION --strategy=affinity --msg='...' (or --msg-file)",
+		)
+		return output, 1
+	}
 
 	// Check session exists
 	if !tmux.SessionExists(opts.Session) {
@@ -335,9 +347,10 @@ func GetRoute(opts RouteOptions) (*RouteOutput, int) {
 	contextUsage := getContextUsageByPane(opts.Session)
 
 	// Create scorer and score agents. Reservation affinity is wired
-	// best-effort from Agent Mail when enabled (bd-ws2-wire-or-delete-ykmcz.3).
+	// best-effort from Agent Mail when enabled or when the affinity strategy
+	// asks for it (bd-ws2-wire-or-delete-ykmcz.3).
 	scorer := NewAgentScorerFromConfig(opts.Config)
-	scorer.wireReservationAffinity(opts.Config, opts.Session)
+	scorer.wireReservationAffinity(opts.Config, opts.Session, opts.Strategy)
 	var agents []ScoredAgent
 
 	for _, pane := range panes {
@@ -402,14 +415,15 @@ func GetRoute(opts RouteOptions) (*RouteOutput, int) {
 			})
 		} else {
 			output.Candidates = append(output.Candidates, RouteCandidate{
-				PaneID:       agent.PaneID,
-				PaneIndex:    agent.PaneIndex,
-				AgentType:    agent.AgentType,
-				Score:        agent.Score,
-				ContextUsage: agent.ContextUsage,
-				State:        string(agent.State),
-				StateScore:   agent.ScoreDetail.StateScore,
-				RecencyScore: agent.ScoreDetail.RecencyScore,
+				PaneID:        agent.PaneID,
+				PaneIndex:     agent.PaneIndex,
+				AgentType:     agent.AgentType,
+				Score:         agent.Score,
+				ContextUsage:  agent.ContextUsage,
+				State:         string(agent.State),
+				StateScore:    agent.ScoreDetail.StateScore,
+				RecencyScore:  agent.ScoreDetail.RecencyScore,
+				AffinityMatch: agent.ScoreDetail.AffinityMatch,
 			})
 		}
 	}
@@ -498,10 +512,26 @@ func generateRouteHints(opts RouteOptions, output RouteOutput) *RouteAgentHints 
 	}
 
 	if output.FallbackUsed {
-		hints.Suggestions = append(hints.Suggestions, "Primary strategy failed - fallback was used")
+		if opts.Strategy == StrategyAffinity {
+			hints.Suggestions = append(hints.Suggestions, "No available agent holds Agent Mail reservations for files named in the message - least-loaded fallback was used (affinity needs [agent_mail] enabled=true and a session agent registry)")
+		} else {
+			hints.Suggestions = append(hints.Suggestions, "Primary strategy failed - fallback was used")
+		}
 	}
 
 	return hints
+}
+
+// validateRoutePrompt rejects an affinity route without the message being
+// routed. Affinity matches the files a message names against Agent Mail
+// reservations, so with no message it could only ever fall back to
+// least-loaded — a request that cannot mean what it says fails instead of
+// quietly answering a different question.
+func validateRoutePrompt(opts RouteOptions) error {
+	if opts.Strategy == StrategyAffinity && strings.TrimSpace(opts.Prompt) == "" {
+		return fmt.Errorf("strategy %q needs the message being routed: it matches the files the message names against Agent Mail reservations", StrategyAffinity)
+	}
+	return nil
 }
 
 // strategyNames returns list of valid strategy names as strings.
@@ -551,6 +581,9 @@ func GetRouteRecommendation(opts RouteOptions) (*RouteRecommendation, error) {
 	if !IsValidStrategy(opts.Strategy) {
 		return nil, fmt.Errorf("invalid strategy: %s", opts.Strategy)
 	}
+	if err := validateRoutePrompt(opts); err != nil {
+		return nil, err
+	}
 
 	// Check session exists
 	if !tmux.SessionExists(opts.Session) {
@@ -566,10 +599,11 @@ func GetRouteRecommendation(opts RouteOptions) (*RouteRecommendation, error) {
 	contextUsage := getContextUsageByPane(opts.Session)
 
 	// Create scorer and score agents. Reservation affinity is wired
-	// best-effort from Agent Mail when enabled (bd-ws2-wire-or-delete-ykmcz.3)
-	// — this is the send path, so the bonus influences real dispatch.
+	// best-effort from Agent Mail when enabled or when the affinity strategy
+	// asks for it (bd-ws2-wire-or-delete-ykmcz.3) — this is the send path, so
+	// the signal influences real dispatch.
 	scorer := NewAgentScorerFromConfig(opts.Config)
-	scorer.wireReservationAffinity(opts.Config, opts.Session)
+	scorer.wireReservationAffinity(opts.Config, opts.Session, opts.Strategy)
 	var agents []ScoredAgent
 
 	for _, pane := range panes {

@@ -1684,11 +1684,20 @@ Shell Integration:
 				failRobotCommand(err, robot.ErrCodeInvalidFlag, "Use comma-separated numeric pane indices", "robot-route")
 				return
 			}
+			// The message being routed (--msg/--msg-file) feeds reservation
+			// affinity: the affinity strategy ranks by it, and the affinity
+			// bonus scores with it under every strategy when enabled.
+			routedMsg, err := loadRobotSendMessage(robotSendMsg, robotSendMsgFile)
+			if err != nil {
+				failRobotCommand(err, robot.ErrCodeInvalidArgs, "Provide a readable --msg or --msg-file", "robot-route")
+				return
+			}
 			opts := robot.RouteOptions{
 				Session:      session,
 				Strategy:     robot.StrategyName(resolveRobotRouteStrategy(cmd)),
 				AgentType:    resolveRobotRouteType(cmd),
 				ExcludePanes: excludePanes,
+				Prompt:       routedMsg,
 				LastAgent:    strings.TrimSpace(robotRouteLastAgent),
 				Config:       loadSelectedConfigOrDefault(),
 			}
@@ -2027,6 +2036,15 @@ Shell Integration:
 		}
 
 		if robotSend != "" {
+			if flag := changedRobotRouteModifier(cmd); flag != "" {
+				failRobotCommand(
+					fmt.Errorf("%s is a --robot-route modifier; --robot-send does not route, so it would be ignored and the message sent to every matching pane", flag),
+					robot.ErrCodeInvalidFlag,
+					"Pick a pane with ntm --robot-route=SESSION --strategy=NAME --msg='...', then send to it with --robot-send=SESSION --pane=%N",
+					"robot-send",
+				)
+				return
+			}
 			singularPane := ""
 			if cmd.Flags().Changed("pane") {
 				singularPane = strings.TrimSpace(robotHistoryPane)
@@ -4570,8 +4588,8 @@ func init() {
 
 	// Robot-send flags for batch messaging
 	rootCmd.Flags().StringVar(&robotSend, "robot-send", "", "Send message to panes atomically. Required: SESSION, --msg or --msg-file. Example: ntm --robot-send=proj --msg='Fix auth'")
-	rootCmd.Flags().StringVar(&robotSendMsg, "msg", "", "Shared message payload. Required with --robot-send unless --msg-file is set. Optional with --robot-ack (echo detection) and --robot-interrupt (post-interrupt retask)")
-	rootCmd.Flags().StringVar(&robotSendMsgFile, "msg-file", "", "Read message content from file, or stdin with '-'. Keeps prompt text out of the scanned command line so command-safety filters cannot mistake message content for executable commands. Use with --robot-send")
+	rootCmd.Flags().StringVar(&robotSendMsg, "msg", "", "Shared message payload. Required with --robot-send unless --msg-file is set. Optional with --robot-ack (echo detection), --robot-interrupt (post-interrupt retask), and --robot-route (the message being routed; required with --strategy=affinity)")
+	rootCmd.Flags().StringVar(&robotSendMsgFile, "msg-file", "", "Read message content from file, or stdin with '-'. Keeps prompt text out of the scanned command line so command-safety filters cannot mistake message content for executable commands. Use with --robot-send or --robot-route")
 	rootCmd.Flags().BoolVar(&robotSendEnter, "enter", true, "Send Enter after pasting message (default: true). Use --enter=false to paste without submitting")
 	rootCmd.Flags().BoolVar(&robotSendEnter, "submit", true, "Alias for --enter")
 	// Field evidence across multiple machines shows agents reliably guess
@@ -4605,7 +4623,7 @@ func init() {
 	// Robot-assign flags for work distribution
 	rootCmd.Flags().StringVar(&robotAssign, "robot-assign", "", "Get work distribution recommendations. Required: SESSION. Example: ntm --robot-assign=proj --strategy=speed")
 	rootCmd.Flags().StringVar(&robotAssignBeads, "beads", "", "Specific bead IDs to assign (comma-separated). Optional with --robot-assign. Example: --beads=ntm-abc,ntm-xyz")
-	rootCmd.Flags().StringVar(&robotAssignStrategy, "strategy", "simple", "Strategy override for commands that support it. --robot-assign: simple (sequential pairing), balanced, speed, quality, dependency (graph-aware planner). --robot-route: least-loaded, first-available, round-robin, round-robin-available, random, sticky, explicit. --robot-spawn with --spawn-assign-work: top-n, diverse, dependency-aware, skill-matched.")
+	rootCmd.Flags().StringVar(&robotAssignStrategy, "strategy", "simple", "Strategy override for commands that support it. --robot-assign: simple (sequential pairing), balanced, speed, quality, dependency (graph-aware planner). --robot-route: least-loaded, first-available, round-robin, round-robin-available, random, sticky, explicit, affinity (needs --msg). --robot-spawn with --spawn-assign-work: top-n, diverse, dependency-aware, skill-matched.")
 
 	// Robot-bulk-assign flags for batch work distribution
 	rootCmd.Flags().StringVar(&robotBulkAssign, "robot-bulk-assign", "", "Bulk assign beads to all idle agents. Required: SESSION. Example: ntm --robot-bulk-assign=proj --from-bv")
@@ -4841,7 +4859,7 @@ func init() {
 
 	// Robot-route flags for routing recommendations
 	rootCmd.Flags().StringVar(&robotRoute, "robot-route", "", "Get routing recommendation. Required: SESSION. Example: ntm --robot-route=myproject --strategy=least-loaded")
-	rootCmd.Flags().StringVar(&robotRouteStrategy, "route-strategy", "least-loaded", "Routing strategy: least-loaded, first-available, round-robin, round-robin-available, random, sticky, explicit. Optional with --robot-route")
+	rootCmd.Flags().StringVar(&robotRouteStrategy, "route-strategy", "least-loaded", "Routing strategy: least-loaded, first-available, round-robin, round-robin-available, random, sticky, explicit, affinity (needs --msg). Optional with --robot-route")
 	rootCmd.Flags().StringVar(&robotRouteLastAgent, "last-agent", "", "Pane ID (%N) of the previously routed agent; anchors sticky and round-robin rotation across stateless CLI invocations. Optional with --robot-route")
 	rootCmd.Flags().StringVar(&robotRouteType, "route-type", "", "Deprecated alias for --type. Filter by agent type with --robot-route. Example: --type=claude")
 	rootCmd.Flags().StringVar(&robotRouteExclude, "route-exclude", "", "Exclude pane indices (comma-separated). Optional with --robot-route. Example: --route-exclude=0,3")
@@ -5509,6 +5527,22 @@ func resolveRobotRouteType(cmd *cobra.Command) string {
 
 func resolveRobotRouteStrategy(cmd *cobra.Command) string {
 	return resolveRobotSharedFlag(cmd, "route-strategy", robotRouteStrategy, "strategy", robotAssignStrategy)
+}
+
+// robotRouteOnlyModifiers are the --robot-route modifiers that --robot-send
+// never reads. Accepting them silently made `--robot-send --strategy=X` look
+// like a routed send while it actually delivered to every matching pane.
+var robotRouteOnlyModifiers = []string{"strategy", "route-strategy", "last-agent", "route-type", "route-exclude"}
+
+// changedRobotRouteModifier returns the first --robot-route-only modifier the
+// caller set (as "--name"), or "" when none was set.
+func changedRobotRouteModifier(cmd *cobra.Command) string {
+	for _, name := range robotRouteOnlyModifiers {
+		if cmd.Flags().Changed(name) {
+			return "--" + name
+		}
+	}
+	return ""
 }
 
 func resolveRobotBulkAssignStrategy(cmd *cobra.Command) string {

@@ -58,7 +58,8 @@ ntm send myproject --cc -t marching_orders --bead bd-123   # per-pane {{agent_nu
 
 # Smart routing and automated distribution
 ntm send myproject --smart "Take the next auth follow-up"
-ntm send myproject --smart --route=affinity "Continue the migration work"
+ntm send myproject --cc --route=least-loaded "Take the next auth follow-up"   # --route implies --smart
+ntm send myproject --route=affinity "Continue the migration in internal/db/migrate.go"   # agent holding that file
 ntm send myproject --distribute --dist-strategy=dependency
 ntm send myproject --distribute --dist-auto --dist-strategy=balanced
 

@@ -151,9 +151,14 @@ type ScoredAgent struct {
 
 // ScoreBreakdown shows how the score was calculated.
 type ScoreBreakdown struct {
-	ContextScore  float64 `json:"context_score"`  // 0-100
-	StateScore    float64 `json:"state_score"`    // -100 to 100, normalized to 0-100
-	RecencyScore  float64 `json:"recency_score"`  // 0-100
+	ContextScore float64 `json:"context_score"` // 0-100
+	StateScore   float64 `json:"state_score"`   // -100 to 100, normalized to 0-100
+	RecencyScore float64 `json:"recency_score"` // 0-100
+	// AffinityMatch is the fraction (0-1) of the files named in the prompt
+	// that this agent holds live Agent Mail reservations for. It is the
+	// signal the affinity strategy ranks by, and it is measured whenever
+	// reservation data is wired — independent of whether the bonus is on.
+	AffinityMatch float64 `json:"affinity_match"`
 	AffinityBonus float64 `json:"affinity_bonus"` // 0-20 (if enabled)
 
 	// Weighted contributions
@@ -512,22 +517,28 @@ func sharedReservationCache(client *agentmail.Client, projectKey string, ttl tim
 const reservationAffinityRefreshTimeout = 3 * time.Second
 
 // wireReservationAffinity populates the reservation cache at route/send time
-// so the affinity bonus is real instead of permanently 0
+// so the affinity signal is real instead of permanently 0
 // (bd-ws2-wire-or-delete-ykmcz.3, WIRE-MINIMAL).
 //
-// When [routing] affinity_enabled=true AND [agent_mail] enabled=true, it
-// resolves the project key SESSION-FIRST with the same precedence the CLI
-// uses (persisted session registry, then configured session dir, then cwd —
+// The signal is wanted when [routing] affinity_enabled=true (the bonus is
+// mixed into every strategy's score) or when the caller explicitly routes
+// with the affinity strategy (which ranks by the signal itself, so asking
+// for it is the opt-in). Either way it also needs [agent_mail] enabled=true:
+// reservations are the only source of affinity. When wanted, it resolves
+// the project key SESSION-FIRST with the same precedence the CLI uses
+// (persisted session registry, then configured session dir, then cwd —
 // bd-2rtl8), constructs an Agent Mail client from the same config/env
 // precedence the CLI uses (env AGENT_MAIL_URL/AGENT_MAIL_TOKEN override
 // config), attaches the process-shared TTL ReservationCache with one
 // best-effort TTL-bounded refresh, and loads the persisted pane→agent-name
 // mapping from the session agent registry. Everything is best-effort: any
-// failure leaves the scorer exactly as it was before wiring (bonus
-// contributes 0), and affinity stays a SCORING BONUS under existing
-// strategies — `--route=affinity` remains an invalid strategy.
-func (s *AgentScorer) wireReservationAffinity(cfg *config.Config, session string) {
-	if cfg == nil || !s.config.AffinityEnabled || !cfg.AgentMail.Enabled {
+// failure leaves the scorer exactly as it was before wiring (affinity
+// measures 0, so the affinity strategy falls back to least-loaded).
+func (s *AgentScorer) wireReservationAffinity(cfg *config.Config, session string, strategy StrategyName) {
+	if cfg == nil || !cfg.AgentMail.Enabled {
+		return
+	}
+	if !s.config.AffinityEnabled && strategy != StrategyAffinity {
 		return
 	}
 	projectKey := resolveAffinityProjectKey(cfg, session)
@@ -745,9 +756,14 @@ func (s *AgentScorer) calculateScoreComponents(agent *ScoredAgent, prompt string
 	// 3. Recency Score (0-100)
 	breakdown.RecencyScore = s.recencyToScore(agent.LastActivity)
 
-	// 4. Affinity Bonus (0-20)
-	if s.config.AffinityEnabled && prompt != "" {
-		breakdown.AffinityBonus = s.calculateAffinity(agent, prompt)
+	// 4. Affinity: the match is measured whenever reservations are wired
+	// (the affinity strategy ranks by it); the bonus (0-AffinityBonus) is
+	// added to the score only when affinity_enabled is on.
+	if prompt != "" {
+		breakdown.AffinityMatch = s.affinityMatch(agent, prompt)
+		if s.config.AffinityEnabled {
+			breakdown.AffinityBonus = s.config.AffinityBonus * breakdown.AffinityMatch
+		}
 	}
 
 	// Calculate weighted contributions
@@ -805,8 +821,11 @@ func (s *AgentScorer) recencyToScore(lastActivity time.Time) float64 {
 	return 70
 }
 
-// calculateAffinity calculates affinity bonus based on prompt matching.
-func (s *AgentScorer) calculateAffinity(agent *ScoredAgent, prompt string) float64 {
+// affinityMatch returns the fraction (0-1) of the file paths named in the
+// prompt that the pane's mapped Agent Mail identity holds live reservations
+// for. It is 0 when Agent Mail is not wired, the pane has no mapped
+// identity, or the prompt names no files.
+func (s *AgentScorer) affinityMatch(agent *ScoredAgent, prompt string) float64 {
 	// If Agent Mail integration is not enabled or no cache, return 0
 	if !s.config.AgentMail.Enabled || s.reservationCache == nil {
 		return 0
@@ -841,15 +860,7 @@ func (s *AgentScorer) calculateAffinity(agent *ScoredAgent, prompt string) float
 		}
 	}
 
-	if matches == 0 {
-		return 0
-	}
-
-	// Scale bonus based on match ratio (more matches = higher bonus, capped at config max).
-	matchRatio := float64(matches) / float64(len(filePaths))
-	bonus := s.config.AffinityBonus * matchRatio
-
-	return bonus
+	return float64(matches) / float64(len(filePaths))
 }
 
 // checkExclusion checks if an agent should be excluded from routing.
@@ -1012,6 +1023,11 @@ const (
 
 	// StrategyExplicit uses user-specified pane directly.
 	StrategyExplicit StrategyName = "explicit"
+
+	// StrategyAffinity prefers the agent holding Agent Mail file reservations
+	// for the files the prompt names; it falls back to least-loaded when no
+	// available agent holds any.
+	StrategyAffinity StrategyName = "affinity"
 )
 
 // RoutingContext provides context for routing decisions.
@@ -1341,6 +1357,43 @@ func (s *ExplicitStrategy) Select(agents []ScoredAgent, ctx RoutingContext) *Sco
 	return nil
 }
 
+// AffinityStrategy selects the available agent with the strongest
+// reservation affinity to the prompt: the highest fraction of prompt-named
+// files covered by its live Agent Mail reservations
+// (ScoreBreakdown.AffinityMatch), with the composite score breaking ties.
+//
+// It declines (returns nil) when no available agent has any affinity — Agent
+// Mail is off, no pane maps to a reservation holder, or the prompt names no
+// reserved file — so the router's least-loaded fallback takes the prompt and
+// the result honestly reports fallback_used instead of passing an arbitrary
+// pick off as an affinity match.
+type AffinityStrategy struct{}
+
+func (s *AffinityStrategy) Name() StrategyName {
+	return StrategyAffinity
+}
+
+func (s *AffinityStrategy) Select(agents []ScoredAgent, ctx RoutingContext) *ScoredAgent {
+	var best *ScoredAgent
+	for i := range agents {
+		candidate := &agents[i]
+		match := candidate.ScoreDetail.AffinityMatch
+		// !(match > 0) also rejects NaN, which compares false to everything.
+		if candidate.Excluded || !(match > 0) {
+			continue
+		}
+		if best == nil {
+			best = candidate
+			continue
+		}
+		bestMatch := best.ScoreDetail.AffinityMatch
+		if match > bestMatch || (match == bestMatch && candidate.Score > best.Score) {
+			best = candidate
+		}
+	}
+	return best
+}
+
 // =============================================================================
 // Router
 // =============================================================================
@@ -1367,6 +1420,7 @@ func NewRouter() *Router {
 	r.RegisterStrategy(&RandomStrategy{})
 	r.RegisterStrategy(NewStickyStrategy())
 	r.RegisterStrategy(&ExplicitStrategy{})
+	r.RegisterStrategy(&AffinityStrategy{})
 
 	// Default fallback order
 	r.fallbackOrder = []RoutingStrategy{
@@ -1492,6 +1546,7 @@ func GetStrategyNames() []StrategyName {
 		StrategyRandom,
 		StrategySticky,
 		StrategyExplicit,
+		StrategyAffinity,
 	}
 }
 
@@ -1499,7 +1554,8 @@ func GetStrategyNames() []StrategyName {
 func IsValidStrategy(name StrategyName) bool {
 	switch name {
 	case StrategyLeastLoaded, StrategyFirstAvailable, StrategyRoundRobin,
-		StrategyRoundRobinAvailable, StrategyRandom, StrategySticky, StrategyExplicit:
+		StrategyRoundRobinAvailable, StrategyRandom, StrategySticky, StrategyExplicit,
+		StrategyAffinity:
 		return true
 	default:
 		return false

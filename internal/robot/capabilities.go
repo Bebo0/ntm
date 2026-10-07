@@ -1220,14 +1220,16 @@ func buildCommandRegistry() []RobotCommandInfo {
 			Description: "Get routing recommendation for work distribution.",
 			Parameters: []RobotParameter{
 				{Name: "session", Flag: "--robot-route", Type: "string", Required: true, Description: "Session name"},
-				{Name: "strategy", Flag: "--strategy", Type: "string", Required: false, Default: "least-loaded", Description: "Strategy: least-loaded, first-available, round-robin, round-robin-available, random, sticky, explicit"},
+				{Name: "strategy", Flag: "--strategy", Type: "string", Required: false, Default: "least-loaded", Description: "Strategy: least-loaded, first-available, round-robin, round-robin-available, random, sticky, explicit, affinity (prefers the holder of Agent Mail reservations on files the message names; falls back to least-loaded)"},
 				{Name: "type", Flag: "--type", Type: "string", Required: false, Description: "Filter by agent type"},
 				{Name: "exclude", Flag: "--exclude", Type: "string", Required: false, Description: "Exclude pane indices"},
 				{Name: "last-agent", Flag: "--last-agent", Type: "string", Required: false, Description: "Pane ID (%N) of the previously routed agent; anchors sticky and round-robin rotation across stateless invocations"},
+				{Name: "msg", Flag: "--msg", Type: "string", Required: false, Description: "Message being routed (or --msg-file); its file paths drive reservation affinity. Required with --strategy=affinity"},
 			},
 			Examples: []string{
 				"ntm --robot-route=proj --strategy=least-loaded --type=claude --exclude=0",
 				"ntm --robot-route=proj --strategy=round-robin --last-agent=%7",
+				"ntm --robot-route=proj --strategy=affinity --msg='Fix internal/auth/session.go'",
 			},
 		},
 		{

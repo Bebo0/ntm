@@ -428,6 +428,9 @@ func TestStrategyNames(t *testing.T) {
 	if StrategyExplicit != "explicit" {
 		t.Errorf("StrategyExplicit = %q, want %q", StrategyExplicit, "explicit")
 	}
+	if StrategyAffinity != "affinity" {
+		t.Errorf("StrategyAffinity = %q, want %q", StrategyAffinity, "affinity")
+	}
 }
 
 func TestIsValidStrategy(t *testing.T) {
@@ -443,6 +446,7 @@ func TestIsValidStrategy(t *testing.T) {
 		{"random valid", StrategyRandom, true},
 		{"sticky valid", StrategySticky, true},
 		{"explicit valid", StrategyExplicit, true},
+		{"affinity valid", StrategyAffinity, true},
 		{"invalid name", "invalid-strategy", false},
 		{"empty name", "", false},
 	}
@@ -459,8 +463,8 @@ func TestIsValidStrategy(t *testing.T) {
 
 func TestGetStrategyNames(t *testing.T) {
 	names := GetStrategyNames()
-	if len(names) != 7 {
-		t.Errorf("GetStrategyNames() returned %d names, want 7", len(names))
+	if len(names) != 8 {
+		t.Errorf("GetStrategyNames() returned %d names, want 8", len(names))
 	}
 
 	// Check all expected names are present
@@ -472,6 +476,7 @@ func TestGetStrategyNames(t *testing.T) {
 		StrategyRandom:              true,
 		StrategySticky:              true,
 		StrategyExplicit:            true,
+		StrategyAffinity:            true,
 	}
 
 	for _, name := range names {
@@ -923,6 +928,95 @@ func TestExplicitStrategy(t *testing.T) {
 			t.Errorf("Select() = %s, want cc_2", selected.PaneID)
 		}
 	})
+}
+
+// affinityAgent builds a candidate with the given affinity match and score.
+func affinityAgent(paneID string, match, score float64, excluded bool) ScoredAgent {
+	return ScoredAgent{
+		PaneID:      paneID,
+		State:       StateWaiting,
+		Score:       score,
+		Excluded:    excluded,
+		ScoreDetail: ScoreBreakdown{AffinityMatch: match},
+	}
+}
+
+func TestAffinityStrategy(t *testing.T) {
+	strat := &AffinityStrategy{}
+	if strat.Name() != StrategyAffinity {
+		t.Errorf("Name() = %s, want %s", strat.Name(), StrategyAffinity)
+	}
+
+	t.Run("prefers the strongest affinity over a better score", func(t *testing.T) {
+		agents := []ScoredAgent{
+			affinityAgent("cc_1", 0, 95, false),
+			affinityAgent("cc_2", 0.5, 40, false),
+			affinityAgent("cc_3", 1, 10, false),
+		}
+		selected := strat.Select(agents, RoutingContext{})
+		if selected == nil || selected.PaneID != "cc_3" {
+			t.Fatalf("Select() = %v, want cc_3 (full affinity beats partial affinity and raw score)", selected)
+		}
+	})
+
+	t.Run("breaks affinity ties by score", func(t *testing.T) {
+		agents := []ScoredAgent{
+			affinityAgent("cc_1", 0.5, 30, false),
+			affinityAgent("cc_2", 0.5, 70, false),
+		}
+		selected := strat.Select(agents, RoutingContext{})
+		if selected == nil || selected.PaneID != "cc_2" {
+			t.Fatalf("Select() = %v, want cc_2 (equal affinity, higher score)", selected)
+		}
+	})
+
+	t.Run("never selects an excluded holder", func(t *testing.T) {
+		agents := []ScoredAgent{
+			affinityAgent("cc_1", 1, 0, true),
+			affinityAgent("cc_2", 0.5, 50, false),
+		}
+		selected := strat.Select(agents, RoutingContext{})
+		if selected == nil || selected.PaneID != "cc_2" {
+			t.Fatalf("Select() = %v, want cc_2 (cc_1 holds more but is excluded)", selected)
+		}
+	})
+
+	t.Run("declines when no agent has affinity", func(t *testing.T) {
+		agents := []ScoredAgent{
+			affinityAgent("cc_1", 0, 90, false),
+			affinityAgent("cc_2", math.NaN(), 80, false),
+			affinityAgent("cc_3", 1, 0, true),
+		}
+		if selected := strat.Select(agents, RoutingContext{}); selected != nil {
+			t.Fatalf("Select() = %s, want nil so the router's least-loaded fallback is reported", selected.PaneID)
+		}
+	})
+}
+
+// TestRouterRoute_AffinityFallsBackToLeastLoaded pins the affinity contract
+// at the router: a holder wins as the primary selection, and with no holder
+// the least-loaded fallback takes the prompt and the result says so.
+func TestRouterRoute_AffinityFallsBackToLeastLoaded(t *testing.T) {
+	router := NewRouter()
+
+	holder := router.Route([]ScoredAgent{
+		affinityAgent("cc_1", 0, 90, false),
+		affinityAgent("cc_2", 1, 20, false),
+	}, StrategyAffinity, RoutingContext{})
+	if holder.Selected == nil || holder.Selected.PaneID != "cc_2" || holder.FallbackUsed {
+		t.Fatalf("holder route = %+v, want cc_2 as the primary (non-fallback) selection", holder)
+	}
+
+	noHolder := router.Route([]ScoredAgent{
+		affinityAgent("cc_1", 0, 30, false),
+		affinityAgent("cc_2", 0, 90, false),
+	}, StrategyAffinity, RoutingContext{})
+	if noHolder.Selected == nil || noHolder.Selected.PaneID != "cc_2" {
+		t.Fatalf("no-holder route selected %v, want least-loaded cc_2", noHolder.Selected)
+	}
+	if !noHolder.FallbackUsed || noHolder.Reason != "fallback to least-loaded" {
+		t.Fatalf("no-holder route = fallback %v reason %q, want fallback to least-loaded", noHolder.FallbackUsed, noHolder.Reason)
+	}
 }
 
 func TestRouter(t *testing.T) {
@@ -1810,35 +1904,38 @@ func TestCheckReservationWarning_SelectedHoldsReservation(t *testing.T) {
 	}
 }
 
-func TestCalculateAffinity_WithReservations(t *testing.T) {
-	cfg := DefaultRoutingConfig()
+// newGreenCastleAffinityScorer returns a scorer whose reservation cache holds
+// one live reservation on internal/robot/*.go for GreenCastle, mapped to pane
+// %1 — the fixture the affinity match/bonus tests share.
+func newGreenCastleAffinityScorer(cfg RoutingConfig) *AgentScorer {
 	cfg.AgentMail.Enabled = true
-	cfg.AgentMail.ReservationBonus = 30.0
-	cfg.AffinityBonus = 12.0
 	scorer := NewAgentScorer(cfg)
-
-	// Set up cache with reservations
 	cache := NewReservationCache(nil, "/test", 30*time.Second)
-	now := time.Now()
 	cache.reservations = []agentmail.FileReservation{
-		{AgentName: "GreenCastle", PathPattern: "internal/robot/*.go", ExpiresTS: agentmail.FlexTime{Time: now.Add(1 * time.Hour)}},
+		{AgentName: "GreenCastle", PathPattern: "internal/robot/*.go", ExpiresTS: agentmail.FlexTime{Time: time.Now().Add(1 * time.Hour)}},
 	}
 	scorer.SetReservationCache(cache)
 	scorer.MapPaneToAgent("%1", "GreenCastle")
+	return scorer
+}
 
+func TestAffinityMatch_WithReservations(t *testing.T) {
+	scorer := newGreenCastleAffinityScorer(DefaultRoutingConfig())
 	agent := &ScoredAgent{PaneID: "%1"}
 
-	// Test with matching file path
-	affinity := scorer.calculateAffinity(agent, "Fix internal/robot/routing.go")
-	if affinity <= 0 {
-		t.Errorf("Affinity should be > 0 when agent holds matching reservation, got %f", affinity)
+	if got := scorer.affinityMatch(agent, "Fix internal/robot/routing.go"); got != 1 {
+		t.Errorf("affinityMatch = %v, want 1 when the agent holds the only named file", got)
 	}
-	if affinity > 12.0 {
-		t.Errorf("Affinity should not exceed AffinityBonus (12), got %f", affinity)
+	// One of two named files is covered: the match is the covered fraction.
+	if got := scorer.affinityMatch(agent, "Fix internal/robot/routing.go and docs/README.md"); got != 0.5 {
+		t.Errorf("affinityMatch = %v, want 0.5 when the agent holds one of two named files", got)
+	}
+	if got := scorer.affinityMatch(agent, "Fix docs/README.md"); got != 0 {
+		t.Errorf("affinityMatch = %v, want 0 when no named file is reserved by the agent", got)
 	}
 }
 
-func TestCalculateAffinity_NoMapping(t *testing.T) {
+func TestAffinityMatch_NoMapping(t *testing.T) {
 	cfg := DefaultRoutingConfig()
 	cfg.AgentMail.Enabled = true
 	scorer := NewAgentScorer(cfg)
@@ -1846,9 +1943,35 @@ func TestCalculateAffinity_NoMapping(t *testing.T) {
 
 	// No mapping for pane
 	agent := &ScoredAgent{PaneID: "%1"}
-	affinity := scorer.calculateAffinity(agent, "Fix internal/robot/routing.go")
-	if affinity != 0 {
-		t.Errorf("Affinity should be 0 when no pane mapping, got %f", affinity)
+	if got := scorer.affinityMatch(agent, "Fix internal/robot/routing.go"); got != 0 {
+		t.Errorf("affinityMatch = %v, want 0 when no pane mapping", got)
+	}
+}
+
+// TestCalculateScoreComponents_AffinityMatchIndependentOfBonus pins the split
+// between the affinity SIGNAL and the affinity BONUS: the match is measured
+// whenever reservations are wired (the affinity strategy ranks by it even
+// with affinity_enabled=false), while the bonus — the match scaled by
+// AffinityBonus, so never above it — is added only when affinity_enabled.
+func TestCalculateScoreComponents_AffinityMatchIndependentOfBonus(t *testing.T) {
+	prompt := "Fix internal/robot/routing.go"
+
+	bonusOff := newGreenCastleAffinityScorer(DefaultRoutingConfig())
+	off := bonusOff.calculateScoreComponents(&ScoredAgent{PaneID: "%1"}, prompt)
+	if off.AffinityMatch != 1 {
+		t.Errorf("AffinityMatch with bonus off = %v, want 1 (signal must not depend on affinity_enabled)", off.AffinityMatch)
+	}
+	if off.AffinityBonus != 0 {
+		t.Errorf("AffinityBonus with affinity_enabled=false = %v, want 0", off.AffinityBonus)
+	}
+
+	cfg := DefaultRoutingConfig()
+	cfg.AffinityEnabled = true
+	cfg.AffinityBonus = 12.0
+	bonusOn := newGreenCastleAffinityScorer(cfg)
+	on := bonusOn.calculateScoreComponents(&ScoredAgent{PaneID: "%1"}, prompt)
+	if on.AffinityMatch != 1 || on.AffinityBonus != 12.0 {
+		t.Errorf("affinity_enabled breakdown = match %v bonus %v, want match 1 bonus 12 (capped at AffinityBonus)", on.AffinityMatch, on.AffinityBonus)
 	}
 }
 
