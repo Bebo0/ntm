@@ -1071,7 +1071,7 @@ Shell Integration:
 			return
 		}
 		if robotTriage {
-			if err := robot.PrintTriage(robot.TriageOptions{Limit: robotTriageLimit}); err != nil {
+			if err := robot.PrintTriage(robot.TriageOptions{Limit: resolveRobotSharedLimit(cmd, "triage-limit", robotTriageLimit)}); err != nil {
 				recordRobotProcessExit(err)
 			}
 			return
@@ -1095,13 +1095,17 @@ Shell Integration:
 			return
 		}
 		if robotSearch != "" {
-			if err := robot.PrintSearch(robotSearch); err != nil {
+			searchLimit := 0
+			if cmd.Flags().Changed("limit") {
+				searchLimit = cassLimit
+			}
+			if err := robot.PrintSearch(robotSearch, searchLimit); err != nil {
 				recordRobotProcessExit(err)
 			}
 			return
 		}
 		if robotLabelAttention {
-			opts := robot.LabelAttentionOptions{Limit: robotAttentionLimit}
+			opts := robot.LabelAttentionOptions{Limit: resolveRobotSharedLimit(cmd, "attention-limit", robotAttentionLimit)}
 			if err := robot.PrintLabelAttention(opts); err != nil {
 				recordRobotProcessExit(err)
 			}
@@ -1120,21 +1124,21 @@ Shell Integration:
 			return
 		}
 		if robotFileBeads != "" {
-			opts := robot.FileBeadsOptions{FilePath: robotFileBeads, Limit: robotFileBeadsLimit}
+			opts := robot.FileBeadsOptions{FilePath: robotFileBeads, Limit: resolveRobotSharedLimit(cmd, "file-beads-limit", robotFileBeadsLimit)}
 			if err := robot.PrintFileBeads(opts); err != nil {
 				recordRobotProcessExit(err)
 			}
 			return
 		}
 		if robotFileHotspots {
-			opts := robot.FileHotspotsOptions{Limit: robotHotspotsLimit}
+			opts := robot.FileHotspotsOptions{Limit: resolveRobotSharedLimit(cmd, "hotspots-limit", robotHotspotsLimit)}
 			if err := robot.PrintFileHotspots(opts); err != nil {
 				recordRobotProcessExit(err)
 			}
 			return
 		}
 		if robotFileRelations != "" {
-			opts := robot.FileRelationsOptions{FilePath: robotFileRelations, Limit: robotRelationsLimit, Threshold: robotRelationsThreshold}
+			opts := robot.FileRelationsOptions{FilePath: robotFileRelations, Limit: resolveRobotSharedLimit(cmd, "relations-limit", robotRelationsLimit), Threshold: robotRelationsThreshold}
 			if err := robot.PrintFileRelations(opts); err != nil {
 				recordRobotProcessExit(err)
 			}
@@ -1336,13 +1340,13 @@ Shell Integration:
 			return
 		}
 		if robotCassSearch != "" {
-			if err := robot.PrintCASSSearch(robotCassSearch, cassAgent, cassWorkspace, cassSince, cassLimit); err != nil {
+			if err := robot.PrintCASSSearch(robotCassSearch, cassAgent, cassWorkspace, resolveRobotCASSSince(cmd), cassLimit); err != nil {
 				recordRobotProcessExit(err)
 			}
 			return
 		}
 		if robotCassInsights {
-			if err := robot.PrintCASSInsights(resolveRobotSharedFlag(cmd, "cass-since", cassSince, "since", robotSince)); err != nil {
+			if err := robot.PrintCASSInsights(resolveRobotCASSSince(cmd)); err != nil {
 				recordRobotProcessExit(err)
 			}
 			return
@@ -1491,7 +1495,7 @@ Shell Integration:
 				Since:     resolveRobotTokensSince(cmd),
 				GroupBy:   robotTokensGroupBy,
 				Session:   session,
-				AgentType: robotTokensAgent,
+				AgentType: resolveRobotSharedFlag(cmd, "tokens-agent", robotTokensAgent, "agent", cassAgent),
 			}
 			if err := robot.PrintTokens(opts); err != nil {
 				recordRobotProcessExit(err)
@@ -1571,8 +1575,8 @@ Shell Integration:
 			}
 			// Parse agent types
 			var agentTypes []string
-			if robotActivityType != "" {
-				agentTypes = strings.Split(robotActivityType, ",")
+			if activityType := resolveRobotSharedFlag(cmd, "activity-type", robotActivityType, "type", robotSendType); activityType != "" {
+				agentTypes = strings.Split(activityType, ",")
 			}
 			opts := robot.ActivityOptions{
 				Session:    session,
@@ -2278,6 +2282,12 @@ Shell Integration:
 				return
 			}
 			if robotDiagnoseBrief {
+				// The brief summary covers the whole session and never
+				// repairs; refuse rather than silently drop --fix/--diagnose-pane.
+				if robotDiagnoseFix || robotDiagnosePane >= 0 {
+					failRobotCommand(errors.New("--brief cannot be combined with --fix or --diagnose-pane"), robot.ErrCodeInvalidFlag, "Drop --brief to auto-fix or to diagnose one pane", "robot-diagnose")
+					return
+				}
 				if err := robot.PrintDiagnoseBrief(cmd.Context(), session); err != nil {
 					recordRobotProcessExit(err)
 				}
@@ -2286,7 +2296,6 @@ Shell Integration:
 					Session: session,
 					Pane:    robotDiagnosePane,
 					Fix:     robotDiagnoseFix,
-					Brief:   robotDiagnoseBrief,
 				}
 				if err := robot.PrintDiagnose(cmd.Context(), opts); err != nil {
 					recordRobotProcessExit(err)
@@ -2721,7 +2730,7 @@ Shell Integration:
 			return
 		}
 		if robotMarkdown {
-			session, err := resolveOptionalRobotSessionFilter(cmd.Context(), robotMarkdownSession)
+			session, err := resolveOptionalRobotSessionFilter(cmd.Context(), resolveRobotSharedFlag(cmd, "md-session", robotMarkdownSession, "session", robotSharedSession))
 			if err != nil {
 				failRobotCommand(err, robot.ErrCodeSessionNotFound, "Use 'ntm list' to see available sessions", "robot-markdown")
 				return
@@ -2793,7 +2802,7 @@ Shell Integration:
 			opts := robot.FilesOptions{
 				Session:    session,
 				TimeWindow: robotFilesWindow,
-				Limit:      robotFilesLimit,
+				Limit:      resolveRobotSharedLimit(cmd, "files-limit", robotFilesLimit),
 			}
 			if err := robot.PrintFiles(opts); err != nil {
 				recordRobotProcessExit(err)
@@ -2809,7 +2818,7 @@ Shell Integration:
 			opts := robot.InspectPaneOptions{
 				Session:     session,
 				PaneIndex:   robotInspectIndex,
-				Lines:       robotInspectLines,
+				Lines:       resolveRobotSharedLines(cmd, "inspect-lines", robotInspectLines),
 				IncludeCode: robotInspectCode,
 			}
 			if err := robot.PrintInspectPane(opts); err != nil {
@@ -2986,7 +2995,7 @@ Shell Integration:
 			}
 			opts := robot.PaletteOptions{
 				Session:     paletteSession,
-				Category:    robotPaletteCategory,
+				Category:    resolveRobotSharedFlag(cmd, "palette-category", robotPaletteCategory, "category", jfpCategory),
 				SearchQuery: robotPaletteSearch,
 			}
 			if err := robot.PrintPalette(cfg, opts); err != nil {
@@ -2995,7 +3004,7 @@ Shell Integration:
 			return
 		}
 		if robotDismissAlert != "" {
-			dismissSession, err := resolveOptionalRobotSessionFilter(cmd.Context(), robotDismissSession)
+			dismissSession, err := resolveOptionalRobotSessionFilter(cmd.Context(), resolveRobotSharedFlag(cmd, "dismiss-session", robotDismissSession, "session", robotSharedSession))
 			if err != nil {
 				failRobotCommand(err, robot.ErrCodeSessionNotFound, "Use 'ntm list' to see available sessions", "robot-dismiss-alert")
 				return
@@ -3007,7 +3016,7 @@ Shell Integration:
 			opts := robot.DismissAlertOptions{
 				AlertID:    dismissAlertID,
 				Session:    dismissSession,
-				DismissAll: robotDismissAll,
+				DismissAll: resolveRobotSharedBool(cmd, "dismiss-all", robotDismissAll, "all", robotSendAll),
 			}
 			if err := robot.PrintDismissAlert(cfg, opts); err != nil {
 				recordRobotProcessExit(err)
@@ -3062,7 +3071,7 @@ Shell Integration:
 				Priority: robotBeadsPriority,
 				Assignee: robotBeadsAssignee,
 				Type:     robotBeadsType,
-				Limit:    robotBeadsLimit,
+				Limit:    resolveRobotSharedLimit(cmd, "beads-limit", robotBeadsLimit),
 			}
 			if err := robot.PrintBeadsList(opts); err != nil {
 				recordRobotProcessExit(err)
@@ -3291,7 +3300,7 @@ Shell Integration:
 				Verbose:       mailVerbose,
 				Limit:         resolveRobotMailCheckLimit(cmd),
 				Offset:        mailOffset, // Pagination offset
-				Since:         resolveRobotMailCheckSince(cmd),
+				Since:         resolveRobotCASSSince(cmd),
 				Until:         mailUntil, // Date filter
 			}
 			if err := robot.PrintMailCheck(opts); err != nil {
@@ -5603,8 +5612,35 @@ func resolveRobotSaveOutput(cmd *cobra.Command) string {
 	return resolveRobotSharedFlag(cmd, "save-output", robotSaveOutput, "output", robotMonitorOutput)
 }
 
-func resolveRobotMailCheckSince(cmd *cobra.Command) string {
+// resolveRobotCASSSince resolves the time window for the commands that read
+// --cass-since (deprecated) or the shared --since: CASS search and insights,
+// and mail check.
+func resolveRobotCASSSince(cmd *cobra.Command) string {
 	return resolveRobotSharedFlag(cmd, "cass-since", cassSince, "since", robotSince)
+}
+
+// resolveRobotSharedLimit applies the shared --limit to a command that also
+// has its own limit flag: the specific flag wins when set, then --limit, then
+// the specific flag's default.
+func resolveRobotSharedLimit(cmd *cobra.Command, specificFlagName string, specificValue int) int {
+	if cmd != nil && cmd.Flags().Changed(specificFlagName) {
+		return specificValue
+	}
+	if cmd != nil && cmd.Flags().Changed("limit") {
+		return cassLimit
+	}
+	return specificValue
+}
+
+// resolveRobotSharedLines is resolveRobotSharedLimit for the shared --lines.
+func resolveRobotSharedLines(cmd *cobra.Command, specificFlagName string, specificValue int) int {
+	if cmd != nil && cmd.Flags().Changed(specificFlagName) {
+		return specificValue
+	}
+	if cmd != nil && cmd.Flags().Changed("lines") {
+		return robotLines
+	}
+	return specificValue
 }
 
 func resolveRobotMailCheckLimit(cmd *cobra.Command) int {

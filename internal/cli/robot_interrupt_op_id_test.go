@@ -35,7 +35,7 @@ import (
 func TestRobotInterruptOpIDRetryAcrossProcessesReplays(t *testing.T) {
 	testutil.RequireTmuxThrottled(t)
 
-	run := newRobotInterruptProcessRunner(t)
+	run := newRobotProcessRunner(t)
 	fx := testutil.StartInterruptFixture(t, "cliopid")
 	marker := fmt.Sprintf("ntm-cli-opid-%d", time.Now().UnixNano())
 	opID := "op-cli-" + marker
@@ -104,7 +104,7 @@ func TestRobotInterruptOpIDRetryAcrossProcessesReplays(t *testing.T) {
 func TestRobotInterruptTypeFilterInterruptsOnlyThatAgentType(t *testing.T) {
 	testutil.RequireTmuxThrottled(t)
 
-	run := newRobotInterruptProcessRunner(t)
+	run := newRobotProcessRunner(t)
 	claude := testutil.StartInterruptFixture(t, "clitype")
 	codex := claude.SplitPane(t)
 	claude.SetTitle(t, claude.Session+"__cc_1")
@@ -125,11 +125,11 @@ func TestRobotInterruptTypeFilterInterruptsOnlyThatAgentType(t *testing.T) {
 	claude.AssertQuiet(t, marker, 0, 0)
 }
 
-// newRobotInterruptProcessRunner returns a runner that executes each robot
+// newRobotProcessRunner returns a runner that executes each robot
 // invocation as a separate `ntm` process (the TestRobotProcessContractHelper
 // re-exec) sharing one isolated home and state DB, on this process's
 // isolated tmux server.
-func newRobotInterruptProcessRunner(t *testing.T) func(args ...string) (map[string]any, int) {
+func newRobotProcessRunner(t *testing.T) func(args ...string) (map[string]any, int) {
 	t.Helper()
 	tmpDir := t.TempDir()
 	homeDir := filepath.Join(tmpDir, "home")
@@ -177,5 +177,39 @@ func newRobotInterruptProcessRunner(t *testing.T) func(args ...string) (map[stri
 			t.Fatalf("ntm %v stdout is not one JSON document: %v\nstdout=%q\nstderr=%q", args, err, stdout.String(), stderr.String())
 		}
 		return payload, exitCode
+	}
+}
+
+// TestRobotCanonicalFlagsReachTheirCommands drives the canonical flags the
+// deprecation hints point at (--category, --session, --all, --brief) through
+// separate `ntm` processes. Each was accepted and silently ignored by its
+// command before, so a caller following the hint got unfiltered (or, for
+// --robot-dismiss-alert --all --session, every-session) behavior.
+func TestRobotCanonicalFlagsReachTheirCommands(t *testing.T) {
+	testutil.RequireTmuxThrottled(t)
+	run := newRobotProcessRunner(t)
+
+	all, code := run("--robot-palette")
+	allCommands, _ := all["commands"].([]any)
+	if code != 0 || len(allCommands) == 0 {
+		t.Fatalf("--robot-palette exit=%d commands=%d, want the default palette", code, len(allCommands))
+	}
+	filtered, code := run("--robot-palette", "--category=no-such-category")
+	if cmds, _ := filtered["commands"].([]any); code != 0 || len(cmds) != 0 {
+		t.Fatalf("--robot-palette --category=no-such-category exit=%d commands=%d, want none", code, len(cmds))
+	}
+
+	// --session scopes the dismissal (ignored, it made --all dismiss alerts
+	// in every session) and --all selects dismiss-all (ignored, an ID-less
+	// call failed with "alert ID required").
+	dismissed, code := run("--robot-dismiss-alert", "--all", "--session=ntm-no-such-session")
+	if code != 0 || dismissed["session"] != "ntm-no-such-session" || dismissed["dismissed_count"] != float64(0) {
+		t.Fatalf("--robot-dismiss-alert --all --session=S exit=%d payload=%v, want a dismiss-all scoped to S", code, dismissed)
+	}
+
+	fx := testutil.StartInterruptFixture(t, "clibrief")
+	brief, code := run("--robot-diagnose="+fx.Session, "--brief", "--fix")
+	if code != 1 || brief["error_code"] != robot.ErrCodeInvalidFlag {
+		t.Fatalf("--robot-diagnose --brief --fix exit=%d payload=%v, want INVALID_FLAG", code, brief)
 	}
 }

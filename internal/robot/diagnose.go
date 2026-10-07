@@ -90,7 +90,6 @@ type DiagnoseOptions struct {
 	Session string // session name (required)
 	Pane    int    // specific pane to diagnose (-1 for all)
 	Fix     bool   // attempt auto-fix
-	Brief   bool   // minimal output
 }
 
 type diagnoseDependencies struct {

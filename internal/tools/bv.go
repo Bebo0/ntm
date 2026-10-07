@@ -240,10 +240,6 @@ func (a *BVAdapter) GetImpact(ctx context.Context, dir string, filePath string) 
 	return a.runRobotCommand(ctx, dir, "--robot-impact", filePath)
 }
 
-func (a *BVAdapter) GetSearch(ctx context.Context, dir string, query string) (json.RawMessage, error) {
-	return a.GetSearchWithOptions(ctx, dir, BVSearchOptions{Query: query})
-}
-
 func (a *BVAdapter) GetSearchWithOptions(ctx context.Context, dir string, opts BVSearchOptions) (json.RawMessage, error) {
 	args := []string{"--robot-search"}
 	if opts.Query != "" {

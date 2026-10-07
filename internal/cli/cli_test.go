@@ -5193,8 +5193,8 @@ func TestResolveRobotMailCheckUsesSharedCanonicalFlags(t *testing.T) {
 		t.Fatalf("set limit: %v", err)
 	}
 
-	if got := resolveRobotMailCheckSince(cmd); got != robotSince {
-		t.Fatalf("resolveRobotMailCheckSince() = %q, want %q", got, robotSince)
+	if got := resolveRobotCASSSince(cmd); got != robotSince {
+		t.Fatalf("resolveRobotCASSSince() = %q, want %q", got, robotSince)
 	}
 	if got := resolveRobotMailCheckLimit(cmd); got != 25 {
 		t.Fatalf("resolveRobotMailCheckLimit() = %d, want 25", got)
@@ -5228,8 +5228,8 @@ func TestResolveRobotMailCheckSincePrefersDeprecatedAliasWhenExplicitlySet(t *te
 		t.Fatalf("set cass-since: %v", err)
 	}
 
-	if got := resolveRobotMailCheckSince(cmd); got != cassSince {
-		t.Fatalf("resolveRobotMailCheckSince() = %q, want deprecated explicit value %q", got, cassSince)
+	if got := resolveRobotCASSSince(cmd); got != cassSince {
+		t.Fatalf("resolveRobotCASSSince() = %q, want deprecated explicit value %q", got, cassSince)
 	}
 }
 

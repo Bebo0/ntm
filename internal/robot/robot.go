@@ -11968,8 +11968,9 @@ type SearchOutput struct {
 	Error     string             `json:"error,omitempty"`
 }
 
-// GetSearch returns BV semantic vector search results.
-func GetSearch(query string) (*SearchOutput, error) {
+// GetSearch returns BV semantic vector search results, at most limit of
+// them when limit > 0 (bv's own default otherwise).
+func GetSearch(query string, limit int) (*SearchOutput, error) {
 	adapter := tools.NewBVAdapter()
 	_, installed := adapter.Detect()
 
@@ -11986,7 +11987,7 @@ func GetSearch(query string) (*SearchOutput, error) {
 	}
 
 	wd := mustGetwd()
-	raw, err := adapter.GetSearch(context.Background(), wd, query)
+	raw, err := adapter.GetSearchWithOptions(context.Background(), wd, tools.BVSearchOptions{Query: query, Limit: limit})
 	if err != nil {
 		output.Error = fmt.Sprintf("failed to perform search: %v", err)
 		setBVRobotFailure(&output.RobotResponse, output.Error, ErrCodeInternalError)
@@ -12005,8 +12006,8 @@ func GetSearch(query string) (*SearchOutput, error) {
 }
 
 // PrintSearch outputs BV semantic vector search results
-func PrintSearch(query string) error {
-	output, err := GetSearch(query)
+func PrintSearch(query string, limit int) error {
+	output, err := GetSearch(query, limit)
 	if err != nil {
 		return err
 	}

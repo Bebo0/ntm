@@ -217,7 +217,7 @@ func TestAdditionalBVSurfacesReportTypedMissingDependency(t *testing.T) {
 			out, err := GetImpact("internal/robot/robot.go")
 			return out.RobotResponse, err
 		}},
-		{"search", func() (RobotResponse, error) { out, err := GetSearch("assignment"); return out.RobotResponse, err }},
+		{"search", func() (RobotResponse, error) { out, err := GetSearch("assignment", 0); return out.RobotResponse, err }},
 		{"label-attention", func() (RobotResponse, error) {
 			out, err := GetLabelAttention(LabelAttentionOptions{})
 			return out.RobotResponse, err

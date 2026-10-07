@@ -618,7 +618,7 @@ func TestBVAdapterRobotModes(t *testing.T) {
 			name: "search",
 			key:  "results",
 			call: func() (json.RawMessage, error) {
-				return adapter.GetSearch(ctx, projectRoot, "test query")
+				return adapter.GetSearchWithOptions(ctx, projectRoot, BVSearchOptions{Query: "test query"})
 			},
 		},
 		{

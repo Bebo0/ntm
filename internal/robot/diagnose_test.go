@@ -770,9 +770,6 @@ func TestDiagnoseOptions_Defaults(t *testing.T) {
 	if opts.Fix {
 		t.Error("Default Fix should be false")
 	}
-	if opts.Brief {
-		t.Error("Default Brief should be false")
-	}
 }
 
 func TestDiagnoseOptions_PaneFiltering(t *testing.T) {
