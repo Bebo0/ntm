@@ -157,7 +157,9 @@ func (c *Client) ClearPaneBadgeContext(ctx context.Context, paneID string) error
 // ReadPaneBadgeContext returns the badge options currently cached on paneID
 // (each empty when unset).
 func (c *Client) ReadPaneBadgeContext(ctx context.Context, paneID string) (PaneBadge, error) {
-	sep := "\x1f"
+	// FieldSeparator, not a control byte: tmux 3.4 escapes non-printable
+	// format output (\x1f comes back as the four characters "\037").
+	sep := FieldSeparator
 	format := "#{" + PaneOptionAgentMailName + "}" + sep +
 		"#{" + PaneOptionAgentMailState + "}" + sep +
 		"#{" + PaneOptionAgentMailLifecycle + "}" + sep +
@@ -196,7 +198,7 @@ type WindowBadgeInfo struct {
 // ListWindowBadgeInfoContext lists the session's windows with the facts
 // badge publication needs.
 func (c *Client) ListWindowBadgeInfoContext(ctx context.Context, session string) ([]WindowBadgeInfo, error) {
-	sep := "\x1f"
+	sep := FieldSeparator
 	format := strings.Join([]string{
 		"#{window_id}", "#{window_index}", "#{window_linked}", "#{socket_path}",
 		"#{" + SessionOptionAgentMailBadges + "}",
