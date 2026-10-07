@@ -321,6 +321,7 @@ func TestInterruptOperationBindingHashCanonicalizesCommand(t *testing.T) {
 
 	same := base
 	same.Panes = []string{"2", " 1"}
+	same.AgentTypes = []string{" "}
 	same.NoWait = true
 	same.TimeoutMs = 30000
 	same.PollMs = 50
@@ -334,6 +335,7 @@ func TestInterruptOperationBindingHashCanonicalizesCommand(t *testing.T) {
 		"panes":   func(o *InterruptOptions) { o.Panes = []string{"1"} },
 		"all":     func(o *InterruptOptions) { o.All = true },
 		"force":   func(o *InterruptOptions) { o.Force = true },
+		"type":    func(o *InterruptOptions) { o.AgentTypes = []string{"codex"} },
 		"message": func(o *InterruptOptions) { o.Message = "stop and fix it" },
 		"no task": func(o *InterruptOptions) { o.Message = "" },
 	} {
@@ -343,6 +345,14 @@ func TestInterruptOperationBindingHashCanonicalizesCommand(t *testing.T) {
 		if interruptOperationBindingHash(changed) == want {
 			t.Errorf("changing %s did not change the binding hash", name)
 		}
+	}
+
+	aliased := base
+	aliased.AgentTypes = []string{"cod", "cc"}
+	canonical := base
+	canonical.AgentTypes = []string{"claude", "codex", "codex"}
+	if interruptOperationBindingHash(aliased) != interruptOperationBindingHash(canonical) {
+		t.Error("--type aliases, order, or duplicates changed the binding hash")
 	}
 
 	send := sendOperationBindingHash(SendOptions{Session: "proj", Panes: []string{"1", "2"}, Message: "stop and fix"})

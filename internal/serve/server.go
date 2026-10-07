@@ -4632,10 +4632,11 @@ func (s *Server) handleAgentSendV1(w http.ResponseWriter, r *http.Request) {
 
 // AgentInterruptRequest is the request body for POST /sessions/{id}/agents/interrupt.
 type AgentInterruptRequest struct {
-	Panes   []string `json:"panes,omitempty"`
-	Message string   `json:"message,omitempty"`
-	Force   bool     `json:"force,omitempty"`
-	NoWait  bool     `json:"no_wait,omitempty"`
+	Panes      []string `json:"panes,omitempty"`
+	AgentTypes []string `json:"agent_types,omitempty"`
+	Message    string   `json:"message,omitempty"`
+	Force      bool     `json:"force,omitempty"`
+	NoWait     bool     `json:"no_wait,omitempty"`
 }
 
 // handleAgentInterruptV1 handles POST /api/v1/sessions/{sessionId}/agents/interrupt.
@@ -4670,6 +4671,7 @@ func (s *Server) handleAgentInterruptV1(w http.ResponseWriter, r *http.Request) 
 	opts := robot.InterruptOptions{
 		Session:        sessionID,
 		Panes:          req.Panes,
+		AgentTypes:     req.AgentTypes,
 		Message:        req.Message,
 		Force:          req.Force,
 		NoWait:         req.NoWait,

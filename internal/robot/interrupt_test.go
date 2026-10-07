@@ -17,18 +17,55 @@ func TestResolveInterruptTargetsSelectorsDeduplicateAndFailTyped(t *testing.T) {
 		{ID: "%2", Index: 0, WindowIndex: 1, Type: tmux.AgentType("codex")},
 		{ID: "%3", Index: 0, WindowIndex: 2, Type: tmux.AgentType("gemini")},
 	}
-	selected, err := resolveInterruptTargets(panes, []string{"2", "2.0", "%3"}, false)
+	selected, err := resolveInterruptTargets(panes, []string{"2", "2.0", "%3"}, false, nil)
 	if err != nil {
 		t.Fatalf("resolveInterruptTargets() error = %v", err)
 	}
 	if len(selected) != 1 || selected[0].ID != "%3" {
 		t.Fatalf("selected = %v, want one physical pane %%3", selected)
 	}
-	if _, err := resolveInterruptTargets(panes, []string{"9.0"}, false); err == nil || paneSelectorRobotErrorCode(err) != ErrCodePaneNotFound {
+	if _, err := resolveInterruptTargets(panes, []string{"9.0"}, false, nil); err == nil || paneSelectorRobotErrorCode(err) != ErrCodePaneNotFound {
 		t.Fatalf("missing selector error = %v", err)
 	}
-	if _, err := resolveInterruptTargets(panes, []string{"1.x"}, false); err == nil || paneSelectorRobotErrorCode(err) != ErrCodeInvalidFlag {
+	if _, err := resolveInterruptTargets(panes, []string{"1.x"}, false, nil); err == nil || paneSelectorRobotErrorCode(err) != ErrCodeInvalidFlag {
 		t.Fatalf("invalid selector error = %v", err)
+	}
+}
+
+func TestResolveInterruptTargetsTypeFilterNarrowsDefaultAndSelectedSets(t *testing.T) {
+	panes := []tmux.Pane{
+		{ID: "%0", Index: 0, Type: tmux.AgentType("user")},
+		{ID: "%1", Index: 1, Type: tmux.AgentType("claude")},
+		{ID: "%2", Index: 2, Type: tmux.AgentType("codex")},
+		{ID: "%3", Index: 3, Type: tmux.AgentType("codex")},
+	}
+	ids := func(selected []tmux.Pane) string {
+		out := make([]string, 0, len(selected))
+		for _, p := range selected {
+			out = append(out, p.ID)
+		}
+		return strings.Join(out, ",")
+	}
+
+	selected, err := resolveInterruptTargets(panes, nil, false, []string{"cod"})
+	if err != nil || ids(selected) != "%2,%3" {
+		t.Fatalf("--type=cod over the default set = %q (err %v), want %%2,%%3", ids(selected), err)
+	}
+	selected, err = resolveInterruptTargets(panes, nil, false, []string{" claude ", "cc"})
+	if err != nil || ids(selected) != "%1" {
+		t.Fatalf("--type=claude,cc = %q (err %v), want %%1", ids(selected), err)
+	}
+	selected, err = resolveInterruptTargets(panes, []string{"%1", "%2"}, false, []string{"codex"})
+	if err != nil || ids(selected) != "%2" {
+		t.Fatalf("--panes=%%1,%%2 --type=codex = %q (err %v), want %%2", ids(selected), err)
+	}
+	selected, err = resolveInterruptTargets(panes, nil, false, []string{"aider"})
+	if err != nil || len(selected) != 0 {
+		t.Fatalf("--type=aider = %q (err %v), want no targets", ids(selected), err)
+	}
+	selected, err = resolveInterruptTargets(panes, nil, false, nil)
+	if err != nil || ids(selected) != "%1,%2,%3" {
+		t.Fatalf("no --type = %q (err %v), want every agent pane", ids(selected), err)
 	}
 }
 

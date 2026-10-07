@@ -31,7 +31,7 @@ while true; do
 done
 `
 
-// InterruptFixture is a real tmux session whose single pane records every
+// InterruptFixture is a pane in a real tmux session that records every
 // interrupt it receives and every line submitted to it. It is the ground
 // truth for interrupt/delivery side effects that a robot envelope cannot
 // prove the absence of (for example: no second Ctrl+C on a replayed retry).
@@ -39,6 +39,8 @@ type InterruptFixture struct {
 	Session string // tmux session name
 	PaneID  string // tmux pane ID (%N)
 	LogPath string // fixture event log
+
+	scriptPath string // recording script, reused by SplitPane
 }
 
 // StartInterruptFixture creates the fixture session in the current tmux
@@ -69,18 +71,53 @@ func StartInterruptFixture(t *testing.T, tag string) *InterruptFixture {
 	}
 	t.Cleanup(func() { _ = tmux.KillSession(session) })
 
+	waitInterruptFixtureReady(t, paneID)
+	return &InterruptFixture{Session: session, PaneID: paneID, LogPath: logPath, scriptPath: scriptPath}
+}
+
+// SplitPane adds another recording pane to the fixture's session, with its
+// own event log, and returns it as a fixture sharing the session.
+func (f *InterruptFixture) SplitPane(t *testing.T) *InterruptFixture {
+	t.Helper()
+	dir := t.TempDir()
+	logPath := filepath.Join(dir, "events.log")
+	paneID, err := tmux.DefaultClient.Run(
+		"split-window", "-d", "-t", f.Session, "-c", dir,
+		"-P", "-F", "#{pane_id}", fmt.Sprintf("/bin/bash %s %s", f.scriptPath, logPath),
+	)
+	if err != nil {
+		t.Fatalf("split interrupt fixture pane: %v", err)
+	}
+	paneID = strings.TrimSpace(paneID)
+	if paneID == "" {
+		t.Fatal("split interrupt fixture pane returned an empty pane ID")
+	}
+	waitInterruptFixtureReady(t, paneID)
+	return &InterruptFixture{Session: f.Session, PaneID: paneID, LogPath: logPath, scriptPath: f.scriptPath}
+}
+
+// SetTitle sets the pane title, e.g. an ntm agent title such as
+// "<session>__cod_1" so agent-type detection classifies the pane.
+func (f *InterruptFixture) SetTitle(t *testing.T, title string) {
+	t.Helper()
+	if _, err := tmux.DefaultClient.Run("select-pane", "-t", f.PaneID, "-T", title); err != nil {
+		t.Fatalf("set interrupt fixture pane title: %v", err)
+	}
+}
+
+func waitInterruptFixtureReady(t *testing.T, paneID string) {
+	t.Helper()
 	deadline := time.Now().Add(5 * time.Second)
 	for {
 		output, captureErr := tmux.CapturePaneOutput(paneID, 20)
 		if captureErr == nil && strings.Contains(output, InterruptFixtureReadyMarker) {
-			break
+			return
 		}
 		if time.Now().After(deadline) {
 			t.Fatalf("timed out waiting for interrupt fixture: output=%q err=%v", output, captureErr)
 		}
 		time.Sleep(25 * time.Millisecond)
 	}
-	return &InterruptFixture{Session: session, PaneID: paneID, LogPath: logPath}
 }
 
 // Events counts the interrupts the fixture received and the submitted lines

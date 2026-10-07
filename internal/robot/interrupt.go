@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -65,6 +66,7 @@ type InterruptOptions struct {
 	Session        string   // Target session name
 	Message        string   // Message to send after interrupt (optional)
 	Panes          []string // Specific pane indices to interrupt (empty = all agents)
+	AgentTypes     []string // Only interrupt panes of these agent types (aliases accepted; empty = any type)
 	All            bool     // Include all panes (including user)
 	Force          bool     // Send Ctrl+C even if agent appears idle
 	NoWait         bool     // Don't wait for ready state after interrupt
@@ -149,7 +151,7 @@ func GetInterrupt(opts InterruptOptions) (*InterruptOutput, error) {
 	// Topology-aware keys (#172): on a multi-window session every key is the
 	// canonical "window.pane" address so panes never collapse onto one entry.
 	multiWindow := paneSessionIsMultiWindow(panes)
-	targetPanes, err := resolveInterruptTargets(panes, opts.Panes, opts.All)
+	targetPanes, err := resolveInterruptTargets(panes, opts.Panes, opts.All, opts.AgentTypes)
 	if err != nil {
 		output.RobotResponse = NewErrorResponse(
 			err,
@@ -534,8 +536,8 @@ func PrintInterrupt(opts InterruptOptions) error {
 
 // interruptOperationBindingHash binds an idempotent interrupt to the
 // caller's canonical COMMAND spec: actuation kind, session, pane selectors,
-// --all, --force, and a digest of the caller's INPUT follow-up message
-// (before redaction).
+// --all, --force, the --type filter, and a digest of the caller's INPUT
+// follow-up message (before redaction).
 //
 // As with sends, the selector — not the resolved pane list — is bound, so a
 // byte-identical retry replays even when pane topology changed between
@@ -553,6 +555,7 @@ func interruptOperationBindingHash(opts InterruptOptions) string {
 	b.list(opts.Panes)
 	b.field(strconv.FormatBool(opts.All))
 	b.field(strconv.FormatBool(opts.Force))
+	b.list(normalizedInterruptAgentTypes(opts.AgentTypes))
 	inputSHA, _ := operationPayloadDigest(opts.Message)
 	b.field(inputSHA)
 	return b.sum()
@@ -748,25 +751,59 @@ func interruptReceiptOutcomeFromJSON(outcomeJSON string) (*InterruptReceiptOutco
 	}, nil
 }
 
-func resolveInterruptTargets(panes []tmux.Pane, selectors []string, all bool) ([]tmux.Pane, error) {
-	if len(selectors) > 0 {
-		return tmux.ResolvePaneSelectors(panes, selectors, false)
-	}
+// resolveInterruptTargets picks the panes an interrupt actuates: the explicit
+// selectors when given, otherwise every agent pane (every pane with all).
+// A non-empty agentTypes list then keeps only panes of those types, so
+// --type narrows either set the way it does for --robot-send.
+func resolveInterruptTargets(panes []tmux.Pane, selectors []string, all bool, agentTypes []string) ([]tmux.Pane, error) {
 	var targetPanes []tmux.Pane
-	for _, pane := range panes {
-		if !all {
-			agentType := interruptPaneAgentType(pane)
-			if pane.Index == 0 && agentType == "unknown" {
-				continue
-			}
-			if agentType == "user" {
-				continue
-			}
+	if len(selectors) > 0 {
+		resolved, err := tmux.ResolvePaneSelectors(panes, selectors, false)
+		if err != nil {
+			return nil, err
 		}
+		targetPanes = resolved
+	} else {
+		for _, pane := range panes {
+			if !all {
+				agentType := interruptPaneAgentType(pane)
+				if pane.Index == 0 && agentType == "unknown" {
+					continue
+				}
+				if agentType == "user" {
+					continue
+				}
+			}
 
-		targetPanes = append(targetPanes, pane)
+			targetPanes = append(targetPanes, pane)
+		}
 	}
-	return targetPanes, nil
+	wanted := normalizedInterruptAgentTypes(agentTypes)
+	if len(wanted) == 0 {
+		return targetPanes, nil
+	}
+	filtered := make([]tmux.Pane, 0, len(targetPanes))
+	for _, pane := range targetPanes {
+		if slices.Contains(wanted, normalizeAgentType(interruptPaneAgentType(pane))) {
+			filtered = append(filtered, pane)
+		}
+	}
+	return filtered, nil
+}
+
+// normalizedInterruptAgentTypes canonicalizes --type values (aliases
+// resolved, blanks dropped, sorted, deduplicated) for both target filtering
+// and the idempotency binding.
+func normalizedInterruptAgentTypes(agentTypes []string) []string {
+	out := make([]string, 0, len(agentTypes))
+	for _, t := range agentTypes {
+		if strings.TrimSpace(t) == "" {
+			continue
+		}
+		out = append(out, normalizeAgentType(t))
+	}
+	slices.Sort(out)
+	return slices.Compact(out)
 }
 
 func unavailableRobotPaneObservation(pane tmux.Pane, observationError string, observedAt time.Time) status.PaneObservation {

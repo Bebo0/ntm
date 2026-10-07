@@ -2505,6 +2505,11 @@ Shell Integration:
 			if robotPanes != "" {
 				paneFilter = strings.Split(robotPanes, ",")
 			}
+			// Parse agent type filter (shared --type flag)
+			var interruptAgentTypes []string
+			if robotSendType != "" {
+				interruptAgentTypes = strings.Split(robotSendType, ",")
+			}
 			// Parse interrupt timeout duration
 			interruptTimeout, err := util.ParseDurationWithDefault(resolveRobotInterruptTimeout(cmd), time.Millisecond, "timeout")
 			if err != nil {
@@ -2515,6 +2520,7 @@ Shell Integration:
 				Session:        session,
 				Message:        resolveRobotInterruptMessage(cmd),
 				Panes:          paneFilter,
+				AgentTypes:     interruptAgentTypes,
 				All:            resolveRobotInterruptAll(cmd),
 				Force:          resolveRobotInterruptForce(cmd),
 				NoWait:         robotInterruptNoWait,

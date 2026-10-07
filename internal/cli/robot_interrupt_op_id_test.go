@@ -35,57 +35,11 @@ import (
 func TestRobotInterruptOpIDRetryAcrossProcessesReplays(t *testing.T) {
 	testutil.RequireTmuxThrottled(t)
 
-	tmpDir := t.TempDir()
-	homeDir := filepath.Join(tmpDir, "home")
-	configHome := filepath.Join(tmpDir, "xdg")
-	for _, dir := range []string{homeDir, configHome} {
-		if err := os.MkdirAll(dir, 0o755); err != nil {
-			t.Fatalf("create isolated directory: %v", err)
-		}
-	}
+	run := newRobotInterruptProcessRunner(t)
 	fx := testutil.StartInterruptFixture(t, "cliopid")
 	marker := fmt.Sprintf("ntm-cli-opid-%d", time.Now().UnixNano())
 	opID := "op-cli-" + marker
 
-	run := func(args ...string) (map[string]any, int) {
-		t.Helper()
-		rawArgs, err := json.Marshal(args)
-		if err != nil {
-			t.Fatalf("encode helper args: %v", err)
-		}
-		cmd := exec.Command(os.Args[0], "-test.run=^TestRobotProcessContractHelper$")
-		cmd.Dir = tmpDir
-		cmd.Env = envWithOverrides(os.Environ(),
-			"HOME="+homeDir,
-			"XDG_CONFIG_HOME="+configHome,
-			"NTM_NO_COLOR=1",
-			"NTM_CONFIG=",
-			"NTM_ROBOT_FORMAT=",
-			"NTM_OUTPUT_FORMAT=",
-			"TOON_DEFAULT_FORMAT=",
-			"NTM_ROBOT_VERBOSITY=",
-			// Keep the child on this process's isolated tmux server, where
-			// the fixture session lives.
-			"NTM_TEST_TMUX_ENV_OWNED=1",
-			"NTM_ROBOT_CONTRACT_ARGS="+string(rawArgs),
-		)
-		var stdout, stderr bytes.Buffer
-		cmd.Stdout = &stdout
-		cmd.Stderr = &stderr
-		exitCode := 0
-		if err := cmd.Run(); err != nil {
-			var exitErr *exec.ExitError
-			if !errors.As(err, &exitErr) {
-				t.Fatalf("ntm %v failed without an exit status: %v", args, err)
-			}
-			exitCode = exitErr.ExitCode()
-		}
-		var payload map[string]any
-		if err := json.Unmarshal(stdout.Bytes(), &payload); err != nil {
-			t.Fatalf("ntm %v stdout is not one JSON document: %v\nstdout=%q\nstderr=%q", args, err, stdout.String(), stderr.String())
-		}
-		return payload, exitCode
-	}
 	interrupt := func(task string) []string {
 		return []string{
 			"--robot-interrupt=" + fx.Session, "--panes=" + fx.PaneID,
@@ -141,4 +95,87 @@ func TestRobotInterruptOpIDRetryAcrossProcessesReplays(t *testing.T) {
 		t.Fatalf("receipt+interrupt exit=%d payload=%v, want INVALID_FLAG naming --robot-interrupt", code, combined)
 	}
 	fx.AssertQuiet(t, marker, 1, 1)
+}
+
+// TestRobotInterruptTypeFilterInterruptsOnlyThatAgentType drives
+// `--robot-interrupt=S --type=cod` against a session holding a claude pane
+// and a codex pane. --type used to be accepted and ignored, so every agent
+// in the session was interrupted and re-tasked.
+func TestRobotInterruptTypeFilterInterruptsOnlyThatAgentType(t *testing.T) {
+	testutil.RequireTmuxThrottled(t)
+
+	run := newRobotInterruptProcessRunner(t)
+	claude := testutil.StartInterruptFixture(t, "clitype")
+	codex := claude.SplitPane(t)
+	claude.SetTitle(t, claude.Session+"__cc_1")
+	codex.SetTitle(t, claude.Session+"__cod_1")
+	marker := fmt.Sprintf("ntm-cli-type-%d", time.Now().UnixNano())
+
+	// No follow-up task: the recording panes are titled as agents but have
+	// no agent composer, so delivery readiness would refuse the paste.
+	payload, code := run("--robot-interrupt="+claude.Session, "--type=cod", "--force", "--no-wait")
+	if code != 0 || payload["success"] != true {
+		t.Fatalf("typed interrupt exit=%d payload=%v, want success", code, payload)
+	}
+	interrupted, _ := payload["interrupted"].([]any)
+	if len(interrupted) != 1 {
+		t.Fatalf("interrupted = %v, want exactly the codex pane", payload["interrupted"])
+	}
+	codex.WaitForEvents(t, marker, 1, 0)
+	claude.AssertQuiet(t, marker, 0, 0)
+}
+
+// newRobotInterruptProcessRunner returns a runner that executes each robot
+// invocation as a separate `ntm` process (the TestRobotProcessContractHelper
+// re-exec) sharing one isolated home and state DB, on this process's
+// isolated tmux server.
+func newRobotInterruptProcessRunner(t *testing.T) func(args ...string) (map[string]any, int) {
+	t.Helper()
+	tmpDir := t.TempDir()
+	homeDir := filepath.Join(tmpDir, "home")
+	configHome := filepath.Join(tmpDir, "xdg")
+	for _, dir := range []string{homeDir, configHome} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatalf("create isolated directory: %v", err)
+		}
+	}
+	return func(args ...string) (map[string]any, int) {
+		t.Helper()
+		rawArgs, err := json.Marshal(args)
+		if err != nil {
+			t.Fatalf("encode helper args: %v", err)
+		}
+		cmd := exec.Command(os.Args[0], "-test.run=^TestRobotProcessContractHelper$")
+		cmd.Dir = tmpDir
+		cmd.Env = envWithOverrides(os.Environ(),
+			"HOME="+homeDir,
+			"XDG_CONFIG_HOME="+configHome,
+			"NTM_NO_COLOR=1",
+			"NTM_CONFIG=",
+			"NTM_ROBOT_FORMAT=",
+			"NTM_OUTPUT_FORMAT=",
+			"TOON_DEFAULT_FORMAT=",
+			"NTM_ROBOT_VERBOSITY=",
+			// Keep the child on this process's isolated tmux server, where
+			// the fixture session lives.
+			"NTM_TEST_TMUX_ENV_OWNED=1",
+			"NTM_ROBOT_CONTRACT_ARGS="+string(rawArgs),
+		)
+		var stdout, stderr bytes.Buffer
+		cmd.Stdout = &stdout
+		cmd.Stderr = &stderr
+		exitCode := 0
+		if err := cmd.Run(); err != nil {
+			var exitErr *exec.ExitError
+			if !errors.As(err, &exitErr) {
+				t.Fatalf("ntm %v failed without an exit status: %v", args, err)
+			}
+			exitCode = exitErr.ExitCode()
+		}
+		var payload map[string]any
+		if err := json.Unmarshal(stdout.Bytes(), &payload); err != nil {
+			t.Fatalf("ntm %v stdout is not one JSON document: %v\nstdout=%q\nstderr=%q", args, err, stdout.String(), stderr.String())
+		}
+		return payload, exitCode
+	}
 }
