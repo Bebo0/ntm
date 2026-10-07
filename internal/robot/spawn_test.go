@@ -14,7 +14,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/Dicklesworthstone/ntm/internal/agent"
 	"github.com/Dicklesworthstone/ntm/internal/agentmail"
 	"github.com/Dicklesworthstone/ntm/internal/assignment"
 	"github.com/Dicklesworthstone/ntm/internal/bv"
@@ -485,21 +484,23 @@ func TestGetSpawnGrokAllowsIdleExistingPaneBeforeAddingMissingPane(t *testing.T)
 	}
 }
 
-func TestGetSpawnGrokRejectsUnverifiedTUISemantics(t *testing.T) {
+// Grok Build phase 2 (GH#251) implemented TUI readiness and composer-gated,
+// submission-verified prompt delivery, and the human `ntm spawn` already
+// allows waiting for and assigning work to Grok panes. Robot spawn used to
+// keep refusing both with NOT_IMPLEMENTED.
+func TestValidateSpawnRequestAcceptsGrokWaitAndAssignWork(t *testing.T) {
 	for _, opts := range []SpawnOptions{
 		{Session: "grok-wait", GrokCount: 1, WaitReady: true},
 		{Session: "grok-assign", GrokCount: 1, AssignWork: true, AssignStrategy: "top-n"},
 	} {
-		out, err := GetSpawn(t.Context(), opts, testSpawnConfig())
-		if err != nil {
-			t.Fatalf("GetSpawn returned transport error: %v", err)
+		if _, err := validateSpawnRequest(opts); err != nil {
+			t.Fatalf("validateSpawnRequest(%+v) = %v, want Grok accepted", opts, err)
 		}
-		if out.Success || out.ErrorCode != ErrCodeNotImplemented || !strings.Contains(strings.ToLower(out.Error), "grok") {
-			t.Fatalf("output=%+v, want Grok NOT_IMPLEMENTED", out)
-		}
-		if ExitCodeForResponse(out.RobotResponse) != 2 || out.Hint != agent.GrokPhaseOneCapabilityHint {
-			t.Fatalf("output=%+v, want unavailable exit 2 and Grok capability hint", out)
-		}
+	}
+	// The readiness wait recognizes Grok's idle TUI (bordered composer with
+	// the always-approve status line).
+	if !isAgentReady("╭──────╮\n│ ❯                 │\n╰──────╯\n grok-4 · always-approve", "grok") {
+		t.Fatal("Grok's idle TUI is not recognized as ready")
 	}
 }
 

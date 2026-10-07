@@ -34,11 +34,6 @@ import (
 	"github.com/Dicklesworthstone/ntm/internal/worksource"
 )
 
-var (
-	errGrokSpawnWaitUnavailable   = errors.New("--spawn-wait is not yet supported for Grok Build because its authenticated TUI readiness protocol has not been verified")
-	errGrokSpawnAssignUnavailable = errors.New("--spawn-assign-work is not yet supported for Grok Build because prompt delivery has not been verified")
-)
-
 // readyWordRe matches "ready" as a whole word. A bare substring check also hit
 // "already", so lines like "Already up to date." read as an agent coming up.
 var readyWordRe = regexp.MustCompile(`\bready\b`)
@@ -256,12 +251,6 @@ func validateSpawnRequest(opts SpawnOptions) (string, error) {
 	}
 	if total == 0 {
 		return "", errors.New("no agents specified (use cc, cod, gmi, agy, grok, omp, or oc counts)")
-	}
-	if opts.GrokCount > 0 && opts.WaitReady {
-		return "", errGrokSpawnWaitUnavailable
-	}
-	if opts.GrokCount > 0 && opts.AssignWork {
-		return "", errGrokSpawnAssignUnavailable
 	}
 	if !opts.AssignWork {
 		return "", nil
@@ -654,13 +643,7 @@ func GetSpawn(ctx context.Context, opts SpawnOptions, cfg *config.Config) (*Spaw
 	assignStrategy, validationErr := validateSpawnRequest(opts)
 	if validationErr != nil {
 		output.Error = validationErr.Error()
-		errorCode := ErrCodeInvalidFlag
-		hint := "Use non-negative agent counts and a supported assignment strategy"
-		if errors.Is(validationErr, errGrokSpawnWaitUnavailable) || errors.Is(validationErr, errGrokSpawnAssignUnavailable) {
-			errorCode = ErrCodeNotImplemented
-			hint = agentpkg.GrokPhaseOneCapabilityHint
-		}
-		output.RobotResponse = NewErrorResponse(validationErr, errorCode, hint)
+		output.RobotResponse = NewErrorResponse(validationErr, ErrCodeInvalidFlag, "Use non-negative agent counts and a supported assignment strategy")
 		return output, nil
 	}
 	// Advisory model did-you-mean: a requested model override that resolves

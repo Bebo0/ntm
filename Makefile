@@ -13,7 +13,11 @@ LDFLAGS := -ldflags "-s -w \
 	-X github.com/Dicklesworthstone/ntm/internal/cli.BuiltBy=$(BUILT_BY)"
 
 GO := go
-GOFLAGS := -trimpath
+# Release builds (.goreleaser.yaml, Dockerfile, release_preflight.sh) carry the
+# ensemble_experimental tag; without it `ntm ensemble <name> "<question>"`
+# only explains that it needs a rebuild. Local builds match the release.
+BUILD_TAGS := ensemble_experimental
+GOFLAGS := -trimpath -tags=$(BUILD_TAGS)
 
 # Output directory
 DIST := dist

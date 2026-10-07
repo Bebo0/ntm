@@ -131,7 +131,7 @@ which track the newest model) or set `[models] default_claude` in
 `~/.config/ntm/config.toml`; `default_claude = ""` restores the delegate
 behaviour.
 
-#### Grok Build (phase one)
+#### Grok Build
 
 NTM recognizes the official xAI Grok Build CLI as the canonical `grok` agent
 type. Install it using [xAI's current instructions](https://docs.x.ai/build/overview),
@@ -156,13 +156,13 @@ ntm --robot-spawn=research --spawn-grok=1
 ```
 
 NTM launches Grok Build with its official `--always-approve` automation flag.
-Phase one intentionally covers configuration, model and `--effort` arguments,
-launch, adopt, exact process discovery, status/count/schema/doctor projections,
-and topology-only saved-session restore. Authenticated fullscreen-TUI readiness,
-automated prompt delivery/assignment, interrupt-with-message, restart, and
-restore-time process relaunch are not yet claimed. Those operations fail closed
-before pane mutation; interact with an authenticated Grok pane directly. Robot
-`--spawn-wait` and `--spawn-assign-work` also fail closed for Grok panes.
+Phase 2 (GH#251) implements the interactive TUI protocol against live Grok Build
+captures: readiness and working-state detection, composer-gated and
+submission-verified prompt delivery (send, assign, `--robot-spawn --spawn-wait`
+and `--spawn-assign-work`), interrupt, restart, and restore-time relaunch. The
+one deliberate refusal is personas: the Grok Build CLI has no system-prompt
+flag or environment variable, so a persona on a Grok agent fails the launch
+instead of being silently dropped.
 
 #### Oh My Pi (`omp`)
 
@@ -1076,8 +1076,11 @@ docker run --rm -it ntm
 ```bash
 git clone https://github.com/Dicklesworthstone/ntm.git
 cd ntm
-go install ./cmd/ntm
+go install -tags ensemble_experimental ./cmd/ntm   # or: make build
 ```
+
+The `ensemble_experimental` tag matches the release binaries; without it
+`ntm ensemble <name> "<question>"` only reports that it needs a tagged build.
 
 ## Troubleshooting
 
@@ -1178,7 +1181,7 @@ of the normal product model.
 - NTM is intentionally `tmux`-centric.
 - Linux and macOS are the primary environments.
 - Some advanced workflows depend on external tools such as Agent Mail, `br`, `bv`, `cass`, or worktree helpers.
-- Grok Build support is currently phase one: launch/discovery/counting work, while authenticated TUI readiness, automated prompt delivery/assignment, interrupt-with-message, restart, and restore-time relaunch are deliberately unsupported and fail closed.
+- Grok Build agents cannot take personas (the Grok Build CLI has no system-prompt mechanism); a persona on a Grok agent fails the launch.
 - The system is local-first. It is not a hosted SaaS control plane.
 
 ## Development

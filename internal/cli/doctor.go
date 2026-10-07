@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -19,6 +20,7 @@ import (
 
 	"github.com/Dicklesworthstone/ntm/internal/config"
 	"github.com/Dicklesworthstone/ntm/internal/invariants"
+	"github.com/Dicklesworthstone/ntm/internal/policy"
 	"github.com/Dicklesworthstone/ntm/internal/state"
 	"github.com/Dicklesworthstone/ntm/internal/tmux"
 	"github.com/Dicklesworthstone/ntm/internal/tools"
@@ -270,6 +272,16 @@ type SafetyDefaults struct {
 	PrivacyDefaultEnabled     bool   `json:"privacy_default_enabled"`
 	EncryptionAtRestEnabled   bool   `json:"encryption_at_rest_enabled"`
 	PreflightDefaultStrict    bool   `json:"preflight_default_strict"`
+	// ClaudeAgentHooks names the PreToolUse hooks ntm-launched Claude agents
+	// carry through --settings (ntm-policy, dcg, rch); empty when none.
+	ClaudeAgentHooks []string `json:"claude_agent_hooks"`
+	// ClaudePolicyHookRegistered reports that `ntm safety install` registered
+	// the policy hook in ~/.claude/settings.json, which covers every Claude
+	// session (launches then skip their own copy).
+	ClaudePolicyHookRegistered bool `json:"claude_policy_hook_registered"`
+	// ClaudeAgentHooksWarning explains why Claude agents would run without
+	// the safety policy hook; empty when they are covered.
+	ClaudeAgentHooksWarning string `json:"claude_agent_hooks_warning,omitempty"`
 }
 
 // InvariantCheck represents a design invariant check result
@@ -857,14 +869,49 @@ func buildSafetyDefaults(cfg *config.Config) SafetyDefaults {
 
 	allowlistCount := len(cfg.Redaction.Allowlist)
 
-	return SafetyDefaults{
+	defaults := SafetyDefaults{
 		RedactionMode:             redactionMode,
 		RedactionAllowlistEnabled: allowlistCount > 0,
 		RedactionAllowlistCount:   allowlistCount,
 		PrivacyDefaultEnabled:     cfg.Privacy.Enabled,
 		EncryptionAtRestEnabled:   cfg.Encryption.Enabled,
 		PreflightDefaultStrict:    cfg.Preflight.Strict,
+		ClaudeAgentHooks:          []string{},
 	}
+	defaults.ClaudePolicyHookRegistered, defaults.ClaudeAgentHooksWarning = claudeAgentHookCoverage(cfg, &defaults.ClaudeAgentHooks)
+	return defaults
+}
+
+// claudeAgentHookCoverage reports whether the Claude agents ntm launches are
+// covered by the safety policy hook: through --settings on the launch command,
+// or through the hook `ntm safety install` registered for every Claude session.
+func claudeAgentHookCoverage(cfg *config.Config, hooks *[]string) (registered bool, warning string) {
+	if home, err := os.UserHomeDir(); err == nil {
+		script := policy.ClaudeHookScriptPath(home)
+		ok, regErr := policy.ClaudeHookRegistered(policy.ClaudeUserSettingsPath(home), script)
+		registered = regErr == nil && ok && fileExists(script)
+	}
+	launch := policy.ClaudeAgentLaunchSettings(cfg)
+	*hooks = append(*hooks, launch.Sources...)
+
+	template := cfg.Agents.Claude
+	if strings.TrimSpace(template) == "" {
+		template = config.DefaultAgentTemplates().Claude
+	}
+	rendered, err := config.GenerateAgentCommand(template, config.AgentTemplateVars{AgentType: "cc", ClaudeSettings: launch.Settings})
+	switch {
+	case err != nil:
+		return registered, fmt.Sprintf("the [agents] claude command does not render: %v", err)
+	case config.ClaudeHooksNotAppliedWarning(rendered, launch.Settings) != "":
+		*hooks = (*hooks)[:0]
+		if registered {
+			return registered, ""
+		}
+		return registered, "the [agents] claude command cannot carry --settings; add --settings {{shellQuote .ClaudeSettings}} to it"
+	case !registered && !slices.Contains(launch.Sources, "ntm-policy"):
+		return registered, "[safety] claude_policy_hook = false and no hook registered by `ntm safety install`"
+	}
+	return registered, ""
 }
 
 // toolAvailabilityFromChecks converts doctor's tool results into the evidence
@@ -1098,6 +1145,20 @@ func renderDoctorTUITo(w io.Writer, report *DoctorReport) error {
 		strictLabel = "strict=on"
 	}
 	fmt.Fprintf(w, "  %s Prompt preflight: %s\n", preflightStatus, mutedStyle.Render(strictLabel))
+
+	hooksStatus, hooksLabel := statusIcon("ok"), ""
+	switch {
+	case report.SafetyDefaults.ClaudeAgentHooksWarning != "":
+		hooksStatus, hooksLabel = statusIcon("warning"), "unprotected: "+report.SafetyDefaults.ClaudeAgentHooksWarning
+	case len(report.SafetyDefaults.ClaudeAgentHooks) > 0:
+		hooksLabel = strings.Join(report.SafetyDefaults.ClaudeAgentHooks, ", ") + " via --settings"
+		if report.SafetyDefaults.ClaudePolicyHookRegistered {
+			hooksLabel += "; policy hook registered in ~/.claude/settings.json"
+		}
+	default:
+		hooksLabel = "policy hook registered in ~/.claude/settings.json"
+	}
+	fmt.Fprintf(w, "  %s Claude agent hooks: %s\n", hooksStatus, mutedStyle.Render(hooksLabel))
 
 	// Invariants section
 	fmt.Fprintln(w, sectionStyle.Render("Design Invariants:"))

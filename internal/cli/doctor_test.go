@@ -3,11 +3,14 @@ package cli
 import (
 	"bytes"
 	"encoding/json"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/Dicklesworthstone/ntm/internal/config"
+	"github.com/Dicklesworthstone/ntm/internal/policy"
 )
 
 func TestBuildSafetyDefaults(t *testing.T) {
@@ -36,6 +39,57 @@ func TestBuildSafetyDefaults(t *testing.T) {
 	}
 	if !got.PreflightDefaultStrict {
 		t.Fatal("PreflightDefaultStrict=false, want true")
+	}
+}
+
+// Doctor says whether the Claude agents ntm launches are covered by the safety
+// policy hook, and why not when they are not.
+func TestBuildSafetyDefaultsClaudeAgentHookCoverage(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	newCfg := func() *config.Config {
+		cfg := config.Default()
+		cfg.Integrations.DCG.Enabled = false
+		cfg.Integrations.RCH.Enabled = false
+		return cfg
+	}
+
+	got := buildSafetyDefaults(newCfg())
+	if len(got.ClaudeAgentHooks) != 1 || got.ClaudeAgentHooks[0] != "ntm-policy" || got.ClaudeAgentHooksWarning != "" {
+		t.Fatalf("default config: hooks=%v warning=%q, want [ntm-policy] and no warning", got.ClaudeAgentHooks, got.ClaudeAgentHooksWarning)
+	}
+
+	piped := newCfg()
+	piped.Agents.Claude = "claude --verbose | tee /tmp/claude.log"
+	got = buildSafetyDefaults(piped)
+	if len(got.ClaudeAgentHooks) != 0 || !strings.Contains(got.ClaudeAgentHooksWarning, "cannot carry --settings") {
+		t.Fatalf("piped command: hooks=%v warning=%q, want none and a --settings warning", got.ClaudeAgentHooks, got.ClaudeAgentHooksWarning)
+	}
+
+	off := newCfg()
+	off.Safety.ClaudePolicyHook = false
+	got = buildSafetyDefaults(off)
+	if !strings.Contains(got.ClaudeAgentHooksWarning, "claude_policy_hook = false") {
+		t.Fatalf("policy hook off: warning=%q", got.ClaudeAgentHooksWarning)
+	}
+
+	// `ntm safety install` covers every Claude session, so the knob being off
+	// (or a command that cannot carry --settings) is no longer a gap.
+	script := policy.ClaudeHookScriptPath(home)
+	if err := os.MkdirAll(filepath.Dir(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(script, []byte(policy.ClaudeHookScript), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := policy.RegisterClaudeHook(policy.ClaudeUserSettingsPath(home), script); err != nil {
+		t.Fatal(err)
+	}
+	for name, cfg := range map[string]*config.Config{"knob off": off, "piped": piped} {
+		got = buildSafetyDefaults(cfg)
+		if !got.ClaudePolicyHookRegistered || got.ClaudeAgentHooksWarning != "" {
+			t.Fatalf("%s with registered hook: registered=%v warning=%q", name, got.ClaudePolicyHookRegistered, got.ClaudeAgentHooksWarning)
+		}
 	}
 }
 

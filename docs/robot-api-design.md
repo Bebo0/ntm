@@ -149,7 +149,7 @@ Only use tool prefix for options unique to that tool:
 | `--spawn-cc=N` | Claude agents to spawn | spawn-specific |
 | `--spawn-cod=N` | Codex agents to spawn | spawn-specific |
 | `--spawn-agy=N` | Antigravity agents to spawn | spawn-specific |
-| `--spawn-grok=N` | Grok Build agents to spawn (phase one: launch only) | spawn-specific |
+| `--spawn-grok=N` | Grok Build agents to spawn | spawn-specific |
 | `--spawn-omp=N[:model[:effort]]` | Oh My Pi (`omp`) agents to spawn; effort maps to `--thinking` | spawn-specific |
 | `--spawn-oc=N[:model]` | OpenCode (`oc`) agents to spawn; model is `provider/model` | spawn-specific |
 | `--spawn-gmi=N` | Gemini agents to spawn (legacy) | spawn-specific |
@@ -158,9 +158,10 @@ Only use tool prefix for options unique to that tool:
 | `--xf-mode=semantic` | XF search mode | xf-specific |
 | `--bulk-strategy=S` | Bulk assign strategy | bulk-assign-specific |
 
-Grok Build phase one does not automate the authenticated fullscreen TUI. Robot
-send, retasking interrupt, restart, readiness waits, assignment, and restore-time
-relaunch return `NOT_IMPLEMENTED` before mutating a Grok pane.
+Grok Build phase 2 (GH#251) automates the authenticated fullscreen TUI: robot
+send, retasking interrupt, restart, readiness waits (`--spawn-wait`), assignment
+(`--spawn-assign-work`), and restore-time relaunch work on Grok panes. Personas
+are refused because the Grok Build CLI has no system-prompt mechanism.
 
 ### 2.3 Aliases for Backward Compatibility
 
