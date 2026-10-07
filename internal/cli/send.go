@@ -528,6 +528,22 @@ func sendErrorIsNil(err error) bool {
 	return err == nil
 }
 
+// sendRoutingExclusions lists the panes smart routing must not pick: those a
+// broadcast with the same --tag and agent-type/variant targets would skip.
+func sendRoutingExclusions(panes []tmux.Pane, targets SendTargets, tags []string) []int {
+	var excluded []int
+	for _, p := range panes {
+		if len(tags) > 0 && !HasAnyTag(p.Tags, tags) {
+			excluded = append(excluded, p.Index)
+			continue
+		}
+		if len(targets) > 0 && !targets.MatchesPane(p) {
+			excluded = append(excluded, p.Index)
+		}
+	}
+	return excluded
+}
+
 func matchesLegacySendTypeFilter(pane tmux.Pane, targetCC, targetCod, targetGmi bool) bool {
 	switch tmux.AgentType(pane.Type).Canonical() {
 	case tmux.AgentClaude:
@@ -2021,15 +2037,17 @@ func runSendInternal(opts SendOptions) (err error) {
 			NoPersist: dryRun,
 		}
 
-		// Filter by agent type if specified (only when exactly one type is set)
-		if targetCC && !targetCod && !targetGmi && !targetAgy {
-			routeOpts.AgentType = "claude"
-		} else if targetCod && !targetCC && !targetGmi && !targetAgy {
-			routeOpts.AgentType = "codex"
-		} else if targetGmi && !targetCC && !targetCod && !targetAgy {
-			routeOpts.AgentType = "gemini"
-		} else if targetAgy && !targetCC && !targetCod && !targetGmi {
-			routeOpts.AgentType = "antigravity"
+		// Route among exactly the panes the same filters would broadcast to.
+		// Mapping only a single --cc/--cod/--gmi/--agy onto the router's
+		// type filter ignored variants (--cc=opus), tags, several types and
+		// every other agent type (--grok, --omp, --oc, plugins), so routing
+		// could pick an agent outside the requested set.
+		if len(targets) > 0 || len(tags) > 0 {
+			allPanes, err := tmux.GetPanesContext(ctx, session)
+			if err != nil {
+				return outputError(fmt.Errorf("smart routing: listing panes: %w", err))
+			}
+			routeOpts.ExcludePanes = sendRoutingExclusions(allPanes, targets, tags)
 		}
 
 		recommendation, err := robot.GetRouteRecommendation(routeOpts)

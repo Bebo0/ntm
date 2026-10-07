@@ -1967,6 +1967,91 @@ func TestSendRouteFlagImpliesSmartRouting(t *testing.T) {
 	}
 }
 
+// Smart routing picks among exactly the panes the same filters would
+// broadcast to. It used to honor only a single --cc/--cod/--gmi/--agy, so a
+// variant (--cc=sonnet), a tag, or another agent type (--grok) could be
+// routed to an agent outside the requested set.
+func TestSendSmartRoutingStaysWithinVariantTagAndTypeFilters(t *testing.T) {
+	testutil.RequireTmuxThrottled(t)
+	isolateSessionAgentStorage(t)
+
+	tmpDir := t.TempDir()
+	oldCfg := cfg
+	oldJSONOutput := jsonOutput
+	t.Cleanup(func() {
+		cfg = oldCfg
+		jsonOutput = oldJSONOutput
+	})
+	cfg = newTmuxIntegrationTestConfig(tmpDir)
+	cfg.Checkpoints.Enabled = false
+	jsonOutput = true
+
+	sessionName := fmt.Sprintf("ntm-test-send-route-filters-%d", time.Now().UnixNano())
+	if err := tmux.CreateSession(sessionName, tmpDir); err != nil {
+		t.Fatalf("CreateSession failed: %v", err)
+	}
+	t.Cleanup(func() { _ = tmux.KillSession(sessionName) })
+
+	newPane := func(title string) string {
+		t.Helper()
+		paneID, err := tmux.DefaultClient.Run("split-window", "-d", "-t", sessionName, "-c", tmpDir, "-P", "-F", "#{pane_id}", "cat")
+		if err != nil {
+			t.Fatalf("creating pane %s: %v", title, err)
+		}
+		paneID = strings.TrimSpace(paneID)
+		if err := tmux.SetPaneTitle(paneID, sessionName+"__"+title); err != nil {
+			t.Fatalf("titling pane %s: %v", title, err)
+		}
+		return paneID
+	}
+	// Created first, so every tie-break that ignores the filters lands here.
+	opus := newPane("cc_1_opus")
+	sonnet := newPane("cc_2_sonnet[backend]")
+	grok := newPane("grok_1")
+
+	route := func(filters ...string) SendDryRunResult {
+		t.Helper()
+		args := append([]string{sessionName}, filters...)
+		args = append(args, "--route=least-loaded", "--dry-run", "--no-cass-check", "--no-hooks", "route this prompt")
+		cmd := newSendCmd()
+		cmd.SilenceUsage = true
+		cmd.SilenceErrors = true
+		cmd.SetArgs(args)
+		oldStdout := os.Stdout
+		r, w, pipeErr := os.Pipe()
+		if pipeErr != nil {
+			t.Fatalf("creating stdout pipe: %v", pipeErr)
+		}
+		os.Stdout = w
+		sendErr := cmd.Execute()
+		_ = w.Close()
+		os.Stdout = oldStdout
+		output, _ := io.ReadAll(r)
+		_ = r.Close()
+		if sendErr != nil {
+			t.Fatalf("send %v failed: %v (stdout=%q)", filters, sendErr, strings.TrimSpace(string(output)))
+		}
+		var result SendDryRunResult
+		if err := json.Unmarshal(output, &result); err != nil {
+			t.Fatalf("parsing send %v dry-run JSON: %v (stdout=%q)", filters, err, strings.TrimSpace(string(output)))
+		}
+		if result.Total != 1 || len(result.WouldSend) != 1 || result.RoutedTo == nil {
+			t.Fatalf("send %v = %+v, want exactly one routed pane", filters, result)
+		}
+		return result
+	}
+
+	if got := route("--cc=sonnet").WouldSend[0].PaneID; got != sonnet {
+		t.Fatalf("--cc=sonnet routed to %s, want the sonnet pane %s (opus is %s)", got, sonnet, opus)
+	}
+	if got := route("--grok").WouldSend[0].PaneID; got != grok {
+		t.Fatalf("--grok routed to %s, want the grok pane %s", got, grok)
+	}
+	if got := route("--tag=backend").WouldSend[0].PaneID; got != sonnet {
+		t.Fatalf("--tag=backend routed to %s, want the tagged pane %s", got, sonnet)
+	}
+}
+
 func TestSendSmartRouteIsDisabledWhenPanesSpecified(t *testing.T) {
 	testutil.RequireTmuxThrottled(t)
 
