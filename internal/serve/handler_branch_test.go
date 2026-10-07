@@ -788,6 +788,7 @@ func TestHandleSession_Success(t *testing.T) {
 // handleSession — sub-resource routing (agents)
 func TestHandleSession_SubResourceAgents(t *testing.T) {
 	srv, store := setupTestServer(t)
+	installFakeListPanesTmux(t, fakeTmuxNoServer)
 	createTestSessionForServe(t, store, "sub-agents")
 
 	rec := httptest.NewRecorder()
@@ -1931,23 +1932,6 @@ func TestHandleListAgentsV1_EmptySession_Branch(t *testing.T) {
 
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("status = %d, want 400", rec.Code)
-	}
-}
-
-// =============================================================================
-// handleSessionAgentsV1 — nil stateStore
-// =============================================================================
-
-func TestHandleSessionAgentsV1_NilStore_Branch(t *testing.T) {
-	srv := New(Config{})
-
-	rec := httptest.NewRecorder()
-	req := httptest.NewRequest(http.MethodGet, "/api/v1/sessions/test/agents-v1", nil)
-
-	srv.handleSessionAgentsV1(rec, req, "test")
-
-	if rec.Code != http.StatusServiceUnavailable {
-		t.Fatalf("status = %d, want 503", rec.Code)
 	}
 }
 
@@ -7775,19 +7759,19 @@ func TestWSClient_SendAck_FullBuffer(t *testing.T) {
 	c.sendAck("req-full", map[string]interface{}{"dropped": true})
 }
 
-// --- handleSessionAgents exercises stateStore success path ---
+// --- handleSessionAgents: a session neither tmux nor the store knows ---
 
-func TestHandleSessionAgents_Success(t *testing.T) {
+func TestHandleSessionAgents_UnknownSessionNotFound(t *testing.T) {
 	s, _ := setupTestServer(t)
+	installFakeListPanesTmux(t, fakeTmuxNoSession)
 
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest("GET", "/api/sessions/test-session/agents", nil)
 
 	s.handleSessionAgents(rec, req, "test-session")
 
-	// stateStore is set from setupTestServer, so should succeed
-	if rec.Code != http.StatusOK {
-		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("expected 404, got %d: %s", rec.Code, rec.Body.String())
 	}
 }
 

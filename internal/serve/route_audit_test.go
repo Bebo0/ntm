@@ -83,7 +83,6 @@ func TestRouteAudit_NoEmptyGetHandlers(t *testing.T) {
 		"/api/sessions/{id}/events":    "requires valid session ID, SSE stream",
 		"/api/v1/sessions/{id}":        "requires valid session ID in state store",
 		"/api/v1/sessions/{id}/status": "requires valid session ID",
-		"/api/v1/sessions/{id}/agents": "requires valid session ID",
 		"/api/v1/sessions/{id}/events": "requires valid session ID, SSE stream",
 		"/api/v1/attention/events":     "requires attention feed data",
 		"/api/v1/attention/digest":     "requires attention feed data",

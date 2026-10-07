@@ -555,22 +555,6 @@ func TestHandleSessionV1EmptyID(t *testing.T) {
 	}
 }
 
-func TestHandleSessionAgentsV1(t *testing.T) {
-	srv, _ := setupTestServer(t)
-	req := httptest.NewRequest(http.MethodGet, "/api/v1/sessions/test/agents", nil)
-	rec := httptest.NewRecorder()
-
-	srv.handleSessionAgentsV1(rec, req, "test-session")
-	if rec.Code != http.StatusOK {
-		t.Fatalf("status = %d, want 200", rec.Code)
-	}
-	var resp map[string]interface{}
-	json.NewDecoder(rec.Body).Decode(&resp)
-	if resp["count"] == nil {
-		t.Error("expected count field")
-	}
-}
-
 func TestHandleSessionEventsV1(t *testing.T) {
 	srv, _ := setupTestServer(t)
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/sessions/test/events", nil)

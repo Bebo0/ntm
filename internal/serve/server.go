@@ -112,7 +112,8 @@ type Server struct {
 	// listLiveSessions lists the tmux sessions that are running right now.
 	// Nil in production (tmux.ListSessionsContext); tests inject fixtures.
 	listLiveSessions func(context.Context) ([]tmux.Session, error)
-	// liveSessionsTimeout bounds each live tmux session listing; zero means
+	// liveSessionsTimeout bounds each live tmux session or pane listing made
+	// by the sessions and agents endpoints; zero means
 	// defaultLiveSessionsTimeout. Tests shorten it.
 	liveSessionsTimeout time.Duration
 	// policyWriteFile is optional test-only fault injection for policy updates.
@@ -1328,9 +1329,10 @@ func (s *Server) buildRouter() chi.Router {
 		// Sessions - read endpoints
 		r.With(s.RequirePermission(PermReadSessions)).Get("/sessions", s.handleSessionsV1)
 		r.With(s.RequirePermission(PermReadSessions)).Get("/sessions/{id}", s.handleSessionV1)
-		r.With(s.RequirePermission(PermReadAgents)).Get("/sessions/{id}/agents", func(w http.ResponseWriter, req *http.Request) {
-			s.handleSessionAgentsV1(w, req, chi.URLParam(req, "id"))
-		})
+		// GET /sessions/{id}/agents is served by the Agents API group below.
+		// Do not register it here as well: chi gives "{id}" and "{sessionId}"
+		// the same tree node, and mounting that group replaces every method
+		// on it, so a route registered here never runs.
 		r.With(s.RequirePermission(PermReadEvents)).Get("/sessions/{id}/events", func(w http.ResponseWriter, req *http.Request) {
 			s.handleSessionEventsV1(w, req, chi.URLParam(req, "id"))
 		})
@@ -2305,25 +2307,24 @@ func (s *Server) handleSession(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// handleSessionAgents handles /api/sessions/{id}/agents.
+// handleSessionAgents handles /api/sessions/{id}/agents. It reports the same
+// agents as GET /api/v1/sessions/{id}/agents in the legacy envelope.
 func (s *Server) handleSessionAgents(w http.ResponseWriter, r *http.Request, sessionID string) {
-	if s.stateStore == nil {
-		writeError(w, http.StatusServiceUnavailable, "state store not available")
+	if err := tmux.ValidateSessionName(sessionID); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid session ID: "+err.Error())
 		return
 	}
 
-	agents, err := s.stateStore.ListAgents(sessionID)
+	roster, err := s.listSessionAgents(r.Context(), sessionID)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
+		status, _, message := sessionAgentsFailure(err)
+		writeError(w, status, message)
 		return
 	}
 
-	writeJSON(w, http.StatusOK, map[string]interface{}{
-		"success":    true,
-		"session_id": sessionID,
-		"agents":     agents,
-		"count":      len(agents),
-	})
+	body := roster.payload(sessionID)
+	body["success"] = true
+	writeJSON(w, http.StatusOK, body)
 }
 
 // handleSessionEvents handles /api/sessions/{id}/events.
@@ -3203,11 +3204,20 @@ func (s *Server) handleSessionsV1(w http.ResponseWriter, r *http.Request) {
 	}, reqID)
 }
 
-// defaultLiveSessionsTimeout bounds the tmux query behind the sessions
-// endpoints. The web UI polls them every few seconds; without a bound, a wedged
-// tmux server would hang every poll (and pile up tmux processes) instead of
-// degrading to the stored rows.
+// defaultLiveSessionsTimeout bounds the tmux queries behind the sessions and
+// agents endpoints. The web UI polls them every few seconds; without a bound, a
+// wedged tmux server would hang every poll (and pile up tmux processes) instead
+// of degrading to the stored rows.
 const defaultLiveSessionsTimeout = 5 * time.Second
+
+// liveTmuxTimeout is the bound applied to each live tmux query a read endpoint
+// makes.
+func (s *Server) liveTmuxTimeout() time.Duration {
+	if s.liveSessionsTimeout > 0 {
+		return s.liveSessionsTimeout
+	}
+	return defaultLiveSessionsTimeout
+}
 
 // liveTmuxSessions returns the running tmux sessions sorted by name.
 func (s *Server) liveTmuxSessions(ctx context.Context) ([]tmux.Session, error) {
@@ -3215,11 +3225,7 @@ func (s *Server) liveTmuxSessions(ctx context.Context) ([]tmux.Session, error) {
 	if s.listLiveSessions != nil {
 		list = s.listLiveSessions
 	}
-	timeout := s.liveSessionsTimeout
-	if timeout <= 0 {
-		timeout = defaultLiveSessionsTimeout
-	}
-	ctx, cancel := context.WithTimeout(ctx, timeout)
+	ctx, cancel := context.WithTimeout(ctx, s.liveTmuxTimeout())
 	defer cancel()
 	live, err := list(ctx)
 	if err != nil {
@@ -3290,33 +3296,6 @@ func (s *Server) handleSessionV1(w http.ResponseWriter, r *http.Request) {
 
 	writeSuccessResponse(w, http.StatusOK, map[string]interface{}{
 		"session": session,
-	}, reqID)
-}
-
-// handleSessionAgentsV1 handles GET /api/v1/sessions/{id}/agents.
-func (s *Server) handleSessionAgentsV1(w http.ResponseWriter, r *http.Request, sessionID string) {
-	reqID := requestIDFromContext(r.Context())
-
-	if s.stateStore == nil {
-		writeErrorResponse(w, http.StatusServiceUnavailable, ErrCodeServiceUnavail, "state store not available", nil, reqID)
-		return
-	}
-
-	agents, err := s.stateStore.ListAgents(sessionID)
-	if err != nil {
-		writeErrorResponse(w, http.StatusInternalServerError, ErrCodeInternalError, err.Error(), nil, reqID)
-		return
-	}
-
-	// Ensure agents is never null
-	if agents == nil {
-		agents = []state.Agent{}
-	}
-
-	writeSuccessResponse(w, http.StatusOK, map[string]interface{}{
-		"session_id": sessionID,
-		"agents":     agents,
-		"count":      len(agents),
 	}, reqID)
 }
 
@@ -4202,10 +4181,134 @@ func (s *Server) handleListAgentsV1(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	panes, err := tmux.GetPanesContext(r.Context(), sessionID)
+	roster, err := s.listSessionAgents(r.Context(), sessionID)
 	if err != nil {
-		writeErrorResponse(w, http.StatusInternalServerError, ErrCodeInternalError, err.Error(), nil, reqID)
+		status, code, message := sessionAgentsFailure(err)
+		writeErrorResponse(w, status, code, message, nil, reqID)
 		return
+	}
+	writeSuccessResponse(w, http.StatusOK, roster.payload(sessionID), reqID)
+}
+
+// sessionAgentRoster is what the agents endpoints report for one session.
+type sessionAgentRoster struct {
+	agents   []map[string]interface{}
+	warnings []string
+}
+
+// payload is the roster's response body, without the envelope fields.
+func (roster sessionAgentRoster) payload(sessionID string) map[string]interface{} {
+	agents := roster.agents
+	if agents == nil {
+		agents = []map[string]interface{}{}
+	}
+	body := map[string]interface{}{
+		"session_id": sessionID,
+		"agents":     agents,
+		"count":      len(agents),
+	}
+	if len(roster.warnings) > 0 {
+		body["warnings"] = roster.warnings
+	}
+	return body
+}
+
+var (
+	// errSessionAgentsNotFound reports a session that tmux is not running and
+	// the state store does not record.
+	errSessionAgentsNotFound = errors.New("session not found")
+	// errSessionAgentsLiveListing wraps a failed live pane listing that no
+	// projection row could stand in for.
+	errSessionAgentsLiveListing = errors.New("listing live tmux panes failed")
+)
+
+// sessionAgentsFailure maps a listSessionAgents error to an HTTP status, an
+// error code and a message.
+func sessionAgentsFailure(err error) (int, string, string) {
+	switch {
+	case errors.Is(err, errSessionAgentsNotFound):
+		return http.StatusNotFound, ErrCodeNotFound, "session not found"
+	case errors.Is(err, errSessionAgentsLiveListing) && errors.Is(err, context.DeadlineExceeded):
+		// The bounded tmux listing ran out of time: tmux, not the server,
+		// failed.
+		return http.StatusGatewayTimeout, ErrCodeTimeout, err.Error()
+	case errors.Is(err, errSessionAgentsLiveListing):
+		return http.StatusServiceUnavailable, ErrCodeServiceUnavail, err.Error()
+	default:
+		return http.StatusInternalServerError, ErrCodeInternalError, err.Error()
+	}
+}
+
+// listSessionAgents reports the agents of one session for
+// GET /api/v1/sessions/{id}/agents and the legacy /api/sessions/{id}/agents.
+// The legacy `agents` table those endpoints used to read (Store.ListAgents)
+// has no production writer, so it only ever answered "no agents".
+//
+// Live tmux panes are the roster: they say which agents exist right now. The
+// runtime projection that `ntm serve` refreshes every few seconds
+// (robot.RefreshNormalizedProjection) adds what a pane listing cannot observe:
+// the agent's state, when it last produced output, its health and its current
+// bead. A live pane with no fresh projection row (right after start, or with
+// no state store) is still reported, just without that state.
+//
+// When tmux answers that the session does not exist, the session has no
+// agents, whatever an unexpired projection row still says: a session the
+// state store records is reported empty, any other is
+// errSessionAgentsNotFound. When tmux fails in any other way (a wedged server
+// past the bound, an open circuit breaker), the fresh projection rows are
+// reported on their own with a warning; with none, the failure is returned.
+func (s *Server) listSessionAgents(ctx context.Context, sessionID string) (sessionAgentRoster, error) {
+	var roster sessionAgentRoster
+	var projected []state.RuntimeAgent
+	if s.stateStore != nil {
+		rows, err := s.stateStore.GetRuntimeAgentsBySession(sessionID)
+		if err != nil {
+			slog.Warn("reading runtime agent projection failed", "session", sessionID, "error", err)
+			roster.warnings = append(roster.warnings, "runtime agent projection unavailable: "+err.Error())
+		} else {
+			projected = rows
+		}
+	}
+
+	paneCtx, cancel := context.WithTimeout(ctx, s.liveTmuxTimeout())
+	panes, err := tmux.GetPanesContext(paneCtx, sessionID)
+	cancel()
+	if err == nil {
+		roster.agents = s.liveAgentRecords(sessionID, panes, projected)
+		return roster, nil
+	}
+
+	switch tmux.ClassifyCommandError(err).Kind {
+	case tmux.CommandErrorSessionNotFound, tmux.CommandErrorNoServer:
+		if s.stateStore != nil {
+			stored, storeErr := s.stateStore.GetSession(sessionID)
+			if storeErr != nil {
+				return sessionAgentRoster{}, storeErr
+			}
+			if stored != nil {
+				roster.agents = []map[string]interface{}{}
+				return roster, nil
+			}
+		}
+		return sessionAgentRoster{}, errSessionAgentsNotFound
+	}
+
+	agents := projectedAgentRecords(sessionID, projected)
+	if len(agents) == 0 {
+		return sessionAgentRoster{}, fmt.Errorf("%w: %w", errSessionAgentsLiveListing, err)
+	}
+	slog.Warn("listing live tmux panes failed; reporting projected agents", "session", sessionID, "error", err)
+	roster.agents = agents
+	roster.warnings = append(roster.warnings, fmt.Sprintf("%v (%v); agents are reported from the runtime projection", errSessionAgentsLiveListing, err))
+	return roster, nil
+}
+
+// liveAgentRecords turns the agent panes of a running session into agent
+// records, adding each pane's fresh projection row when there is one.
+func (s *Server) liveAgentRecords(sessionID string, panes []tmux.Pane, projected []state.RuntimeAgent) []map[string]interface{} {
+	byPane := make(map[string]state.RuntimeAgent, len(projected))
+	for _, row := range projected {
+		byPane[row.Pane] = row
 	}
 
 	// Agent Mail names ("GreenLake") are recorded per pane. Only trust a
@@ -4213,15 +4316,16 @@ func (s *Server) handleListAgentsV1(w http.ResponseWriter, r *http.Request) {
 	// after a server restart, and a stale registry must not rename a new pane.
 	registry, err := agentmail.LoadBestSessionAgentRegistry(sessionID, s.projectDirSnapshot())
 	if err != nil {
-		slog.Debug("loading agent registry failed", "request_id", reqID, "session", sessionID, "error", err)
+		slog.Debug("loading agent registry failed", "session", sessionID, "error", err)
 		registry = nil
 	}
 
-	// Filter to only include recognized agent panes (not user/unknown)
 	agents := make([]map[string]interface{}, 0, len(panes))
 	for _, p := range panes {
-		agentType := string(p.Type)
-		if agentType == "" || agentType == "unknown" || agentType == "user" {
+		// User shells, unrecognized panes and tagged service panes (cm,
+		// cass, ...) are not agents; the projection leaves them out too.
+		agentType := servedAgentType(string(p.Type))
+		if agentType == "" || p.IsServicePane() {
 			continue
 		}
 		name := p.Title
@@ -4233,9 +4337,9 @@ func (s *Server) handleListAgentsV1(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		agent := map[string]interface{}{
-			// Generic agent-record fields shared with the stored agent schema
-			// (id, session_id, name, type, tmux_pane_id) so clients such as
-			// the web dashboard can render live panes and stored rows alike.
+			// Agent-record fields (id, session_id, name, type, tmux_pane_id,
+			// status, last_seen, current_task_id) that clients such as the
+			// web dashboard's Agents page render.
 			"id":           p.ID,
 			"session_id":   sessionID,
 			"name":         name,
@@ -4254,19 +4358,97 @@ func (s *Server) handleListAgentsV1(w http.ResponseWriter, r *http.Request) {
 		if agentMailName != "" {
 			agent["agent_mail_name"] = agentMailName
 		}
+		if row, ok := byPane[p.ID]; ok {
+			addProjectedAgentState(agent, row)
+		}
 		if p.Dead {
-			// tmux reports the pane's process has exited: that is known,
-			// unlike working/idle, which this endpoint cannot observe.
+			// tmux reports the pane's process has exited, which outranks
+			// whatever state the projection last classified.
 			agent["status"] = "dead"
 		}
 		agents = append(agents, agent)
 	}
+	return agents
+}
 
-	writeSuccessResponse(w, http.StatusOK, map[string]interface{}{
-		"session_id": sessionID,
-		"agents":     agents,
-		"count":      len(agents),
-	}, reqID)
+// projectedAgentRecords turns fresh projection rows into agent records, for
+// when tmux cannot be listed. The projection records no pane index or title.
+// Its Agent Mail name is reported as is: without a live pane PID there is
+// nothing to verify it against, and it is the name --robot-status reports.
+func projectedAgentRecords(sessionID string, rows []state.RuntimeAgent) []map[string]interface{} {
+	agents := make([]map[string]interface{}, 0, len(rows))
+	for _, row := range rows {
+		agentType := servedAgentType(row.AgentType)
+		if agentType == "" || row.Pane == "" {
+			continue
+		}
+		name := row.Pane
+		if row.AgentMailName != "" {
+			name = row.AgentMailName
+		}
+		agent := map[string]interface{}{
+			"id":           row.Pane,
+			"session_id":   sessionID,
+			"name":         name,
+			"type":         agentType,
+			"tmux_pane_id": row.Pane,
+			"pane_id":      row.Pane,
+			"agent_type":   agentType,
+		}
+		if row.Variant != "" {
+			agent["variant"] = row.Variant
+		}
+		if row.AgentMailName != "" {
+			agent["agent_mail_name"] = row.AgentMailName
+		}
+		addProjectedAgentState(agent, row)
+		agents = append(agents, agent)
+	}
+	return agents
+}
+
+// addProjectedAgentState copies what the runtime projection observed about an
+// agent into its record: its state (idle, active, busy, error, compacting or
+// unknown, the --robot-status vocabulary), when it last produced output,
+// health, current bead, unread mail, and when the projection collected it.
+func addProjectedAgentState(agent map[string]interface{}, row state.RuntimeAgent) {
+	if row.State != "" {
+		agent["status"] = string(row.State)
+	}
+	if row.StateReason != "" {
+		agent["state_reason"] = row.StateReason
+	}
+	if row.LastOutputAt != nil && !row.LastOutputAt.IsZero() {
+		agent["last_seen"] = row.LastOutputAt.UTC()
+	}
+	if row.HealthStatus != "" {
+		agent["health_status"] = string(row.HealthStatus)
+	}
+	if row.HealthReason != "" {
+		agent["health_reason"] = row.HealthReason
+	}
+	if row.CurrentBead != "" {
+		agent["current_task_id"] = row.CurrentBead
+	}
+	if row.PendingMail > 0 {
+		agent["pending_mail"] = row.PendingMail
+	}
+	if !row.CollectedAt.IsZero() {
+		agent["projected_at"] = row.CollectedAt.UTC()
+	}
+}
+
+// servedAgentType returns the short agent type ("cc", "cod", ...) the agents
+// endpoints report, or "" for a pane that is not an agent. Live panes carry
+// the short form already; projection rows carry the robot form ("claude",
+// "codex").
+func servedAgentType(raw string) string {
+	switch canonical := tmux.AgentType(raw).Canonical(); canonical {
+	case "", tmux.AgentUser, tmux.AgentUnknown:
+		return ""
+	default:
+		return string(canonical)
+	}
 }
 
 // AgentSpawnRequest is the request body for POST /sessions/{id}/agents/spawn.

@@ -317,6 +317,7 @@ internal/state/store.go:Store.GetReservation	bd-ld4j2	reachable only through RTA
 internal/state/store.go:Store.GetTask	bd-ld4j2	reachable only through RTA's reflection rule at the 2026-10-05 baseline; wire it (surface + behavioral test) or delete it
 internal/state/store.go:Store.GetTaskByCorrelation	bd-ld4j2	reachable only through RTA's reflection rule at the 2026-10-05 baseline; wire it (surface + behavioral test) or delete it
 internal/state/store.go:Store.GetToolHealth	bd-ld4j2	reachable only through RTA's reflection rule at the 2026-10-05 baseline; wire it (surface + behavioral test) or delete it
+internal/state/store.go:Store.ListAgents	bd-ld4j2	legacy agents table has no production writer (CreateAgent/UpdateAgent above are dead), so the serve agents endpoints stopped reading it on 2026-10-07 and use live tmux panes + the runtime projection; delete with CreateAgent/GetAgent/GetAgentByName/UpdateAgent pending operator approval
 internal/state/store.go:Store.ListEvents	bd-ld4j2	reachable only through RTA's reflection rule at the 2026-10-05 baseline; wire it (surface + behavioral test) or delete it
 internal/state/store.go:Store.ListExpiredPendingApprovals	bd-ld4j2	reachable only through RTA's reflection rule at the 2026-10-05 baseline; wire it (surface + behavioral test) or delete it
 internal/state/store.go:Store.ListReservations	bd-ld4j2	reachable only through RTA's reflection rule at the 2026-10-05 baseline; wire it (surface + behavioral test) or delete it

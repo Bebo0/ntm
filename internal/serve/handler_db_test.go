@@ -33,8 +33,10 @@ func createTestSessionForServe(t *testing.T, store *state.Store, id string) {
 // handleSessionAgents tests
 // =============================================================================
 
+// A stored session tmux is not running has no agents to report.
 func TestHandleSessionAgents_Empty(t *testing.T) {
 	srv, store := setupTestServer(t)
+	installFakeListPanesTmux(t, fakeTmuxNoServer)
 	createTestSessionForServe(t, store, "test-session")
 
 	rr := httptest.NewRecorder()
@@ -63,68 +65,53 @@ func TestHandleSessionAgents_Empty(t *testing.T) {
 	}
 }
 
-func TestHandleSessionAgents_WithAgents(t *testing.T) {
-	srv, store := setupTestServer(t)
-	createTestSessionForServe(t, store, "agent-session")
-
-	// Insert agents directly
-	db := store.DB()
-	_, err := db.Exec(`INSERT INTO agents (id, session_id, name, type, status) VALUES (?, ?, ?, ?, ?)`,
-		"a1", "agent-session", "Agent1", "cc", "working")
-	if err != nil {
-		t.Fatalf("insert agent: %v", err)
-	}
-	_, err = db.Exec(`INSERT INTO agents (id, session_id, name, type, status) VALUES (?, ?, ?, ?, ?)`,
-		"a2", "agent-session", "Agent2", "cod", "idle")
-	if err != nil {
-		t.Fatalf("insert agent: %v", err)
-	}
-
-	rr := httptest.NewRecorder()
-	req := httptest.NewRequest(http.MethodGet, "/api/sessions/agent-session/agents", nil)
-
-	srv.handleSessionAgents(rr, req, "agent-session")
-
-	if rr.Code != http.StatusOK {
-		t.Fatalf("status = %d, want %d", rr.Code, http.StatusOK)
-	}
-
-	var resp map[string]interface{}
-	if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
-		t.Fatalf("unmarshal: %v", err)
-	}
-
-	count, _ := resp["count"].(float64)
-	if count != 2 {
-		t.Errorf("count = %v, want 2", count)
-	}
-}
-
+// Without a state store nothing records the session, so a session tmux is not
+// running is not found (the store is no longer required to list agents).
 func TestHandleSessionAgents_NilStore(t *testing.T) {
-	srv := New(Config{})
+	srv, _ := setupTestServer(t)
+	srv.stateStore = nil
+	installFakeListPanesTmux(t, fakeTmuxNoServer)
 
 	rr := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet, "/api/sessions/foo/agents", nil)
 
 	srv.handleSessionAgents(rr, req, "foo")
 
-	if rr.Code != http.StatusServiceUnavailable {
-		t.Fatalf("status = %d, want %d", rr.Code, http.StatusServiceUnavailable)
+	if rr.Code != http.StatusNotFound {
+		t.Fatalf("status = %d, want %d", rr.Code, http.StatusNotFound)
+	}
+}
+
+func TestHandleSessionAgents_InvalidSessionName(t *testing.T) {
+	srv, _ := setupTestServer(t)
+
+	rr := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/api/sessions/bad:name/agents", nil)
+
+	srv.handleSessionAgents(rr, req, "bad:name")
+
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want %d", rr.Code, http.StatusBadRequest)
 	}
 }
 
 // =============================================================================
-// handleSessionAgentsV1 tests (v1 endpoint variant)
+// handleListAgentsV1 store-backed tests
 // =============================================================================
 
-func TestHandleSessionAgentsV1_Empty(t *testing.T) {
+// A stored session tmux is not running lists an empty agents array, never null.
+func TestHandleListAgentsV1_StoredSessionNotRunning(t *testing.T) {
 	srv, store := setupTestServer(t)
+	installFakeListPanesTmux(t, fakeTmuxNoServer)
 	createTestSessionForServe(t, store, "v1-session")
 
 	rr := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/sessions/v1-session/agents", nil)
+	rctx := chi.NewRouteContext()
+	rctx.URLParams.Add("sessionId", "v1-session")
+	req = req.WithContext(context.WithValue(req.Context(), chi.RouteCtxKey, rctx))
 
-	srv.handleSessionAgentsV1(rr, req, "v1-session")
+	srv.handleListAgentsV1(rr, req)
 
 	if rr.Code != http.StatusOK {
 		t.Fatalf("status = %d, want %d", rr.Code, http.StatusOK)
@@ -145,19 +132,6 @@ func TestHandleSessionAgentsV1_Empty(t *testing.T) {
 	}
 	if len(agents) != 0 {
 		t.Errorf("agents len = %d, want 0", len(agents))
-	}
-}
-
-func TestHandleSessionAgentsV1_NilStore(t *testing.T) {
-	srv := New(Config{})
-
-	rr := httptest.NewRecorder()
-	req := httptest.NewRequest(http.MethodGet, "/api/v1/sessions/foo/agents", nil)
-
-	srv.handleSessionAgentsV1(rr, req, "foo")
-
-	if rr.Code != http.StatusServiceUnavailable {
-		t.Fatalf("status = %d, want %d", rr.Code, http.StatusServiceUnavailable)
 	}
 }
 
