@@ -237,7 +237,7 @@ These surfaces extend the core operator loop with domain-specific capabilities.
 
 | Surface | Job |
 |---------|-----|
-| `--robot-bead-list` | List beads with status/priority filters |
+| `--robot-beads-list` | List beads with status/priority filters |
 | `--robot-bead-show` | Show single bead details |
 | `--robot-bead-claim` | Mark bead as in_progress |
 | `--robot-bead-close` | Close completed bead |
@@ -285,7 +285,7 @@ These surfaces extend the core operator loop with domain-specific capabilities.
 | Surface | Job |
 |---------|-----|
 | `--robot-pipeline-run` | Execute named workflow |
-| `--robot-pipeline-status` | Get workflow status |
+| `--robot-pipeline` | Get workflow status |
 | `--robot-pipeline-list` | List available workflows |
 | `--robot-pipeline-cancel` | Cancel running workflow |
 

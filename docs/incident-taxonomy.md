@@ -177,7 +177,7 @@ When attention event arrives:
 - **snapshot**: Full incidents array
 - **status**: Incident counts only
 - **digest/attention**: New incidents, escalated incidents, long-running incidents
-- **--robot-incident=ID**: Full incident drill-down
+- **--robot-inspect-incident=ID**: Full incident drill-down
 
 ---
 

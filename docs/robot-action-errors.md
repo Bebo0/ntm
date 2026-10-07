@@ -262,7 +262,7 @@ ERROR
 ├─ CURSOR_* ─────────────────────────────────────────────┐
 │   └─ Resync: ntm --robot-snapshot                      │
 ├─ ENTITY_NOT_FOUND ─────────────────────────────────────┤
-│   └─ List: ntm --robot-status or --robot-bead-list     │
+│   └─ List: ntm --robot-status or --robot-beads-list    │
 ├─ ENTITY_STALE ─────────────────────────────────────────┤
 │   └─ Use last-known OR Refresh: same command           │
 ├─ ENTITY_BUSY ──────────────────────────────────────────┤

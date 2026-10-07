@@ -398,7 +398,7 @@ Example for `SessionInfo`:
   "beads": {
     "compressed": true,
     "compression_reason": "summary_only",
-    "drill_down": "ntm --robot-bead-list"
+    "drill_down": "ntm --robot-beads-list"
   }
 }
 ```

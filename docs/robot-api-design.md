@@ -50,19 +50,18 @@ Commands that operate globally (no session context) are bool flags:
 
 ### 1.3 Tool Bridges
 
-External tool integrations follow `--robot-<tool>-<action>` pattern with **separate modifier flags**:
+External tool integrations follow the `--robot-<tool>-<action>` pattern. Search
+bridges take the query as the flag's value; shared modifiers stay unprefixed:
 
 ```bash
-# CORRECT: Bool flag + separate modifiers
-ntm --robot-jfp-search --query="debugging" --limit=10
-ntm --robot-cass-search --query="auth error" --since=7d
-ntm --robot-xf-search --query="rust async" --limit=20
+ntm --robot-cass-search="auth error" --since=7d --limit=20
+ntm --robot-jfp-search="debugging"
+ntm --robot-xf-search="rust async" --xf-limit=20
 ntm --robot-dcg-check --command="rm -rf /data"
-ntm --robot-mail-check --project=myproj --agent=cc_1
+ntm --robot-mail-check --mail-project=myproj --mail-agent=cc_1
 
-# AVOID: Inline values in main flag (legacy pattern)
-ntm --robot-jfp-search="debugging"      # Deprecated
-ntm --robot-cass-search="auth error"    # Deprecated
+# AVOID: tool-prefixed copies of shared modifiers (deprecated aliases)
+ntm --robot-cass-search="auth error" --cass-since=7d --cass-limit=20
 ```
 
 ### 1.3.1 Flywheel Tool Bridges (Inventory + Wrappers)
@@ -129,15 +128,15 @@ Note: `--robot-limit` and `--robot-offset` are accepted as explicit aliases for 
 
 **Example (Correct):**
 ```bash
-ntm --robot-cass-search --query="auth" --limit=20 --since=7d
-ntm --robot-alerts --alerts-type=error --alerts-session=myproject
+ntm --robot-cass-search="auth" --limit=20 --since=7d
+ntm --robot-alerts --alerts-type=error --session=myproject
 ntm --robot-wait=myproject --timeout=2m --panes=1,2
 ```
 
 **Example (Deprecated):**
 ```bash
 ntm --robot-cass-search="auth" --cass-limit=20 --cass-since=7d  # Old pattern
-ntm --robot-alerts --type=error --session=myproject  # Old pattern
+ntm --robot-alerts --alerts-session=myproject                  # Old pattern
 ```
 
 ### 2.2 Tool-Specific Modifiers
@@ -732,7 +731,7 @@ ntm --robot-schema=all
 | `inspect` | Pane inspection | `--robot-inspect-pane` |
 | `ensemble` | Ensemble state | `--robot-ensemble` |
 | `ensemble_spawn` | Ensemble creation | `--robot-ensemble-spawn` |
-| `beads_list` | Bead listing | `--robot-bead-list` |
+| `beads_list` | Bead listing | `--robot-beads-list` |
 | `assign` | Work assignment | `--robot-assign` |
 | `triage` | Triage analysis | `--robot-triage` |
 | `health` | Health check | `--robot-health` |
