@@ -121,6 +121,9 @@ func sendCASSInjectionConfigs(withFlag, noFlag bool, cfg *config.Config) (bool, 
 	if cfg.CASS.BinaryPath != "" {
 		query.BinaryPath = cfg.CASS.BinaryPath
 	}
+	if cfg.CASS.Timeout > 0 {
+		query.Timeout = time.Duration(cfg.CASS.Timeout) * time.Second
+	}
 
 	cc := cfg.CASS.Context
 	if cc.MaxSessions > 0 {

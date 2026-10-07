@@ -45,6 +45,9 @@ func redactScoredHits(hits []ScoredHit) []ScoredHit {
 	return out
 }
 
+// DefaultCASSTimeout bounds search execution when no query timeout is configured.
+const DefaultCASSTimeout = 15 * time.Second
+
 // CASSConfig holds configuration for CASS queries.
 type CASSConfig struct {
 	Enabled           bool    `json:"enabled"`
@@ -52,6 +55,8 @@ type CASSConfig struct {
 	MaxAgeDays        int     `json:"max_age_days"`
 	MinRelevance      float64 `json:"min_relevance"`
 	PreferSameProject bool    `json:"prefer_same_project"`
+	// Timeout bounds optional search execution; zero uses DefaultCASSTimeout.
+	Timeout time.Duration `json:"timeout"`
 	// AgentFilter limits results to specific agent types (e.g., "claude", "codex").
 	// Empty means all agents.
 	AgentFilter []string `json:"agent_filter,omitempty"`
@@ -67,6 +72,7 @@ func DefaultCASSConfig() CASSConfig {
 		MaxResults:        5,
 		MaxAgeDays:        30,
 		MinRelevance:      0.0,
+		Timeout:           DefaultCASSTimeout,
 		PreferSameProject: true,
 		AgentFilter:       nil,
 		BinaryPath:        "",
@@ -154,13 +160,24 @@ func QueryCASS(prompt string, config CASSConfig) CASSQueryResult {
 	}
 	args = append(args, "--", query)
 
-	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	timeout := config.Timeout
+	if timeout <= 0 {
+		timeout = DefaultCASSTimeout
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, binPath, args...)
+	// A descendant can retain stdout/stderr after the search exits or its
+	// deadline kills it. Bound pipe draining so enrichment releases dispatch.
+	cmd.WaitDelay = time.Second
 	output, err := cmd.Output()
 	result.QueryTime = time.Since(start)
 
 	if err != nil {
+		if ctx.Err() == context.DeadlineExceeded {
+			result.Error = "cass search timed out after " + timeout.String()
+			return result
+		}
 		if exitErr, ok := err.(*exec.ExitError); ok {
 			if exitErr.ExitCode() == 1 || exitErr.ExitCode() == 3 {
 				// Exit 1: No results found

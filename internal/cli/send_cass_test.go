@@ -6,6 +6,9 @@ package cli
 // G2 liveness claims are honest), and the degraded path records a skip.
 
 import (
+	"os"
+	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -104,6 +107,7 @@ func TestRobotSendCASSOptions_ConfigKeysParameterizeEngine(t *testing.T) {
 
 func TestSendCASSInjectionConfigs_MirrorsRobotMapping(t *testing.T) {
 	cfg := cassTestConfig(true, true)
+	cfg.CASS.Timeout = 7
 	cfg.CASS.Context.MaxSessions = 3
 	cfg.CASS.Context.MaxTokens = 800
 	cfg.CASS.Context.MinRelevance = 0.5
@@ -111,6 +115,9 @@ func TestSendCASSInjectionConfigs_MirrorsRobotMapping(t *testing.T) {
 	enabled, query, filter, inject := sendCASSInjectionConfigs(false, false, cfg)
 	if !enabled {
 		t.Fatal("enabled = false, want true via config default")
+	}
+	if query.Timeout != 7*time.Second {
+		t.Errorf("timeout not applied: %v", query.Timeout)
 	}
 	if query.MaxResults != 3 || filter.MaxItems != 3 {
 		t.Errorf("max_sessions not applied: %d/%d", query.MaxResults, filter.MaxItems)
@@ -136,6 +143,53 @@ func TestSendCASSInjectionInfo_DegradedRecordsSkip(t *testing.T) {
 	}, "rate limiting", nil)
 	if info.SkippedReason == "" || !strings.Contains(info.SkippedReason, "not found") {
 		t.Fatalf("degraded cobra envelope must record the skip: %+v", info)
+	}
+}
+
+// Exercise the same config, query, injection, and response path used by ntm
+// send. An optional search must relinquish dispatch on its configured deadline,
+// even when a subprocess keeps the search command's output pipes open.
+func TestSendCASSConfiguredDeadlineRecordsSkippedEnrichment(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("CASS process fixture requires a POSIX shell")
+	}
+	for _, fixture := range []struct {
+		name string
+		body string
+	}{
+		{name: "hung-search", body: "exec sleep 4"},
+		{name: "inherited-output", body: "sleep 4 &\nwait"},
+	} {
+		t.Run(fixture.name, func(t *testing.T) {
+			binary := filepath.Join(t.TempDir(), "cass")
+			if err := os.WriteFile(binary, []byte("#!/bin/sh\n"+fixture.body+"\n"), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			cfg := cassTestConfig(true, true)
+			cfg.CASS.BinaryPath = binary
+			cfg.CASS.Timeout = 1
+			enabled, query, filter, inject := sendCASSInjectionConfigs(true, false, cfg)
+			if !enabled {
+				t.Fatal("explicit CASS enrichment was not enabled")
+			}
+			const prompt = "Investigate database transaction contention"
+			started := time.Now()
+			result, search, filtered := cass.InjectContextFromQuery(prompt, query, filter, inject)
+			elapsed := time.Since(started)
+			if elapsed >= 3*time.Second {
+				t.Fatalf("optional enrichment held dispatch for %v with a 1s timeout", elapsed)
+			}
+			if search.Success || !strings.Contains(search.Error, "timed out after 1s") {
+				t.Fatalf("search did not report its configured deadline: %+v", search)
+			}
+			if result.Success || result.ModifiedPrompt != "" || result.Metadata.ItemsInjected != 0 {
+				t.Fatalf("timed-out enrichment returned an injected replacement prompt: %+v", result)
+			}
+			info := sendCASSInjectionInfo(result, search.Query, filtered.Hits)
+			if !strings.Contains(info.SkippedReason, "timed out after 1s") {
+				t.Fatalf("send response lost the enrichment timeout: %+v", info)
+			}
+		})
 	}
 }
 
