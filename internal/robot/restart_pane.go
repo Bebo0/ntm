@@ -16,6 +16,7 @@ import (
 	"github.com/Dicklesworthstone/ntm/internal/bv"
 	"github.com/Dicklesworthstone/ntm/internal/config"
 	dispatchsvc "github.com/Dicklesworthstone/ntm/internal/dispatch"
+	"github.com/Dicklesworthstone/ntm/internal/policy"
 	"github.com/Dicklesworthstone/ntm/internal/process"
 	"github.com/Dicklesworthstone/ntm/internal/resilience"
 	statuspkg "github.com/Dicklesworthstone/ntm/internal/status"
@@ -1870,6 +1871,10 @@ func restartAgentLaunchCommandWithOverride(cfg *config.Config, agentType, varian
 	}
 
 	vars := restartModelVars(cfg, resolved, variant)
+	if resolved == "claude" {
+		// A respawned Claude agent keeps ntm's PreToolUse hooks.
+		vars.ClaudeSettings = policy.ClaudeAgentLaunchSettings(cfg).Settings
+	}
 	referencesModel := strings.Contains(tmpl, ".Model")
 	referencesEffort := strings.Contains(tmpl, ".ReasoningEffort")
 	if override.Model != "" {
@@ -1900,7 +1905,9 @@ func restartAgentLaunchCommandWithOverride(cfg *config.Config, agentType, varian
 
 	rendered, err := config.GenerateAgentCommand(tmpl, vars)
 	if err != nil || strings.TrimSpace(rendered) == "" {
-		if override.empty() {
+		// Falling back to the bare alias would relaunch Claude without its
+		// safety hooks, so a hook-carrying render failure is loud.
+		if override.empty() && (vars.ClaudeSettings == "" || err == nil) {
 			return alias, nil
 		}
 		if err == nil {

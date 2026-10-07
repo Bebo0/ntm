@@ -14,6 +14,7 @@ import (
 	"github.com/Dicklesworthstone/ntm/internal/config"
 	dispatchsvc "github.com/Dicklesworthstone/ntm/internal/dispatch"
 	"github.com/Dicklesworthstone/ntm/internal/output"
+	"github.com/Dicklesworthstone/ntm/internal/policy"
 	"github.com/Dicklesworthstone/ntm/internal/session"
 	"github.com/Dicklesworthstone/ntm/internal/tmux"
 	"github.com/Dicklesworthstone/ntm/internal/tui/theme"
@@ -854,12 +855,16 @@ func buildAgentCommands(state *session.SessionState) session.AgentCommands {
 		PaneIndex:   1,
 	}
 
+	claudeSettings := policy.ClaudeAgentLaunchSettings(cfg).Settings
 	render := func(tmpl, agentType string) string {
 		if tmpl == "" {
 			return ""
 		}
 		v := vars
 		v.AgentType = agentType
+		if agentType == "cc" {
+			v.ClaudeSettings = claudeSettings
+		}
 		rendered, err := config.GenerateAgentCommand(tmpl, v)
 		if err != nil {
 			// Leave empty so the launch path skips this agent rather than
@@ -916,6 +921,9 @@ func applyModelCommands(state *session.SessionState) {
 			Model:          ResolveModel(cliType, modelAlias),
 			ModelAlias:     modelAlias,
 			ModelRequested: true,
+		}
+		if cliType == AgentTypeClaude {
+			v.ClaudeSettings = policy.ClaudeAgentLaunchSettings(cfg).Settings
 		}
 		if rendered, err := config.GenerateAgentCommand(tmpl, v); err == nil && rendered != "" {
 			ps.Command = rendered

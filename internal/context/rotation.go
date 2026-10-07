@@ -20,6 +20,7 @@ import (
 	"github.com/Dicklesworthstone/ntm/internal/alerts"
 	"github.com/Dicklesworthstone/ntm/internal/config"
 	"github.com/Dicklesworthstone/ntm/internal/persona"
+	"github.com/Dicklesworthstone/ntm/internal/policy"
 	"github.com/Dicklesworthstone/ntm/internal/resilience"
 	"github.com/Dicklesworthstone/ntm/internal/swarm"
 	"github.com/Dicklesworthstone/ntm/internal/tmux"
@@ -371,6 +372,10 @@ func (s *DefaultPaneSpawner) agentLaunchSpec(session, agentType string, index in
 		return tmux.AgentLaunchSpec{}, fmt.Errorf("antigravity model is pinned to %q, cannot restore model %q", config.AntigravityRequiredModel, vars.ModelAlias)
 	}
 	vars.Model = models.GetModelName(agentType, vars.ModelAlias)
+	if agent.AgentType(agentType).Canonical() == agent.AgentTypeClaudeCode {
+		// The replacement Claude agent keeps ntm's PreToolUse hooks.
+		vars.ClaudeSettings = policy.ClaudeAgentLaunchSettings(s.config).Settings
+	}
 	command, err := config.GenerateAgentCommand(s.getAgentCommand(agentType), vars)
 	if err != nil {
 		return tmux.AgentLaunchSpec{}, err

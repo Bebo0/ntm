@@ -36,6 +36,7 @@ import (
 	"github.com/Dicklesworthstone/ntm/internal/events"
 	"github.com/Dicklesworthstone/ntm/internal/kernel"
 	"github.com/Dicklesworthstone/ntm/internal/pipeline"
+	"github.com/Dicklesworthstone/ntm/internal/policy"
 	"github.com/Dicklesworthstone/ntm/internal/process"
 	"github.com/Dicklesworthstone/ntm/internal/redaction"
 	"github.com/Dicklesworthstone/ntm/internal/robot"
@@ -1319,6 +1320,7 @@ func TestHandleSafetyInstallV1_InvalidBody(t *testing.T) {
 
 func TestHandleSafetyUninstallV1_NothingInstalled(t *testing.T) {
 	srv, _ := setupTestServer(t)
+	t.Setenv("HOME", t.TempDir()) // never touch the developer's ~/.ntm or ~/.claude
 
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/safety/uninstall", nil)
@@ -7304,6 +7306,7 @@ func TestHandlePolicyValidateV1_FileBased(t *testing.T) {
 
 func TestHandleSafetyInstallV1_Force(t *testing.T) {
 	srv, _ := setupTestServer(t)
+	t.Setenv("HOME", t.TempDir()) // never touch the developer's ~/.ntm or ~/.claude
 
 	body := `{"force":true}`
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/safety/install", strings.NewReader(body))
@@ -7319,6 +7322,7 @@ func TestHandleSafetyInstallV1_Force(t *testing.T) {
 
 func TestHandleSafetyUninstallV1_Branch(t *testing.T) {
 	srv, _ := setupTestServer(t)
+	t.Setenv("HOME", t.TempDir()) // never touch the developer's ~/.ntm or ~/.claude
 
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/safety/uninstall", nil)
 	rec := httptest.NewRecorder()
@@ -12173,6 +12177,21 @@ func TestHandleSafetyStatusV1_FullPath(t *testing.T) {
 	hookDir := filepath.Join(tmpDir, ".claude", "hooks", "PreToolUse")
 	os.MkdirAll(hookDir, 0755)
 	os.WriteFile(filepath.Join(hookDir, "ntm-safety.sh"), []byte("#!/bin/sh\n"), 0755)
+
+	// A hook script Claude Code's settings do not list never runs, so it is
+	// present but not installed.
+	reqUnregistered := httptest.NewRequest("GET", "/api/v1/safety/status", nil)
+	recUnregistered := httptest.NewRecorder()
+	s.handleSafetyStatusV1(recUnregistered, reqUnregistered)
+	var respUnregistered map[string]interface{}
+	json.Unmarshal(recUnregistered.Body.Bytes(), &respUnregistered)
+	if respUnregistered["hook_script_present"] != true || respUnregistered["hook_registered"] != false || respUnregistered["hook_installed"] != false {
+		t.Fatalf("unregistered hook script: present=%v registered=%v installed=%v, want true/false/false",
+			respUnregistered["hook_script_present"], respUnregistered["hook_registered"], respUnregistered["hook_installed"])
+	}
+	if _, err := policy.RegisterClaudeHook(policy.ClaudeUserSettingsPath(tmpDir), policy.ClaudeHookScriptPath(tmpDir)); err != nil {
+		t.Fatalf("register hook: %v", err)
+	}
 
 	req2 := httptest.NewRequest("GET", "/api/v1/safety/status", nil)
 	rec2 := httptest.NewRecorder()

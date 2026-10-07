@@ -172,7 +172,7 @@ NTM has built-in safety, policy, and approval surfaces. Use them instead of ad h
 ntm safety status
 ntm safety check -- git reset --hard
 ntm safety blocked --hours 24
-ntm safety install
+ntm safety install   # also registers the Claude hook in ~/.claude/settings.json
 
 ntm policy show --all
 ntm policy validate

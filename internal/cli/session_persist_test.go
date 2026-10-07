@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"strings"
 	"testing"
@@ -16,6 +17,10 @@ import (
 	"github.com/Dicklesworthstone/ntm/internal/session"
 	"github.com/Dicklesworthstone/ntm/internal/tmux"
 )
+
+// claudeSettingsArg matches the single-quoted --settings JSON a Claude launch
+// carries, including the shell's escaped form of an embedded single quote.
+var claudeSettingsArg = regexp.MustCompile(`--settings '(?:[^']|'\\'')*'`)
 
 // TestBuildAgentCommands_RendersTemplates covers the #175 unrendered-template
 // launch bug: resume/restore used to pass cfg.Agents.* (raw Go templates, e.g.
@@ -41,6 +46,9 @@ func TestBuildAgentCommands_RendersTemplates(t *testing.T) {
 		if got == "" {
 			return // empty is fine (agent not configured / render skipped)
 		}
+		// The hooks JSON a Claude launch carries ends in "}}" by nature;
+		// look for template markers everywhere else.
+		got = claudeSettingsArg.ReplaceAllString(got, "--settings <json>")
 		if strings.Contains(got, "{{") || strings.Contains(got, "}}") {
 			t.Errorf("%s command still contains unrendered template markers: %q", name, got)
 		}
@@ -99,7 +107,10 @@ func TestApplyModelCommands_HonorsCapturedModel(t *testing.T) {
 	if withModel == "" {
 		t.Fatalf("model pane Command is empty; expected a rendered launch command")
 	}
-	if strings.Contains(withModel, "{{") || strings.Contains(withModel, "}}") {
+	if !strings.Contains(withModel, "safety claude-hook") {
+		t.Errorf("restored Claude pane Command lost ntm's PreToolUse hooks: %q", withModel)
+	}
+	if bare := claudeSettingsArg.ReplaceAllString(withModel, "--settings <json>"); strings.Contains(bare, "{{") || strings.Contains(bare, "}}") {
 		t.Errorf("model pane Command still has unrendered template markers: %q", withModel)
 	}
 	if !strings.Contains(withModel, "--model") {

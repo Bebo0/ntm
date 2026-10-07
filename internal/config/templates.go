@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"reflect"
 	"runtime"
 	"strconv"
@@ -32,6 +33,11 @@ type AgentTemplateVars struct {
 	// model_reasoning_effort=...`). Empty falls back to the
 	// template-level default. See ntm#140.
 	ReasoningEffort string
+	// ClaudeSettings is the --settings JSON carrying ntm's PreToolUse hooks
+	// for a Claude launch (policy.ClaudeAgentLaunchSettings). A template that
+	// references it places it itself; otherwise GenerateAgentCommand appends
+	// --settings to the command's final claude invocation.
+	ClaudeSettings string
 }
 
 // ShellQuote safely quotes a string for use in shell commands.
@@ -333,7 +339,7 @@ func GenerateAgentCommand(tmpl string, vars AgentTemplateVars) (string, error) {
 			return "", personaDropError(vars.AgentType, tmpl)
 		}
 		if !vars.ModelRequested && (strings.TrimSpace(vars.ReasoningEffort) == "" || !agentTypeConsumesReasoningEffort(vars.AgentType)) {
-			return tmpl, nil
+			return attachClaudeSettings(tmpl, vars.ClaudeSettings)
 		}
 		if vars.ModelRequested {
 			requestedModel := vars.Model
@@ -402,8 +408,183 @@ func GenerateAgentCommand(tmpl string, vars AgentTemplateVars) (string, error) {
 	}
 
 	result := strings.TrimSpace(buf.String())
+	if templateReferencesAnyField(t, "ClaudeSettings") {
+		return result, nil
+	}
+	return attachClaudeSettings(result, vars.ClaudeSettings)
+}
 
-	return result, nil
+// attachClaudeSettings appends `--settings <json>` to a rendered launch
+// command when its final shell command is the claude invocation — true of the
+// built-in template and of every earlier built-in template `ntm config init`
+// wrote into users' configs. A command whose last command is something else
+// (`claude ... | tee log`, a subshell) or that already passes --settings
+// cannot take the hooks safely, and dropping them silently would leave the
+// agent unprotected, so that is an error naming the two fixes.
+func attachClaudeSettings(cmd, settings string) (string, error) {
+	if strings.TrimSpace(settings) == "" {
+		return cmd, nil
+	}
+	segment, ok := finalShellCommand(cmd)
+	words := shellWords(segment)
+	hasClaude, hasSettings := false, false
+	for _, w := range words {
+		switch {
+		case w == "--settings" || strings.HasPrefix(w, "--settings="):
+			hasSettings = true
+		case isClaudeProgramWord(w):
+			hasClaude = true
+		}
+	}
+	if !ok || !hasClaude || hasSettings {
+		return "", fmt.Errorf(
+			"ntm's Claude Code hooks (safety policy, dcg, rch) cannot be attached to this claude command: "+
+				"its final shell command is not a plain claude invocation, or it already passes --settings. "+
+				"Reference {{.ClaudeSettings}} in the template (e.g. --settings {{shellQuote .ClaudeSettings}}), "+
+				"or set [safety] claude_policy_hook = false and disable the dcg/rch integrations. Command: %s", cmd)
+	}
+	return strings.TrimRight(cmd, " \t") + " --settings " + ShellQuote(settings), nil
+}
+
+// isClaudeProgramWord recognizes the claude binary, ntm's `cc` alias, and
+// wrappers named after claude (operator-claude, claude-safe): ntm already
+// hands such commands --model/--effort, so they forward arguments.
+func isClaudeProgramWord(word string) bool {
+	if strings.HasPrefix(word, "-") {
+		return false
+	}
+	base := filepath.Base(word)
+	switch {
+	case base == "claude" || base == "cc":
+		return true
+	case strings.HasSuffix(base, "-claude") || strings.HasSuffix(base, "_claude"):
+		return true
+	case strings.HasPrefix(base, "claude-") || strings.HasPrefix(base, "claude_"):
+		return !strings.Contains(base, ".") // claude-session.log is an argument, not a program
+	}
+	return false
+}
+
+// finalShellCommand returns the text after the last unquoted shell control
+// operator (; & && | || newline, subshell parens) outside $(...) and
+// backticks. ok is false when the command ends in an operator or unbalanced
+// quoting, i.e. there is no final simple command to extend.
+func finalShellCommand(cmd string) (segment string, ok bool) {
+	start := 0
+	inSingle, inDouble, inBacktick := false, false, false
+	depth := 0 // $( ... ) nesting
+	for i := 0; i < len(cmd); i++ {
+		c := cmd[i]
+		switch {
+		case inSingle:
+			if c == '\'' {
+				inSingle = false
+			}
+			continue
+		case c == '\\':
+			i++ // the next byte is literal
+			continue
+		case inDouble:
+			if c == '"' {
+				inDouble = false
+			} else if c == '$' && i+1 < len(cmd) && cmd[i+1] == '(' {
+				depth++
+				i++
+			} else if c == ')' && depth > 0 {
+				depth--
+			}
+			continue
+		case inBacktick:
+			if c == '`' {
+				inBacktick = false
+			}
+			continue
+		}
+		switch c {
+		case '\'':
+			inSingle = true
+		case '"':
+			inDouble = true
+		case '`':
+			inBacktick = true
+		case '$':
+			if i+1 < len(cmd) && cmd[i+1] == '(' {
+				depth++
+				i++
+			}
+		case ')':
+			if depth > 0 {
+				depth--
+			} else {
+				start = i + 1
+			}
+		case '(', ';', '|', '\n':
+			if depth == 0 {
+				start = i + 1
+			}
+		case '&':
+			if depth > 0 {
+				continue
+			}
+			// 2>&1, <&3 and &> are redirections, not the background operator.
+			if (i > 0 && (cmd[i-1] == '>' || cmd[i-1] == '<')) || (i+1 < len(cmd) && cmd[i+1] == '>') {
+				continue
+			}
+			start = i + 1
+		}
+	}
+	if inSingle || inDouble || inBacktick || depth != 0 {
+		return "", false
+	}
+	segment = strings.TrimSpace(cmd[start:])
+	return segment, segment != ""
+}
+
+// shellWords splits a simple command into words, dropping the quote
+// characters (enough to recognize the program and flags, not a full parser).
+func shellWords(segment string) []string {
+	var words []string
+	var cur strings.Builder
+	inSingle, inDouble, inWord := false, false, false
+	flush := func() {
+		if inWord {
+			words = append(words, cur.String())
+			cur.Reset()
+			inWord = false
+		}
+	}
+	for i := 0; i < len(segment); i++ {
+		c := segment[i]
+		switch {
+		case inSingle:
+			if c == '\'' {
+				inSingle = false
+			} else {
+				cur.WriteByte(c)
+			}
+		case inDouble:
+			if c == '"' {
+				inDouble = false
+			} else {
+				cur.WriteByte(c)
+			}
+		case c == '\'':
+			inSingle, inWord = true, true
+		case c == '"':
+			inDouble, inWord = true, true
+		case c == '\\' && i+1 < len(segment):
+			i++
+			cur.WriteByte(segment[i])
+			inWord = true
+		case c == ' ' || c == '\t':
+			flush()
+		default:
+			cur.WriteByte(c)
+			inWord = true
+		}
+	}
+	flush()
+	return words
 }
 
 // IsTemplateCommand checks if a command string uses template syntax

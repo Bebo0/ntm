@@ -1,8 +1,9 @@
 package policy
 
 // The scripts `ntm safety install` (and the serve install endpoint) put in
-// front of git, rm and Claude Code's Bash tool. Each asks `ntm safety check
-// --hook` and refuses on a non-zero exit. In hook mode the check itself files
+// front of git, rm and Claude Code's Bash tool. The wrappers ask `ntm safety
+// check --hook` and the Claude hook runs `ntm safety claude-hook`; each refuses
+// on a non-zero exit. In hook mode the check itself files
 // the refusal (blocked log with the tmux session, and the session's
 // blocked-command metric), so the scripts do no logging of their own
 // (bd-cl6me). One copy serves both installers.
@@ -82,58 +83,20 @@ fi
 exec "$REAL_RM" "$@"
 `
 
-// ClaudeHookScript is a Claude Code PreToolUse hook that validates Bash
-// commands.
-const ClaudeHookScript = `#!/bin/bash
-# NTM Safety Hook for Claude Code
-# PreToolUse hook that validates Bash commands
-
-# Claude Code command hooks receive the event payload as JSON on stdin.
-HOOK_INPUT="$(cat)"
-if [ -n "$HOOK_INPUT" ] && command -v jq >/dev/null 2>&1; then
-    TOOL_NAME="$(printf '%s' "$HOOK_INPUT" | jq -r '.tool_name // empty' 2>/dev/null)"
-    COMMAND="$(printf '%s' "$HOOK_INPUT" | jq -r '.tool_input.command // empty' 2>/dev/null)"
-else
-    TOOL_NAME=""
-    COMMAND=""
+// ClaudeHookScript is the Claude Code PreToolUse hook `ntm safety install`
+// writes and registers in ~/.claude/settings.json for the Bash tool. Claude
+// Code pipes the event JSON on stdin; `ntm safety claude-hook` parses it in Go
+// (no jq: the old script read the payload with jq and allowed every command
+// when jq was missing), checks the command in hook mode, and exits 2 with the
+// reason on stderr to refuse it. A hook that cannot find ntm refuses rather
+// than waving commands through unchecked, and says how to remove itself.
+const ClaudeHookScript = `#!/bin/sh
+# NTM Safety Hook for Claude Code (PreToolUse, Bash tool).
+# Registered in ~/.claude/settings.json by 'ntm safety install'.
+if command -v ntm >/dev/null 2>&1; then
+    exec ntm safety claude-hook
 fi
-
-# Fall back to legacy env vars if a caller still provides them directly.
-if [ -z "$TOOL_NAME" ]; then
-    TOOL_NAME="${CLAUDE_TOOL_NAME:-}"
-fi
-if [ -z "$COMMAND" ]; then
-    COMMAND="${CLAUDE_TOOL_INPUT_command:-}"
-fi
-
-# Only process Bash tool calls
-if [ "$TOOL_NAME" != "Bash" ]; then
-    exit 0
-fi
-
-if [ -z "$COMMAND" ]; then
-    exit 0
-fi
-
-# Check against policy. In hook mode the check records a refusal itself.
-check_result=$(ntm safety check "$COMMAND" --json --hook 2>&1)
-exit_code=$?
-
-# ntm safety check exits 0 for allow, 1 for block/approve
-if [ $exit_code -ne 0 ]; then
-    action=$(echo "$check_result" | jq -r '.action // "block"' 2>/dev/null)
-    reason=$(echo "$check_result" | jq -r '.reason // "Policy violation"' 2>/dev/null)
-
-    # Return error to Claude Code
-    if [ "$action" = "approve" ]; then
-        echo "APPROVAL REQUIRED: $reason" >&2
-        echo "This check is advisory: the command was refused but no approval request was queued." >&2
-        echo "Approval-gated ntm commands (e.g. 'ntm locks force-release') request approval when run; decide with 'ntm approve'." >&2
-    else
-        echo "BLOCKED: $reason" >&2
-    fi
-    exit 2
-fi
-
-exit 0
+echo "BLOCKED: the ntm safety hook could not find ntm on PATH, so this command was not checked." >&2
+echo "Put ntm on PATH, or remove the ntm-safety.sh entry from hooks.PreToolUse in ~/.claude/settings.json ('ntm safety uninstall' does this)." >&2
+exit 2
 `

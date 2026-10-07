@@ -18,6 +18,7 @@ import (
 	"github.com/Dicklesworthstone/ntm/internal/claudeconfig"
 	"github.com/Dicklesworthstone/ntm/internal/health"
 	"github.com/Dicklesworthstone/ntm/internal/output"
+	"github.com/Dicklesworthstone/ntm/internal/policy"
 	"github.com/Dicklesworthstone/ntm/internal/resilience"
 	"github.com/Dicklesworthstone/ntm/internal/robot"
 	"github.com/Dicklesworthstone/ntm/internal/status"
@@ -542,6 +543,13 @@ func runSwarm(ctx context.Context, opts swarmOptions) (runErr error) {
 	}
 
 	paneLauncher := swarm.NewPaneLauncherWithClient(tmuxClient).WithLogger(logger)
+	// Claude panes carry ntm's PreToolUse hooks (safety policy, dcg, rch) as
+	// --settings, as spawn and add do; the `cc` alias forwards arguments. The
+	// hook commands name local binaries, so a remote swarm does not get them.
+	if claudeSettings := policy.ClaudeAgentLaunchSettings(cfg).Settings; claudeSettings != "" && opts.Remote == "" {
+		paneLauncher.WithCmdBuilder(swarm.NewLaunchCommandBuilder().
+			WithAgentArgs("cc", []string{"--settings", tmux.ShellQuote(claudeSettings)}))
+	}
 	// Honor each project's recorded OpenAI cooldown before launching Codex, as
 	// spawn and add do. Remote project paths do not name local history files.
 	paneLauncher.RateLimitHistory = opts.Remote == ""

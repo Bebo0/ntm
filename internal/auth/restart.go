@@ -13,6 +13,7 @@ import (
 
 	"github.com/Dicklesworthstone/ntm/internal/agent"
 	"github.com/Dicklesworthstone/ntm/internal/config"
+	"github.com/Dicklesworthstone/ntm/internal/policy"
 	"github.com/Dicklesworthstone/ntm/internal/rotation"
 	"github.com/Dicklesworthstone/ntm/internal/swarm"
 	"github.com/Dicklesworthstone/ntm/internal/tmux"
@@ -238,7 +239,7 @@ func (o *Orchestrator) StartNewAgentSession(ctx RestartContext) error {
 	resolvedModel := o.cfg.Models.GetModelName(agentType, ctx.ModelAlias)
 
 	// Generate command
-	agentCmd, err := config.GenerateAgentCommand(agentCmdTemplate, config.AgentTemplateVars{
+	vars := config.AgentTemplateVars{
 		Model:          resolvedModel,
 		ModelAlias:     ctx.ModelAlias,
 		ModelRequested: len(strings.TrimSpace(ctx.ModelAlias)) > 0,
@@ -246,7 +247,12 @@ func (o *Orchestrator) StartNewAgentSession(ctx RestartContext) error {
 		PaneIndex:      ctx.PaneIndex,
 		AgentType:      agentType,
 		ProjectDir:     ctx.ProjectDir,
-	})
+	}
+	if agentType == "cc" {
+		// The relaunched Claude agent keeps ntm's PreToolUse hooks.
+		vars.ClaudeSettings = policy.ClaudeAgentLaunchSettings(o.cfg).Settings
+	}
+	agentCmd, err := config.GenerateAgentCommand(agentCmdTemplate, vars)
 	if err != nil {
 		return fmt.Errorf("generating command: %w", err)
 	}

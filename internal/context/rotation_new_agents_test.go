@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -13,6 +14,10 @@ import (
 	"github.com/Dicklesworthstone/ntm/internal/config"
 	"github.com/Dicklesworthstone/ntm/internal/tmux"
 )
+
+// claudeSettingsArg matches the single-quoted --settings JSON a Claude launch
+// carries, including the shell's escaped form of an embedded single quote.
+var claudeSettingsArg = regexp.MustCompile(`--settings '(?:[^']|'\\'')*'`)
 
 func TestDeriveAgentTypeFromID_NewAgents(t *testing.T) {
 	t.Parallel()
@@ -123,7 +128,7 @@ func TestDefaultPaneSpawner_RestoresLaunchSpec(t *testing.T) {
 		nilConfig bool
 		want      []string
 	}{
-		{"claude_model_effort", "claude", "opus@high", false, []string{"claude --dangerously-skip-permissions", "--model '" + config.DefaultModels().Claude["opus"] + "'", "--effort 'high'"}},
+		{"claude_model_effort", "claude", "opus@high", false, []string{"claude --dangerously-skip-permissions", "--model '" + config.DefaultModels().Claude["opus"] + "'", "--effort 'high'", "--settings ", "safety claude-hook"}},
 		{"custom_codex_model", "codex", "private_model_2026@medium", false, []string{"codex --dangerously-bypass-approvals-and-sandbox", "-m 'private_model_2026'", "model_reasoning_effort='medium'"}},
 		{"bare_custom_model", "codex", "private-model", false, []string{"-m 'private-model'"}},
 		{"default_without_config", "codex", "", true, []string{"codex --dangerously-bypass-approvals-and-sandbox", "-m '" + config.DefaultCodexModel + "'"}},
@@ -150,7 +155,9 @@ func TestDefaultPaneSpawner_RestoresLaunchSpec(t *testing.T) {
 				t.Fatal(err)
 			}
 			log := string(commands)
-			if strings.Contains(log, "{{") || strings.Contains(log, "}}") {
+			// The hooks JSON a Claude launch carries ends in "}}" by nature;
+			// look for template markers everywhere else.
+			if bare := claudeSettingsArg.ReplaceAllString(log, "--settings <json>"); strings.Contains(bare, "{{") || strings.Contains(bare, "}}") {
 				t.Errorf("unrendered template reached tmux: %s", log)
 			}
 			for _, want := range tc.want {

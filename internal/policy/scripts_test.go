@@ -8,29 +8,30 @@ import (
 	"time"
 )
 
-func TestClaudeHookScriptReadsCurrentStdinPayload(t *testing.T) {
-	for _, want := range []string{
-		"HOOK_INPUT=\"$(cat)\"",
-		"'.tool_name // empty'",
-		"'.tool_input.command // empty'",
-		"exit 2",
-	} {
-		if !strings.Contains(ClaudeHookScript, want) {
-			t.Fatalf("claude hook script missing %q", want)
-		}
+// The Claude hook hands the stdin payload to `ntm safety claude-hook` (which
+// parses it in Go) and refuses with exit 2 when ntm is missing. The old script
+// parsed the payload with jq and allowed every command when jq was absent.
+func TestClaudeHookScriptDelegatesToNTMAndFailsClosed(t *testing.T) {
+	if !strings.Contains(ClaudeHookScript, "exec ntm safety claude-hook") {
+		t.Fatal("claude hook script does not delegate to `ntm safety claude-hook`")
 	}
-	if strings.Contains(ClaudeHookScript, "exit 1\nfi\n\nexit 0") {
-		t.Fatal("claude hook script still uses non-blocking exit 1 for denied commands")
+	if strings.Contains(ClaudeHookScript, "jq") {
+		t.Fatal("claude hook script still depends on jq")
+	}
+	if !strings.HasSuffix(strings.TrimSpace(ClaudeHookScript), "exit 2") {
+		t.Fatal("claude hook script does not refuse (exit 2) when ntm cannot be found")
 	}
 }
 
-// Every installed script asks the check to record its refusals and keeps no
-// log of its own (bd-cl6me).
+// Every installed wrapper asks the check to record its refusals and keeps no
+// log of its own (bd-cl6me). The Claude hook's claude-hook mode records them.
 func TestInstalledScriptsCheckInHookMode(t *testing.T) {
-	for name, script := range map[string]string{"git": GitWrapperScript, "rm": RmWrapperScript, "claude": ClaudeHookScript} {
+	for name, script := range map[string]string{"git": GitWrapperScript, "rm": RmWrapperScript} {
 		if !strings.Contains(script, "--json --hook") {
 			t.Errorf("%s script does not run the check in hook mode", name)
 		}
+	}
+	for name, script := range map[string]string{"git": GitWrapperScript, "rm": RmWrapperScript, "claude": ClaudeHookScript} {
 		if strings.Contains(script, "blocked.jsonl") {
 			t.Errorf("%s script still writes the blocked log itself", name)
 		}

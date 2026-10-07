@@ -587,6 +587,19 @@ ntm approve abc123
 ntm approve deny abc123 --reason "wrong target branch"
 ```
 
+Every Claude agent NTM launches (spawn, add, robot spawn, restart, restore, rotation,
+swarm) gets a Claude Code `PreToolUse` hook through `--settings` that checks each Bash
+command against this policy and refuses blocked ones (`[safety] claude_policy_hook`,
+default on). Claude Code runs `PreToolUse` hooks even under
+`--dangerously-skip-permissions`, and runs only hooks a settings file or `--settings`
+lists, so `ntm safety install` also registers its hook script in
+`~/.claude/settings.json` for Claude sessions started outside NTM, and `ntm safety status`
+reports the hook as installed only when it is registered. dcg and rch hooks ride on the
+same `--settings` when those integrations are enabled and installed. A custom
+`[agents] claude` command whose last shell command is not the `claude` invocation must
+place the hooks itself with `--settings {{shellQuote .ClaudeSettings}}`; NTM refuses to
+launch it otherwise rather than start an unprotected agent.
+
 With `[integrations.dcg] enabled = true`, command lines in messages bound for non-Claude
 agents are checked by dcg before delivery. `ntm send`, `--robot-send` (including `--track`)
 and REST sends all refuse a blocked command — robot callers get `DESTRUCTIVE_COMMAND_BLOCKED`

@@ -8,6 +8,7 @@ import (
 	"github.com/Dicklesworthstone/ntm/internal/config"
 	"github.com/Dicklesworthstone/ntm/internal/encryption"
 	"github.com/Dicklesworthstone/ntm/internal/hooks"
+	"github.com/Dicklesworthstone/ntm/internal/policy"
 	"github.com/Dicklesworthstone/ntm/internal/redaction"
 )
 
@@ -245,15 +246,18 @@ func init() {
 		config.RegisterReader(key, resolveSpawnPanePrompt)
 	}
 
-	// Integrations wired at spawn/send/serve time.
+	// Integrations wired at spawn/send/serve time. The Claude launch hooks
+	// (policy, dcg, rch) are built by policy.ClaudeAgentLaunchSettings for
+	// every Claude launch path.
 	config.RegisterReader("integrations.dcg.enabled", maybeBlockSendWithDCG)
-	config.RegisterReader("integrations.dcg.binary_path", spawnSessionLogicContextWithOutput)
-	config.RegisterReader("integrations.dcg.custom_blocklist", spawnSessionLogicContextWithOutput)
-	config.RegisterReader("integrations.dcg.custom_whitelist", spawnSessionLogicContextWithOutput)
+	config.RegisterReader("integrations.dcg.binary_path", policy.ClaudeAgentLaunchSettings)
+	config.RegisterReader("integrations.dcg.custom_blocklist", policy.ClaudeAgentLaunchSettings)
+	config.RegisterReader("integrations.dcg.custom_whitelist", policy.ClaudeAgentLaunchSettings)
 	config.RegisterReader("integrations.process_triage.enabled", runServe)
-	config.RegisterReader("integrations.rch.enabled", spawnSessionLogicContextWithOutput)
-	config.RegisterReader("integrations.rch.binary_path", spawnSessionLogicContextWithOutput)
-	config.RegisterReader("integrations.rch.intercept_patterns", spawnSessionLogicContextWithOutput)
+	config.RegisterReader("integrations.rch.enabled", policy.ClaudeAgentLaunchSettings)
+	config.RegisterReader("integrations.rch.binary_path", policy.ClaudeAgentLaunchSettings)
+	config.RegisterReader("integrations.rch.intercept_patterns", policy.ClaudeAgentLaunchSettings)
+	config.RegisterReader("safety.claude_policy_hook", policy.ClaudeAgentLaunchSettings)
 	// bv subprocess timeout: root.go PersistentPreRunE installs it into
 	// internal/bv via ConfigureCommandTimeout (GH#253).
 	config.RegisterReader("integrations.bv.timeout_seconds", bv.ConfigureCommandTimeout)

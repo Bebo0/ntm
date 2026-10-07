@@ -355,7 +355,6 @@ internal/status/unified.go:UnifiedDetector.DetectAll	bd-ld4j2	reachable only thr
 internal/status/unified.go:UnifiedDetector.DetectAllContext	bd-ld4j2	reachable only through RTA's reflection rule at the 2026-10-05 baseline; wire it (surface + behavioral test) or delete it
 internal/swarm/agent_launcher.go:LaunchCommand.ToSimpleCommand	bd-ld4j2	reachable only through RTA's reflection rule at the 2026-10-05 baseline; wire it (surface + behavioral test) or delete it
 internal/swarm/agent_launcher.go:LaunchCommandBuilder.BuildSwarmCommands	bd-ld4j2	reachable only through RTA's reflection rule at the 2026-10-05 baseline; wire it (surface + behavioral test) or delete it
-internal/swarm/agent_launcher.go:LaunchCommandBuilder.WithAgentArgs	bd-ld4j2	reachable only through RTA's reflection rule at the 2026-10-05 baseline; wire it (surface + behavioral test) or delete it
 internal/swarm/agent_launcher.go:LaunchCommandBuilder.WithAgentPath	bd-ld4j2	reachable only through RTA's reflection rule at the 2026-10-05 baseline; wire it (surface + behavioral test) or delete it
 internal/swarm/agent_launcher.go:LaunchCommandBuilder.WithEnvVars	bd-ld4j2	reachable only through RTA's reflection rule at the 2026-10-05 baseline; wire it (surface + behavioral test) or delete it
 internal/swarm/agent_launcher.go:LaunchCommandBuilder.WithFullPaths	bd-ld4j2	reachable only through RTA's reflection rule at the 2026-10-05 baseline; wire it (surface + behavioral test) or delete it
@@ -379,7 +378,6 @@ internal/swarm/orchestrator.go:SessionOrchestrator.VerifyGeometry	bd-ld4j2	reach
 internal/swarm/orchestrator.go:SessionOrchestrator.VerifyRemoteTmux	bd-ld4j2	reachable only through RTA's reflection rule at the 2026-10-05 baseline; wire it (surface + behavioral test) or delete it
 internal/swarm/orchestrator.go:SessionOrchestrator.VerifyTmuxBinary	bd-ld4j2	reachable only through RTA's reflection rule at the 2026-10-05 baseline; wire it (surface + behavioral test) or delete it
 internal/swarm/pane_launcher.go:PaneLauncher.WithCDDelay	bd-ld4j2	reachable only through RTA's reflection rule at the 2026-10-05 baseline; wire it (surface + behavioral test) or delete it
-internal/swarm/pane_launcher.go:PaneLauncher.WithCmdBuilder	bd-ld4j2	reachable only through RTA's reflection rule at the 2026-10-05 baseline; wire it (surface + behavioral test) or delete it
 internal/swarm/pane_launcher.go:PaneLauncher.WithValidatePaths	bd-ld4j2	reachable only through RTA's reflection rule at the 2026-10-05 baseline; wire it (surface + behavioral test) or delete it
 internal/swarm/prompt_injector.go:PromptInjector.GetTemplate	bd-ld4j2	reachable only through RTA's reflection rule at the 2026-10-05 baseline; wire it (surface + behavioral test) or delete it
 internal/swarm/prompt_injector.go:PromptInjector.InjectBatch	bd-ld4j2	reachable only through RTA's reflection rule at the 2026-10-05 baseline; wire it (surface + behavioral test) or delete it

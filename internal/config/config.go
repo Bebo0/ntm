@@ -2117,11 +2117,17 @@ type SafetyConfig struct {
 	// - safe: preflight on, redaction=redact, stricter destructive command gating
 	// - paranoid: preflight on, redaction=block, privacy=on by default
 	Profile string `toml:"profile"`
+
+	// ClaudePolicyHook gives every Claude agent ntm launches a PreToolUse
+	// hook (passed with --settings) that checks each Bash command against the
+	// ntm safety policy and refuses blocked ones. PreToolUse hooks apply even
+	// under --dangerously-skip-permissions. Default true.
+	ClaudePolicyHook bool `toml:"claude_policy_hook"`
 }
 
 // DefaultSafetyConfig returns sensible safety defaults.
 func DefaultSafetyConfig() SafetyConfig {
-	return SafetyConfig{Profile: SafetyProfileStandard}
+	return SafetyConfig{Profile: SafetyProfileStandard, ClaudePolicyHook: true}
 }
 
 // ValidateSafetyConfig validates the safety configuration.
@@ -3870,6 +3876,9 @@ func Print(cfg *Config, w io.Writer) error {
 	fmt.Fprintln(w, "# Safety profile presets that set defaults for multiple knobs")
 	fmt.Fprintln(w, "# profile = \"standard\"  # standard|safe|paranoid")
 	fmt.Fprintf(w, "profile = %q\n", cfg.Safety.Profile)
+	fmt.Fprintln(w, "# Check every Bash command of ntm-launched Claude agents against the safety")
+	fmt.Fprintln(w, "# policy with a Claude Code PreToolUse hook (passed via --settings)")
+	fmt.Fprintf(w, "claude_policy_hook = %t\n", cfg.Safety.ClaudePolicyHook)
 	fmt.Fprintln(w)
 
 	fmt.Fprintln(w, "[preflight]")

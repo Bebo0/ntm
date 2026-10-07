@@ -14,6 +14,7 @@ import (
 	"github.com/Dicklesworthstone/ntm/internal/config"
 	"github.com/Dicklesworthstone/ntm/internal/kernel"
 	"github.com/Dicklesworthstone/ntm/internal/output"
+	"github.com/Dicklesworthstone/ntm/internal/policy"
 	"github.com/Dicklesworthstone/ntm/internal/robot"
 	"github.com/Dicklesworthstone/ntm/internal/swarm"
 	"github.com/Dicklesworthstone/ntm/internal/tmux"
@@ -294,12 +295,16 @@ func buildControllerResponse(ctx context.Context, opts ControllerInput) (*Contro
 	}
 
 	// Render the agent command template (fixes raw {{}} being sent to shell)
-	agentCmd, err := config.GenerateAgentCommand(agentCmdTemplate, config.AgentTemplateVars{
+	vars := config.AgentTemplateVars{
 		AgentType:   agentType,
 		SessionName: session,
 		PaneIndex:   1,
 		ProjectDir:  dir,
-	})
+	}
+	if agentTypeFull == "claude" {
+		vars.ClaudeSettings = policy.ClaudeAgentLaunchSettings(cfg).Settings
+	}
+	agentCmd, err := config.GenerateAgentCommand(agentCmdTemplate, vars)
 	if err != nil {
 		return nil, fmt.Errorf("rendering agent command template: %w", err)
 	}

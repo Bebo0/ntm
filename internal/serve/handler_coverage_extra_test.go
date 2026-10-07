@@ -2449,6 +2449,7 @@ func TestApprovalEndToEnd(t *testing.T) {
 
 func TestHandleSafetyInstallV1(t *testing.T) {
 	srv, _ := setupTestServer(t)
+	t.Setenv("HOME", t.TempDir()) // never touch the developer's ~/.ntm or ~/.claude
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/safety/install",
 		strings.NewReader(`{"force":true}`))
 	req.Header.Set("Content-Length", "15")
@@ -2462,6 +2463,7 @@ func TestHandleSafetyInstallV1(t *testing.T) {
 
 func TestHandleSafetyUninstallV1(t *testing.T) {
 	srv, _ := setupTestServer(t)
+	t.Setenv("HOME", t.TempDir()) // never touch the developer's ~/.ntm or ~/.claude
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/safety/uninstall", nil)
 	rec := httptest.NewRecorder()
 	srv.handleSafetyUninstallV1(rec, req)

@@ -218,7 +218,8 @@ func TestLifecycleLaunchSpecTransportHelper(t *testing.T) {
 		t.Fatalf("metadata recorded for another pane: %q", record.PaneID)
 	}
 	if mode == "legacy" {
-		if record.Spec.Command != "claude --model CURRENT_WRONG" || string(delivered) != record.Spec.Command {
+		// The relaunched Claude agent keeps ntm's PreToolUse hooks (--settings).
+		if !strings.HasPrefix(record.Spec.Command, "claude --model CURRENT_WRONG --settings ") || !strings.Contains(record.Spec.Command, "safety claude-hook") || string(delivered) != record.Spec.Command {
 			t.Fatalf("legacy relaunch did not record the command actually sent: %+v", record.Spec)
 		}
 	} else if record.Spec.Command != saved.Command || record.Spec.SystemPromptSHA256 != saved.SystemPromptSHA256 || record.Spec.Persona != saved.Persona || !strings.Contains(string(delivered), saved.Command) || strings.Contains(string(delivered), "CURRENT_WRONG") {

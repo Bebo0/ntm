@@ -13,6 +13,7 @@ import (
 	"github.com/Dicklesworthstone/ntm/internal/agentsession"
 	"github.com/Dicklesworthstone/ntm/internal/config"
 	"github.com/Dicklesworthstone/ntm/internal/coordinator"
+	"github.com/Dicklesworthstone/ntm/internal/policy"
 	"github.com/Dicklesworthstone/ntm/internal/resilience"
 	"github.com/Dicklesworthstone/ntm/internal/swarm"
 	"github.com/Dicklesworthstone/ntm/internal/tmux"
@@ -120,7 +121,11 @@ func prepareSwarmAccountRotation(ctx context.Context, plan *swarm.SwarmPlan, opt
 					template = cfg.Agents.Codex
 				}
 				model := cfg.Models.GetModelName(pane.AgentType, "")
-				command, err := config.GenerateAgentCommand(template, config.AgentTemplateVars{Model: model, AgentType: pane.AgentType, SessionName: session.Name, PaneIndex: pane.Index, ProjectDir: project})
+				vars := config.AgentTemplateVars{Model: model, AgentType: pane.AgentType, SessionName: session.Name, PaneIndex: pane.Index, ProjectDir: project}
+				if provider != "openai" {
+					vars.ClaudeSettings = policy.ClaudeAgentLaunchSettings(cfg).Settings
+				}
+				command, err := config.GenerateAgentCommand(template, vars)
 				if err != nil {
 					reason = fmt.Sprintf("configured launch command cannot be rendered: %v", err)
 				} else if err := agentsession.ValidateGlobalCredentialLaunchCommand(pane.AgentType, command, agentsession.ResumeLaunchOptions{}); err != nil {

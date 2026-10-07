@@ -63,7 +63,13 @@ type SafetyStatusResponse struct {
 	WrapperPath         string `json:"wrapper_path,omitempty"`
 	GitWrapperInstalled bool   `json:"git_wrapper_installed"`
 	RmWrapperInstalled  bool   `json:"rm_wrapper_installed"`
-	HookInstalled       bool   `json:"hook_installed"`
+	// HookInstalled is true only when the hook script exists and Claude
+	// Code's settings register it; Claude never runs unregistered scripts.
+	HookInstalled     bool   `json:"hook_installed"`
+	HookScriptPresent bool   `json:"hook_script_present"`
+	HookRegistered    bool   `json:"hook_registered"`
+	HookSettingsPath  string `json:"hook_settings_path,omitempty"`
+	HookSettingsError string `json:"hook_settings_error,omitempty"`
 }
 
 func (s *Server) handleSafetyStatusV1(w http.ResponseWriter, r *http.Request) {
@@ -85,9 +91,11 @@ func (s *Server) handleSafetyStatusV1(w http.ResponseWriter, r *http.Request) {
 	gitWrapperInstalled := safetyFileExists(gitWrapper)
 	rmWrapperInstalled := safetyFileExists(rmWrapper)
 
-	// Check if Claude Code hook is installed
-	hookPath := filepath.Join(home, ".claude", "hooks", "PreToolUse", "ntm-safety.sh")
-	hookInstalled := safetyFileExists(hookPath)
+	hookPath := policy.ClaudeHookScriptPath(home)
+	settingsPath := policy.ClaudeUserSettingsPath(home)
+	hookScriptPresent := safetyFileExists(hookPath)
+	hookRegistered, registeredErr := policy.ClaudeHookRegistered(settingsPath, hookPath)
+	hookInstalled := hookScriptPresent && hookRegistered
 
 	// Load policy
 	p, err := policy.LoadOrDefault()
@@ -120,6 +128,12 @@ func (s *Server) handleSafetyStatusV1(w http.ResponseWriter, r *http.Request) {
 		GitWrapperInstalled: gitWrapperInstalled,
 		RmWrapperInstalled:  rmWrapperInstalled,
 		HookInstalled:       hookInstalled,
+		HookScriptPresent:   hookScriptPresent,
+		HookRegistered:      hookRegistered,
+		HookSettingsPath:    settingsPath,
+	}
+	if registeredErr != nil {
+		resp.HookSettingsError = registeredErr.Error()
 	}
 
 	data, err := toJSONMap(resp)
@@ -260,6 +274,7 @@ type SafetyInstallResponse struct {
 	GitWrapper string `json:"git_wrapper"`
 	RmWrapper  string `json:"rm_wrapper"`
 	Hook       string `json:"hook"`
+	Settings   string `json:"settings"`
 	Policy     string `json:"policy"`
 }
 
@@ -307,17 +322,22 @@ func (s *Server) handleSafetyInstallV1(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Install Claude Code hook
-	hookDir := filepath.Join(home, ".claude", "hooks", "PreToolUse")
-	if err := os.MkdirAll(hookDir, 0755); err != nil {
+	// Install the Claude Code hook script and register it in Claude's
+	// settings: Claude Code runs only hooks a settings file lists.
+	hookPath := policy.ClaudeHookScriptPath(home)
+	if err := os.MkdirAll(filepath.Dir(hookPath), 0755); err != nil {
 		writeErrorResponse(w, http.StatusInternalServerError, ErrCodeInternalError,
 			"failed to create hook directory", nil, reqID)
 		return
 	}
-
-	hookPath := filepath.Join(hookDir, "ntm-safety.sh")
 	if err := installWrapperFile(hookPath, policy.ClaudeHookScript, req.Force); err != nil {
 		writeErrorResponse(w, http.StatusConflict, ErrCodeConflict, err.Error(), nil, reqID)
+		return
+	}
+	settingsPath := policy.ClaudeUserSettingsPath(home)
+	if _, err := policy.RegisterClaudeHook(settingsPath, hookPath); err != nil {
+		writeErrorResponse(w, http.StatusInternalServerError, ErrCodeInternalError,
+			fmt.Sprintf("failed to register Claude Code hook: %v", err), nil, reqID)
 		return
 	}
 
@@ -335,6 +355,7 @@ func (s *Server) handleSafetyInstallV1(w http.ResponseWriter, r *http.Request) {
 		GitWrapper: gitWrapper,
 		RmWrapper:  rmWrapper,
 		Hook:       hookPath,
+		Settings:   settingsPath,
 		Policy:     policyPath,
 	}
 
@@ -379,8 +400,17 @@ func (s *Server) handleSafetyUninstallV1(w http.ResponseWriter, r *http.Request)
 		}
 	}
 
-	// Remove hook
-	hookPath := filepath.Join(home, ".claude", "hooks", "PreToolUse", "ntm-safety.sh")
+	// Unregister the hook before removing its script, so Claude Code is never
+	// left pointing at a missing file.
+	hookPath := policy.ClaudeHookScriptPath(home)
+	settingsPath := policy.ClaudeUserSettingsPath(home)
+	if changed, err := policy.UnregisterClaudeHook(settingsPath, hookPath); err != nil {
+		writeErrorResponse(w, http.StatusInternalServerError, ErrCodeInternalError,
+			fmt.Sprintf("failed to unregister Claude Code hook: %v", err), nil, reqID)
+		return
+	} else if changed {
+		removed = append(removed, settingsPath+" (hooks.PreToolUse entry)")
+	}
 	if safetyFileExists(hookPath) {
 		if err := os.Remove(hookPath); err != nil {
 			writeErrorResponse(w, http.StatusInternalServerError, ErrCodeInternalError,

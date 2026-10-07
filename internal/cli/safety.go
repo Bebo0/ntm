@@ -3,6 +3,7 @@ package cli
 import (
 	"context"
 	"fmt"
+	"io"
 	"log/slog"
 	"os"
 	"os/exec"
@@ -43,9 +44,69 @@ Use 'ntm safety simulate <command>' to dry-run a multi-step plan.`,
 		newSafetySimulateCmd(),
 		newSafetyInstallCmd(),
 		newSafetyUninstallCmd(),
+		newSafetyClaudeHookCmd(),
 	)
 
 	return cmd
+}
+
+// newSafetyClaudeHookCmd is the command Claude Code's PreToolUse hook runs —
+// both the script `ntm safety install` registers and the hook spawned Claude
+// agents get through --settings. It is not for interactive use.
+func newSafetyClaudeHookCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:    "claude-hook",
+		Short:  "Check a Claude Code PreToolUse event from stdin against the safety policy",
+		Hidden: true,
+		Args:   cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if code := runSafetyClaudeHook(cmd.InOrStdin(), cmd.ErrOrStderr()); code != 0 {
+				os.Exit(code)
+			}
+			return nil
+		},
+	}
+}
+
+// claudeHookRefuse is the exit status that makes Claude Code refuse the tool
+// call and show stderr to the model; any other non-zero status lets the call
+// proceed.
+const claudeHookRefuse = 2
+
+// runSafetyClaudeHook evaluates one PreToolUse payload and returns the hook's
+// exit status. Non-Bash tools and empty commands pass. A payload that cannot
+// be read is refused: the hook is registered for Bash, so an unreadable event
+// is a Bash command nobody checked.
+func runSafetyClaudeHook(stdin io.Reader, stderr io.Writer) int {
+	in, err := policy.ParseClaudeHookInput(stdin)
+	if err != nil {
+		fmt.Fprintf(stderr, "BLOCKED: ntm safety hook could not read the tool call (%v), so the command was not checked.\n", err)
+		return claudeHookRefuse
+	}
+	if in.ToolName != "Bash" || strings.TrimSpace(in.ToolInput.Command) == "" {
+		return 0
+	}
+	resp, exitCode, err := evaluateSafetyCheck(in.ToolInput.Command)
+	if err != nil {
+		fmt.Fprintf(stderr, "BLOCKED: ntm safety hook could not evaluate the policy: %v\n", err)
+		return claudeHookRefuse
+	}
+	if exitCode == 0 {
+		return 0
+	}
+	recordHookRefusal(resp)
+	reason := strings.TrimSpace(resp.Reason)
+	if reason == "" {
+		reason = "Policy violation"
+	}
+	if resp.Action == string(policy.ActionApprove) {
+		fmt.Fprintf(stderr, "APPROVAL REQUIRED: %s\n", reason)
+		fmt.Fprintln(stderr, "This check is advisory: the command was refused but no approval request was queued.")
+		fmt.Fprintln(stderr, "Approval-gated ntm commands (e.g. 'ntm locks force-release') request approval when run; decide with 'ntm approve'.")
+	} else {
+		fmt.Fprintf(stderr, "BLOCKED: %s\n", reason)
+	}
+	return claudeHookRefuse
 }
 
 func newSafetyStatusCmd() *cobra.Command {
@@ -67,7 +128,13 @@ type SafetyStatusResponse struct {
 	AllowedCount      int    `json:"allowed_rules"`
 	WrapperPath       string `json:"wrapper_path,omitempty"`
 	WrappersEffective bool   `json:"wrappers_effective"`
+	// HookInstalled is true only when the hook script exists and the Claude
+	// settings file registers it (HookScriptPresent && HookRegistered).
 	HookInstalled     bool   `json:"hook_installed"`
+	HookScriptPresent bool   `json:"hook_script_present"`
+	HookRegistered    bool   `json:"hook_registered"`
+	HookSettingsPath  string `json:"hook_settings_path,omitempty"`
+	HookSettingsError string `json:"hook_settings_error,omitempty"`
 }
 
 const (
@@ -120,10 +187,17 @@ func runSafetyStatus(cmd *cobra.Command, args []string) error {
 	// Check whether installed wrappers actually shadow the system commands.
 	gitWrapper := filepath.Join(wrapperDir, "git")
 
-	// Check if Claude Code hook is installed
-	hookPath := filepath.Join(home, ".claude", "hooks", "PreToolUse", "ntm-safety.sh")
-	hookInstalled := fileExists(hookPath)
+	// The Claude Code hook protects only when its script exists AND a settings
+	// file registers it: Claude Code never runs unregistered hook scripts.
+	hookPath := policy.ClaudeHookScriptPath(home)
+	settingsPath := policy.ClaudeUserSettingsPath(home)
+	hookScriptPresent := fileExists(hookPath)
+	hookRegistered, registeredErr := policy.ClaudeHookRegistered(settingsPath, hookPath)
+	hookInstalled := hookScriptPresent && hookRegistered
 	installed, wrappersEffective, installationState := safetyInstallationState(wrapperDir, hookInstalled)
+	if !installed && hookScriptPresent {
+		installed, installationState = true, safetyInstalledNotEffective
+	}
 
 	// Load policy
 	p, err := policy.LoadOrDefault()
@@ -150,6 +224,12 @@ func runSafetyStatus(cmd *cobra.Command, args []string) error {
 			WrapperPath:         wrapperDir,
 			WrappersEffective:   wrappersEffective,
 			HookInstalled:       hookInstalled,
+			HookScriptPresent:   hookScriptPresent,
+			HookRegistered:      hookRegistered,
+			HookSettingsPath:    settingsPath,
+		}
+		if registeredErr != nil {
+			resp.HookSettingsError = registeredErr.Error()
 		}
 		return output.PrintJSON(resp)
 	}
@@ -182,9 +262,16 @@ func runSafetyStatus(cmd *cobra.Command, args []string) error {
 		fmt.Printf("  %s %s\n", labelStyle.Render("Shell Wrappers:"), warnStyle.Render("Inactive"))
 	}
 
-	if hookInstalled {
+	switch {
+	case hookInstalled:
 		fmt.Printf("  %s %s (%s)\n", labelStyle.Render("Claude Hook:   "), okStyle.Render("Active"), hookPath)
-	} else {
+	case hookScriptPresent:
+		fmt.Printf("  %s %s\n", labelStyle.Render("Claude Hook:   "), warnStyle.Render("Script present but not registered in "+settingsPath))
+		if registeredErr != nil {
+			fmt.Printf("  %s %v\n", labelStyle.Render("Error:         "), registeredErr)
+		}
+		fmt.Printf("  %s ntm safety install --force\n", labelStyle.Render("Fix:           "))
+	default:
 		fmt.Printf("  %s %s\n", labelStyle.Render("Claude Hook:   "), warnStyle.Render("Inactive"))
 	}
 
@@ -646,15 +733,18 @@ func runSafetyInstall(force bool) error {
 		return err
 	}
 
-	// Install Claude Code hook
-	hookDir := filepath.Join(home, ".claude", "hooks", "PreToolUse")
-	if err := os.MkdirAll(hookDir, 0755); err != nil {
+	// Install the Claude Code hook script and register it: Claude Code runs
+	// only hooks a settings file lists, never scripts it finds in a directory.
+	hookPath := policy.ClaudeHookScriptPath(home)
+	if err := os.MkdirAll(filepath.Dir(hookPath), 0755); err != nil {
 		return fmt.Errorf("creating hook directory: %w", err)
 	}
-
-	hookPath := filepath.Join(hookDir, "ntm-safety.sh")
 	if err := installWrapper(hookPath, policy.ClaudeHookScript, force); err != nil {
 		return err
+	}
+	settingsPath := policy.ClaudeUserSettingsPath(home)
+	if _, err := policy.RegisterClaudeHook(settingsPath, hookPath); err != nil {
+		return fmt.Errorf("registering Claude Code hook in %s: %w", settingsPath, err)
 	}
 
 	// Create default policy file if it doesn't exist
@@ -675,6 +765,7 @@ func runSafetyInstall(force bool) error {
 		fmt.Printf("  %s Installed git wrapper: %s\n", okStyle.Render("✓"), gitWrapper)
 		fmt.Printf("  %s Installed rm wrapper: %s\n", okStyle.Render("✓"), rmWrapper)
 		fmt.Printf("  %s Installed Claude Code hook: %s\n", okStyle.Render("✓"), hookPath)
+		fmt.Printf("  %s Registered it for the Bash tool in: %s\n", okStyle.Render("✓"), settingsPath)
 		if policyCreated {
 			fmt.Printf("  %s Created policy file: %s\n", okStyle.Render("✓"), policyPath)
 		} else {
@@ -691,6 +782,7 @@ func runSafetyInstall(force bool) error {
 			"git_wrapper": gitWrapper,
 			"rm_wrapper":  rmWrapper,
 			"hook":        hookPath,
+			"settings":    settingsPath,
 			"policy":      policyPath,
 		})
 	}
@@ -726,8 +818,15 @@ func runSafetyUninstall(cmd *cobra.Command, args []string) error {
 		}
 	}
 
-	// Remove hook
-	hookPath := filepath.Join(home, ".claude", "hooks", "PreToolUse", "ntm-safety.sh")
+	// Unregister the hook before removing its script, so Claude Code is never
+	// left pointing at a missing file.
+	hookPath := policy.ClaudeHookScriptPath(home)
+	settingsPath := policy.ClaudeUserSettingsPath(home)
+	if changed, err := policy.UnregisterClaudeHook(settingsPath, hookPath); err != nil {
+		return fmt.Errorf("unregistering Claude Code hook from %s: %w", settingsPath, err)
+	} else if changed {
+		removed = append(removed, settingsPath+" (hooks.PreToolUse entry)")
+	}
 	if fileExists(hookPath) {
 		if err := os.Remove(hookPath); err != nil {
 			return fmt.Errorf("removing hook: %w", err)

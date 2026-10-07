@@ -2,7 +2,6 @@ package cli
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
@@ -21,10 +20,10 @@ import (
 	"github.com/Dicklesworthstone/ntm/internal/events"
 	"github.com/Dicklesworthstone/ntm/internal/gemini"
 	"github.com/Dicklesworthstone/ntm/internal/hooks"
-	"github.com/Dicklesworthstone/ntm/internal/integrations/dcg"
 	"github.com/Dicklesworthstone/ntm/internal/output"
 	"github.com/Dicklesworthstone/ntm/internal/persona"
 	"github.com/Dicklesworthstone/ntm/internal/plugins"
+	"github.com/Dicklesworthstone/ntm/internal/policy"
 	"github.com/Dicklesworthstone/ntm/internal/pressure"
 	"github.com/Dicklesworthstone/ntm/internal/ratelimit"
 	"github.com/Dicklesworthstone/ntm/internal/resilience"
@@ -793,59 +792,14 @@ func executeAdd(ctx context.Context, opts AddOptions, emitResult bool) error {
 			ompCount++
 		}
 
-		// Configure Claude hooks for DCG and RCH integrations
+		// Claude Code reads hooks only from settings: the safety policy, dcg
+		// and rch hooks ride on the launch command as --settings.
+		var claudeLaunch policy.ClaudeAgentLaunch
 		if agent.Type == AgentTypeClaude {
-			var preToolHooks []dcg.HookEntry
-			var hookSources []string
-
-			if cfg.Integrations.DCG.Enabled && dcg.ShouldConfigureHooks(cfg.Integrations.DCG.Enabled, cfg.Integrations.DCG.BinaryPath) {
-				dcgOpts := dcg.DCGHookOptions{
-					BinaryPath:      cfg.Integrations.DCG.BinaryPath,
-					AuditLog:        cfg.Integrations.DCG.AuditLog,
-					Timeout:         5,
-					CustomBlocklist: cfg.Integrations.DCG.CustomBlocklist,
-					CustomWhitelist: cfg.Integrations.DCG.CustomWhitelist,
-				}
-				dcgConfig, err := dcg.GenerateHookConfig(dcgOpts)
-				if err == nil {
-					preToolHooks = append(preToolHooks, dcgConfig.Hooks.PreToolUse...)
-					hookSources = append(hookSources, "dcg")
-				} else if !IsJSONOutput() {
-					output.PrintWarningf("Failed to configure DCG hooks for agent %d: %v", num, err)
-				}
-			}
-
-			if dcg.ShouldConfigureRCHHooks(cfg.Integrations.RCH.Enabled, cfg.Integrations.RCH.InterceptPatterns) {
-				rchHook, err := dcg.GenerateRCHHookEntry(dcg.RCHHookOptions{
-					BinaryPath: cfg.Integrations.RCH.BinaryPath,
-					Patterns:   cfg.Integrations.RCH.InterceptPatterns,
-					Timeout:    5,
-				})
-				if err == nil {
-					preToolHooks = append(preToolHooks, rchHook)
-					hookSources = append(hookSources, "rch")
-				} else if !IsJSONOutput() {
-					output.PrintWarningf("Failed to configure RCH hooks for agent %d: %v", num, err)
-				}
-			}
-
-			if len(preToolHooks) > 0 {
-				hookConfig := dcg.ClaudeHookConfig{
-					Hooks: dcg.HooksSection{
-						PreToolUse: preToolHooks,
-					},
-				}
-				hookJSON, err := json.Marshal(hookConfig)
-				if err == nil {
-					if envVars == nil {
-						envVars = make(map[string]string)
-					}
-					envVars["CLAUDE_CODE_HOOKS"] = string(hookJSON)
-					if !IsJSONOutput() {
-						output.PrintInfof("Claude hooks configured for agent %d (%s)", num, strings.Join(hookSources, ", "))
-					}
-				} else if !IsJSONOutput() {
-					output.PrintWarningf("Failed to configure Claude hooks for agent %d: %v", num, err)
+			claudeLaunch = policy.ClaudeAgentLaunchSettings(cfg)
+			if !IsJSONOutput() {
+				for _, warning := range claudeLaunch.Warnings {
+					output.PrintWarningf("Agent %d: %s", num, warning)
 				}
 			}
 		}
@@ -925,9 +879,13 @@ func executeAdd(ctx context.Context, opts AddOptions, emitResult bool) error {
 			SystemPromptFile: systemPromptFile,
 			PersonaName:      personaName,
 			ReasoningEffort:  resolvedReasoningEffort,
+			ClaudeSettings:   claudeLaunch.Settings,
 		})
 		if err != nil {
 			return outputError(fmt.Errorf("generating command for %s agent: %w", agent.Type, err))
+		}
+		if len(claudeLaunch.Sources) > 0 && !IsJSONOutput() {
+			output.PrintInfof("Claude hooks configured for agent %d (%s)", num, strings.Join(claudeLaunch.Sources, ", "))
 		}
 		launchSpec, err := captureAgentLaunchSpec(agent.Type, finalCmd, resolvedModel, agent.Model, personaName, resolvedReasoningEffort, systemPromptFile, envVars)
 		if err != nil {

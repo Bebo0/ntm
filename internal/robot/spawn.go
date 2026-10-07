@@ -23,6 +23,7 @@ import (
 	dispatchsvc "github.com/Dicklesworthstone/ntm/internal/dispatch"
 	"github.com/Dicklesworthstone/ntm/internal/handoff"
 	"github.com/Dicklesworthstone/ntm/internal/models"
+	"github.com/Dicklesworthstone/ntm/internal/policy"
 	"github.com/Dicklesworthstone/ntm/internal/pressure"
 	"github.com/Dicklesworthstone/ntm/internal/process"
 	"github.com/Dicklesworthstone/ntm/internal/recovery"
@@ -1841,6 +1842,12 @@ func getAgentCommandsWithOverrides(cfg *config.Config, opts SpawnOptions) (map[s
 	}
 
 	launchModels := spawnLaunchModels(cfg, opts)
+	// Claude agents carry ntm's PreToolUse hooks (safety policy, dcg, rch)
+	// as --settings, the only way Claude Code accepts hooks at launch.
+	var claudeSettings string
+	if opts.CCCount > 0 {
+		claudeSettings = policy.ClaudeAgentLaunchSettings(cfg).Settings
+	}
 	for agentType, cmdTemplate := range defaults {
 		launch := launchModels[agentType]
 		vars := config.AgentTemplateVars{
@@ -1850,9 +1857,12 @@ func getAgentCommandsWithOverrides(cfg *config.Config, opts SpawnOptions) (map[s
 			ModelRequested:  launch.ModelAlias != "",
 			ReasoningEffort: launch.ReasoningEffort,
 		}
+		if agentType == "claude" {
+			vars.ClaudeSettings = claudeSettings
+		}
 		rendered, err := config.GenerateAgentCommand(cmdTemplate, vars)
 		if err != nil {
-			if launch.ModelAlias != "" || launch.ReasoningEffort != "" {
+			if launch.ModelAlias != "" || launch.ReasoningEffort != "" || vars.ClaudeSettings != "" {
 				// An explicit override must not be silently dropped
 				// (GenerateAgentCommand's guard errors describe exactly that).
 				return nil, fmt.Errorf("rendering %s launch command: %w", agentType, err)

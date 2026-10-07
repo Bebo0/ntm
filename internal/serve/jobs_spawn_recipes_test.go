@@ -109,7 +109,8 @@ func TestConfiguredSwarmJobUsesSelectedLaunchCommand(t *testing.T) {
 	}
 	select {
 	case command := <-commands:
-		if command != "operator-claude --model 'operator/model'" {
+		// The configured wrapper is used and carries ntm's Claude hooks.
+		if !strings.HasPrefix(command, "operator-claude --model 'operator/model' --settings ") || !strings.Contains(command, "safety claude-hook") {
 			t.Fatalf("selected launch command ignored: %q", command)
 		}
 	default:
