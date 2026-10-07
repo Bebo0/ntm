@@ -3866,9 +3866,13 @@ func runRetryAssignments(ctx context.Context, session string) error {
 		}
 		reservationRequired := assignReserveFiles
 		reservationDiscovery := assignReserveFiles
+		var requestedPaths []string
 		if recoverAtomic {
 			reservationRequired = failed.ReservationRequired
 			reservationDiscovery = failed.ReservationDiscovery
+			// The recorded intent includes the paths resolved before the claim;
+			// replay them, as bulk, coordinator and rebalance recovery do.
+			requestedPaths = append([]string(nil), failed.ReservationInputPaths...)
 		}
 		reservationNeedsRefresh := !failed.ReservationCompleted ||
 			(failed.ReservationExpiresAt != nil && !failed.ReservationExpiresAt.After(time.Now().UTC()))
@@ -3908,6 +3912,7 @@ func runRetryAssignments(ctx context.Context, session string) error {
 			BaseIntentSHA256:          baseIntentSHA256,
 			RequireReservation:        reservationRequired,
 			AllowReservationDiscovery: reservationDiscovery,
+			RequestedPaths:            requestedPaths,
 			ReservationTTL:            time.Hour,
 		})
 		cancel()
