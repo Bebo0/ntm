@@ -158,6 +158,22 @@ func (h *monitorCoordinatorHost) loadSettings(ctx context.Context) (monitorCoord
 			settings.assign = &policy
 		}
 	}
+	if runtime.ConflictNotify {
+		// Conflict notification stays with `ntm coordinator run`, where it ran
+		// before monitors hosted the coordinator. Releases up to v1.36.1
+		// defaulted conflict_notify to true and `ntm config init`/`edit`/`reset`
+		// wrote that default into config files, so a persisted true cannot be
+		// told apart from a deliberate opt-in. Notification mails every holder
+		// of overlapping reservations project-wide, and every session monitor
+		// runs this host, so hosting it here would mail each conflicting pair
+		// once per session.
+		settings.runtime.ConflictNotify = false
+		note := "conflict-notify is not run by the session monitor; it runs only under `ntm coordinator run`"
+		if settings.warning != "" {
+			note = settings.warning + "; " + note
+		}
+		settings.warning = note
+	}
 	return settings, nil
 }
 

@@ -1296,7 +1296,12 @@ ntm coordinator status myproject --json
   `ntm coordinator run` runs. `conflict_notify` is off by default because
   notification mails every holder of overlapping reservations in the project,
   including other sessions' agents, at high importance and again for each
-  persisting pair after its cooldown. Enabled auto-assignment whose assignment
+  persisting pair after its cooldown. The monitor never hosts
+  `conflict-notify`, even when it is set: releases up to v1.36.1 defaulted it
+  to true and `ntm config init` wrote that default into config files, so a
+  persisted `true` is not a reliable opt-in, and every session would mail each
+  conflicting pair. Conflict notification runs only under
+  `ntm coordinator run`, as before. Enabled auto-assignment whose assignment
   safety policy does not load stays disabled, and the status reports why.
 - **No double coordination.** A foreground `ntm coordinator run` (including
   `--once`) or an `ntm assign --watch` that maintains reservations claims the

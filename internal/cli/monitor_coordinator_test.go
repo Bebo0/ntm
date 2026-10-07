@@ -489,6 +489,53 @@ func TestMonitorCoordinatorSettingsReloadIsStable(t *testing.T) {
 	}
 }
 
+// TestMonitorCoordinatorLeavesConflictNotifyToCoordinatorRun: configs written
+// by `ntm config init` up to v1.36.1 carry conflict_notify = true (the old
+// default). The monitor every session runs must not turn that into
+// project-wide conflict mail and must say why in its status, while
+// `ntm coordinator run` keeps the setting and a deliberate conflict-negotiate
+// opt-in still switches the monitor to the full loop.
+func TestMonitorCoordinatorLeavesConflictNotifyToCoordinatorRun(t *testing.T) {
+	isolateSessionAgentStorage(t)
+	previousConfig := cfgFile
+	t.Cleanup(func() { cfgFile = previousConfig })
+	project := t.TempDir()
+	cfgFile = filepath.Join(t.TempDir(), "config.toml")
+	stubCoordinatorLiveTopology(t, []tmux.Pane{{ID: "%1", Index: 1}}, map[string]string{"%1": project})
+	host := newMonitorCoordinatorHost("conflict-notify-legacy", project)
+
+	if err := os.WriteFile(cfgFile, []byte("[coordinator]\nconflict_notify = true\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	legacy, err := host.loadSettings(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if legacy.runtime.ConflictNotify || legacy.mode() != monitorCoordinatorModeMaintenance || len(legacy.features()) != 0 {
+		t.Fatalf("legacy conflict_notify = true: notify=%t mode=%s features=%v, want notify off in maintenance mode",
+			legacy.runtime.ConflictNotify, legacy.mode(), legacy.features())
+	}
+	if !strings.Contains(legacy.warning, "ntm coordinator run") {
+		t.Fatalf("monitor status does not explain the skipped conflict-notify: warning=%q", legacy.warning)
+	}
+	if foreground, _ := loadCoordinatorRuntimeConfigWithNTM(); !foreground.ConflictNotify {
+		t.Fatal("`ntm coordinator run` lost conflict_notify = true; only the monitor may skip it")
+	}
+
+	if err := os.WriteFile(cfgFile, []byte("[coordinator]\nconflict_notify = true\nconflict_negotiate = true\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	negotiate, err := host.loadSettings(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if negotiate.runtime.ConflictNotify || !negotiate.runtime.ConflictNegotiate || negotiate.mode() != monitorCoordinatorModeFull ||
+		!reflect.DeepEqual(negotiate.features(), []string{"conflict-negotiate"}) {
+		t.Fatalf("conflict_negotiate opt-in: notify=%t negotiate=%t mode=%s features=%v",
+			negotiate.runtime.ConflictNotify, negotiate.runtime.ConflictNegotiate, negotiate.mode(), negotiate.features())
+	}
+}
+
 // TestWatchLoopPausesMonitorCoordinatorWhileMaintaining: watch mode consumes
 // the completion events its own maintenance records, so it claims the session
 // before its first maintenance pass and the monitor's coordinator stays paused

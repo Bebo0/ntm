@@ -571,8 +571,11 @@ monitor; `ntm coordinator status` shows it under Runtime (`runtime` in
 reservations of in-progress assignments, including those taken by a one-shot
 `ntm assign`, before their one-hour leases lapse, and releases them when the
 assigned bead closes. Every other coordinator action (`auto-assign`, `digest`,
-`conflict-notify`, `conflict-negotiate`, `mail-nudge`) is off until enabled.
-A foreground `ntm coordinator run` or a reservation-maintaining
+`conflict-negotiate`, `mail-nudge`) is off until enabled. `conflict-notify`
+never runs in the session monitor, only under `ntm coordinator run`: older
+`ntm config init` files set it to true, and it mails every holder of
+overlapping reservations in the project (`ntm coordinator status` notes when it
+is set). A foreground `ntm coordinator run` or a reservation-maintaining
 `ntm assign --watch` pauses the monitor's coordinator while it runs, so a
 session is never coordinated twice.
 
