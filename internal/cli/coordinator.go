@@ -1021,7 +1021,8 @@ The flag is written to the [coordinator] section of the selected config file
 (--config, or the global ~/.config/ntm/config.toml). Session monitors started
 by 'ntm spawn' host the coordinator and apply the change within 15 seconds; a
 foreground 'ntm coordinator run' reads config at startup, so restart it to
-apply.
+apply. conflict-notify is the exception: session monitors never run it, only
+'ntm coordinator run' does.
 
 Examples:
   ntm coordinator enable auto-assign
@@ -1057,7 +1058,8 @@ The flag is written to the [coordinator] section of the selected config file
 (--config, or the global ~/.config/ntm/config.toml). Session monitors started
 by 'ntm spawn' host the coordinator and apply the change within 15 seconds; a
 foreground 'ntm coordinator run' reads config at startup, so restart it to
-apply. Disabling a feature never stops assignment lease maintenance.
+apply. conflict-notify is the exception: session monitors never run it, only
+'ntm coordinator run' does. Disabling a feature never stops assignment lease maintenance.
 
 Examples:
   ntm coordinator disable auto-assign
@@ -1173,7 +1175,11 @@ func runCoordinatorToggle(cmd *cobra.Command, args []string, enable bool, interv
 		fmt.Printf("  %s = %s\n", kv[0], kv[1])
 	}
 	fmt.Println()
-	fmt.Println("Session monitors apply this within 15 seconds; restart a foreground `ntm coordinator run` to apply it there.")
+	if feature == "conflict-notify" {
+		fmt.Println("Session monitors never run conflict-notify; it runs only under `ntm coordinator run` (restart a running one to apply it).")
+	} else {
+		fmt.Println("Session monitors apply this within 15 seconds; restart a foreground `ntm coordinator run` to apply it there.")
+	}
 
 	return nil
 }
