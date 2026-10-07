@@ -102,11 +102,7 @@ func GetCASSStatus() (*CASSStatusOutput, error) {
 			output.Index.Messages = &status.Messages
 		}
 	} else {
-		output.RobotResponse = NewErrorResponse(
-			err,
-			ErrCodeInternalError,
-			"Check cass index health and configuration",
-		)
+		output.RobotResponse = cassErrorResponse(err, "Check cass index health and configuration")
 	}
 
 	return output, nil
@@ -175,13 +171,9 @@ func GetCASSSearch(opts CASSSearchOptions) (*CASSSearchOutput, error) {
 
 	if err != nil {
 		return &CASSSearchOutput{
-			RobotResponse: NewErrorResponse(
-				err,
-				ErrCodeInternalError,
-				"Check cass index health and query parameters",
-			),
-			Query: opts.Query,
-			Hits:  []CASSSearchHit{},
+			RobotResponse: cassErrorResponse(err, "Check cass index health and query parameters"),
+			Query:         opts.Query,
+			Hits:          []CASSSearchHit{},
 		}, nil
 	}
 
@@ -264,11 +256,7 @@ func GetCASSInsights(since string) (*CASSInsightsOutput, error) {
 		Aggregate: "agent,workspace",
 	})
 	if err != nil {
-		output.RobotResponse = NewErrorResponse(
-			err,
-			ErrCodeInternalError,
-			"Check cass index health and configuration",
-		)
+		output.RobotResponse = cassErrorResponse(err, "Check cass index health and configuration")
 		return output, nil
 	}
 
@@ -334,11 +322,7 @@ func GetCASSContext(query string) (*CASSContextOutput, error) {
 
 	if err != nil {
 		return &CASSContextOutput{
-			RobotResponse: NewErrorResponse(
-				err,
-				ErrCodeInternalError,
-				"Check cass index health",
-			),
+			RobotResponse:    cassErrorResponse(err, "Check cass index health"),
 			Query:            query,
 			RelevantSessions: []CASSContextSession{},
 		}, nil
@@ -11646,6 +11630,16 @@ func setBVRobotFailure(response *RobotResponse, message, code string) {
 // beadsInitHint answers a bv/br analysis run in a project with no beads
 // workspace: nothing is wrong, there is just no tracker to analyze yet.
 const beadsInitHint = "No beads workspace in this project: run 'br init' to start tracking work"
+
+// cassErrorResponse is the failure for a cass call: DEPENDENCY_MISSING naming
+// the index command when cass is installed but has never indexed, else
+// INTERNAL_ERROR.
+func cassErrorResponse(err error, hint string) RobotResponse {
+	if errors.Is(err, cass.ErrNotInitialized) {
+		return NewErrorResponse(err, ErrCodeDependencyMissing, "Run 'cass index --full' once to build the cass index")
+	}
+	return NewErrorResponse(err, ErrCodeInternalError, hint)
+}
 
 // bvErrorResponse is the failure for a bv/br call: DEPENDENCY_MISSING with
 // beadsInitHint when the project has no beads workspace, else INTERNAL_ERROR.

@@ -5170,6 +5170,54 @@ func TestBeadsEndpointsWithoutWorkspace(t *testing.T) {
 	}
 }
 
+// TestCASSEndpointsWithoutIndex: an installed cass that has never indexed
+// (exit 3) makes timeline and search answer 503 CASS_UNAVAILABLE naming
+// `cass index --full`; any other cass failure stays a 500.
+func TestCASSEndpointsWithoutIndex(t *testing.T) {
+	for _, tc := range []struct {
+		exitCode   int
+		wantStatus int
+	}{
+		{3, http.StatusServiceUnavailable},
+		{1, http.StatusInternalServerError},
+	} {
+		bin := t.TempDir()
+		script := fmt.Sprintf("#!/bin/sh\necho '{\"error\":{\"code\":3,\"kind\":\"missing-index\",\"message\":\"cass has not been initialized yet\"}}'\nexit %d\n", tc.exitCode)
+		if err := os.WriteFile(filepath.Join(bin, "cass"), []byte(script), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+		s, _ := setupTestServer(t)
+
+		requests := map[string]func() *httptest.ResponseRecorder{
+			"timeline": func() *httptest.ResponseRecorder {
+				w := httptest.NewRecorder()
+				s.handleCASSTimeline(w, httptest.NewRequest(http.MethodGet, "/api/v1/cass/timeline", nil))
+				return w
+			},
+			"search": func() *httptest.ResponseRecorder {
+				w := httptest.NewRecorder()
+				s.handleCASSSearch(w, httptest.NewRequest(http.MethodPost, "/api/v1/cass/search", strings.NewReader(`{"query":"auth"}`)))
+				return w
+			},
+		}
+		for name, do := range requests {
+			w := do()
+			var body struct {
+				ErrorCode string `json:"error_code"`
+				Error     string `json:"error"`
+			}
+			_ = json.Unmarshal(w.Body.Bytes(), &body)
+			if w.Code != tc.wantStatus {
+				t.Errorf("cass exit %d, %s: status %d (%s %q), want %d", tc.exitCode, name, w.Code, body.ErrorCode, body.Error, tc.wantStatus)
+			}
+			if indexHint := strings.Contains(body.Error, "cass index --full"); indexHint != (tc.exitCode == 3) {
+				t.Errorf("cass exit %d, %s: error %q, index hint wanted=%v", tc.exitCode, name, body.Error, tc.exitCode == 3)
+			}
+		}
+	}
+}
+
 // --- handleBeadsReady: br installed, temp dir ---
 
 func TestHandleBeadsReady_BrInstalledBadDir(t *testing.T) {

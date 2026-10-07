@@ -3,6 +3,7 @@ package robot
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -579,6 +580,55 @@ func TestBVSurfacesWithoutBeadsWorkspace(t *testing.T) {
 				t.Fatal(err)
 			}
 			check("label-attention", labels.RobotResponse)
+		})
+	}
+}
+
+// TestCASSSurfacesWithoutIndex: an installed cass that has never indexed
+// exits 3 with a missing-index error; search, insights and context report
+// DEPENDENCY_MISSING naming `cass index --full` instead of INTERNAL_ERROR,
+// while any other cass failure stays INTERNAL_ERROR.
+func TestCASSSurfacesWithoutIndex(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		exitCode int
+		wantCode string
+	}{
+		{"never indexed", 3, ErrCodeDependencyMissing},
+		{"other failure", 1, ErrCodeInternalError},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			bin := t.TempDir()
+			script := fmt.Sprintf("#!/bin/sh\necho '{\"error\":{\"code\":3,\"kind\":\"missing-index\",\"message\":\"cass has not been initialized yet\"}}'\nexit %d\n", tc.exitCode)
+			if err := os.WriteFile(filepath.Join(bin, "cass"), []byte(script), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+			check := func(surface string, resp RobotResponse) {
+				t.Helper()
+				if resp.Success || resp.ErrorCode != tc.wantCode {
+					t.Errorf("%s: success=%v code=%q error=%q, want %s", surface, resp.Success, resp.ErrorCode, resp.Error, tc.wantCode)
+				}
+				if wantIndex := tc.wantCode == ErrCodeDependencyMissing; wantIndex != strings.Contains(resp.Hint, "cass index --full") {
+					t.Errorf("%s: hint %q, index hint wanted=%v", surface, resp.Hint, wantIndex)
+				}
+			}
+			search, err := GetCASSSearch(CASSSearchOptions{Query: "auth"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			check("cass-search", search.RobotResponse)
+			insights, err := GetCASSInsights("7d")
+			if err != nil {
+				t.Fatal(err)
+			}
+			check("cass-insights", insights.RobotResponse)
+			ctxOut, err := GetCASSContext("auth")
+			if err != nil {
+				t.Fatal(err)
+			}
+			check("cass-context", ctxOut.RobotResponse)
 		})
 	}
 }

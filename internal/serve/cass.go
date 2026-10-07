@@ -36,7 +36,20 @@ const (
 	ErrCodeContextFailed     = "CONTEXT_FAILED"
 	ErrCodeOutcomeFailed     = "OUTCOME_FAILED"
 	ErrCodePrivacyFailed     = "PRIVACY_FAILED"
+
+	cassNotIndexedMessage = "cass has no index yet: run 'cass index --full' once to build it"
 )
+
+// writeCASSCallError reports a failed cass call. An installed cass that has
+// never indexed is unavailable (503 CASS_UNAVAILABLE, naming the index
+// command), not a server fault; any other failure keeps its 500 and code.
+func writeCASSCallError(w http.ResponseWriter, err error, code, message, reqID string) {
+	if errors.Is(err, cass.ErrNotInitialized) {
+		writeErrorResponse(w, http.StatusServiceUnavailable, ErrCodeCASSUnavailable, cassNotIndexedMessage, nil, reqID)
+		return
+	}
+	writeErrorResponse(w, http.StatusInternalServerError, code, message, map[string]interface{}{"error": err.Error()}, reqID)
+}
 
 // MemoryDaemonState tracks the memory daemon status
 type MemoryDaemonState string
@@ -334,8 +347,7 @@ func (s *Server) handleCASSCapabilities(w http.ResponseWriter, r *http.Request) 
 	caps, err := client.Capabilities(ctx)
 	if err != nil {
 		slog.Warn("failed to get cass capabilities", "error", err, "request_id", reqID)
-		writeErrorResponse(w, http.StatusInternalServerError, ErrCodeCASSUnavailable,
-			"Failed to get CASS capabilities", map[string]interface{}{"error": err.Error()}, reqID)
+		writeCASSCallError(w, err, ErrCodeCASSUnavailable, "Failed to get CASS capabilities", reqID)
 		return
 	}
 
@@ -406,8 +418,7 @@ func (s *Server) handleCASSSearch(w http.ResponseWriter, r *http.Request) {
 	result, err := client.Search(ctx, opts)
 	if err != nil {
 		slog.Warn("cass search failed", "error", err, "request_id", reqID)
-		writeErrorResponse(w, http.StatusInternalServerError, ErrCodeSearchFailed,
-			"Search failed", map[string]interface{}{"error": err.Error()}, reqID)
+		writeCASSCallError(w, err, ErrCodeSearchFailed, "Search failed", reqID)
 		return
 	}
 
@@ -561,8 +572,7 @@ func (s *Server) handleCASSTimeline(w http.ResponseWriter, r *http.Request) {
 	result, err := client.Timeline(ctx, since, "none", agent)
 	if err != nil {
 		slog.Warn("cass timeline failed", "error", err, "request_id", reqID)
-		writeErrorResponse(w, http.StatusInternalServerError, ErrCodeCASSUnavailable,
-			"Failed to get timeline", map[string]interface{}{"error": err.Error()}, reqID)
+		writeCASSCallError(w, err, ErrCodeCASSUnavailable, "Failed to get timeline", reqID)
 		return
 	}
 
@@ -621,8 +631,7 @@ func (s *Server) handleCASSPreview(w http.ResponseWriter, r *http.Request) {
 	})
 	if err != nil {
 		slog.Warn("cass preview failed", "error", err, "request_id", reqID)
-		writeErrorResponse(w, http.StatusInternalServerError, ErrCodeCASSUnavailable,
-			"Failed to get preview", map[string]interface{}{"error": err.Error()}, reqID)
+		writeCASSCallError(w, err, ErrCodeCASSUnavailable, "Failed to get preview", reqID)
 		return
 	}
 
