@@ -2,7 +2,13 @@ package tools
 
 import (
 	"context"
+	"encoding/json"
+	"net"
+	"os"
+	"os/exec"
 	"path/filepath"
+	"strconv"
+	"strings"
 	"testing"
 	"time"
 )
@@ -298,4 +304,65 @@ func TestRanoAdapterCheckProcAccess(t *testing.T) {
 	// On Linux with /proc available, this should return true
 	// Just verify it doesn't panic
 	t.Logf("checkProcAccess returned: %v", canAccess)
+}
+
+// TestRanoStatsReadInstalledRanoObservation has the installed rano record this
+// test process's own loopback connection into a fresh observer database, then
+// reads it back through the adapter's export path. rano's own export of the
+// same database is the oracle for the count.
+func TestRanoStatsReadInstalledRanoObservation(t *testing.T) {
+	if _, err := exec.LookPath("rano"); err != nil {
+		t.Skip("rano not installed")
+	}
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = ln.Close() })
+	accepted := make(chan net.Conn, 1)
+	go func() {
+		if c, err := ln.Accept(); err == nil {
+			accepted <- c
+		}
+	}()
+	conn, err := net.Dial("tcp", ln.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = conn.Close() })
+	server := <-accepted
+	t.Cleanup(func() { _ = server.Close() })
+
+	pid := strconv.Itoa(os.Getpid())
+	db := filepath.Join(t.TempDir(), "observer.sqlite")
+	if out, err := exec.Command("rano", "--once", "--pid", pid, "--sqlite", db, "--no-dns", "--no-banner", "--summary-only").CombinedOutput(); err != nil {
+		t.Fatalf("rano --once: %v\n%s", err, out)
+	}
+	export, err := exec.Command("rano", "export", "--format", "jsonl", "--sqlite", db, "--fields", "event,pid").Output()
+	if err != nil {
+		t.Fatalf("rano export: %v", err)
+	}
+	want := 0
+	for _, line := range strings.Split(string(export), "\n") {
+		var row struct {
+			Event string `json:"event"`
+			PID   int    `json:"pid"`
+		}
+		if json.Unmarshal([]byte(line), &row) == nil && row.Event == "connect" && row.PID == os.Getpid() {
+			want++
+		}
+	}
+	if want == 0 {
+		t.Fatalf("rano recorded no connect for pid %s; export:\n%s", pid, export)
+	}
+
+	adapter := NewRanoAdapter()
+	adapter.SetDatabase(db)
+	stats, err := adapter.GetProcessStatsWithWindow(context.Background(), os.Getpid(), "5m")
+	if err != nil {
+		t.Fatalf("GetProcessStatsWithWindow: %v", err)
+	}
+	if stats.ConnectionCount != want || stats.LastConnection == "" {
+		t.Fatalf("stats = %+v, rano exported %d connects for this pid", stats, want)
+	}
 }

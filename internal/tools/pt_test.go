@@ -2,6 +2,10 @@ package tools
 
 import (
 	"context"
+	"encoding/json"
+	"os"
+	"os/exec"
+	"strings"
 	"testing"
 	"time"
 )
@@ -366,4 +370,62 @@ func TestPTToolNameConstant(t *testing.T) {
 	if ToolPT != "pt" {
 		t.Errorf("Expected ToolPT to be 'pt', got %s", ToolPT)
 	}
+}
+
+// TestPTClassifyProcessesReadsInstalledPT runs the installed pt's passive watch
+// twice: once directly, whose output ntm's parser must accept with each
+// candidate's recommendation intact, and once through ClassifyProcesses, which
+// must answer for exactly the PIDs it was asked about.
+func TestPTClassifyProcessesReadsInstalledPT(t *testing.T) {
+	if _, err := exec.LookPath("pt"); err != nil {
+		t.Skip("pt not installed")
+	}
+	started := time.Now()
+	out, err := exec.Command("pt", "agent", "watch", "--once", "--threshold", "low", "--format", "jsonl").Output()
+	if err != nil {
+		t.Fatalf("pt agent watch: %v", err)
+	}
+	direct := map[int]string{}
+	for _, line := range strings.Split(string(out), "\n") {
+		var event struct {
+			Event          string `json:"event"`
+			PID            int    `json:"pid"`
+			Classification string `json:"classification"`
+		}
+		if json.Unmarshal([]byte(line), &event) == nil && event.Event == "candidate_detected" {
+			direct[event.PID] = event.Classification
+		}
+	}
+	wanted := map[int]struct{}{os.Getpid(): {}}
+	for pid := range direct {
+		wanted[pid] = struct{}{}
+	}
+
+	parsed, err := parsePTWatch(out, wanted, started, time.Now())
+	if err != nil {
+		t.Fatalf("ntm rejected pt's own watch output: %v", err)
+	}
+	for _, r := range parsed {
+		if want, ok := direct[r.PID]; ok && r.Recommendation != want {
+			t.Errorf("pid %d: recommendation %q, pt said %q", r.PID, r.Recommendation, want)
+		}
+	}
+
+	pids := make([]int, 0, len(wanted))
+	for pid := range wanted {
+		pids = append(pids, pid)
+	}
+	results, err := NewPTAdapter().ClassifyProcesses(context.Background(), pids)
+	if err != nil {
+		t.Fatalf("ClassifyProcesses: %v", err)
+	}
+	if len(results) != len(wanted) {
+		t.Fatalf("got %d results for %d PIDs", len(results), len(wanted))
+	}
+	for _, r := range results {
+		if _, ok := wanted[r.PID]; !ok || r.Source != "pt_agent_watch" {
+			t.Errorf("unexpected result %+v", r)
+		}
+	}
+	t.Logf("pt reported %d candidates; classified %d PIDs", len(direct), len(results))
 }
