@@ -4,12 +4,19 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"reflect"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/Dicklesworthstone/ntm/internal/assignment"
+	"github.com/Dicklesworthstone/ntm/internal/bv"
+	"github.com/Dicklesworthstone/ntm/internal/config"
+	dispatchsvc "github.com/Dicklesworthstone/ntm/internal/dispatch"
+	"github.com/Dicklesworthstone/ntm/internal/ratelimit"
 	"github.com/Dicklesworthstone/ntm/internal/resilience"
 	"github.com/Dicklesworthstone/ntm/internal/tmux"
 )
@@ -326,5 +333,513 @@ func TestSpawnProgressDoesNotAnnounceLaunchDuringPacingWait(t *testing.T) {
 	defer cancel()
 	if _, err := opts.LifecycleDeps.LaunchAgent(ctx, tmux.Pane{}, "progress", "claude", 2, "", ""); !errors.Is(err, context.DeadlineExceeded) || len(events) != 2 {
 		t.Fatalf("pacing wait generated false launch evidence: %+v %v", events, err)
+	}
+}
+
+// staggerTestClock is a fake prompt-stagger clock: Wait advances Now instead
+// of sleeping and records every requested wait.
+type staggerTestClock struct {
+	mu    sync.Mutex
+	now   time.Time
+	waits []time.Duration
+}
+
+var staggerTestStart = time.Date(2026, 10, 7, 12, 0, 0, 0, time.UTC)
+
+func newStaggerTestClock() *staggerTestClock {
+	return &staggerTestClock{now: staggerTestStart}
+}
+
+func (c *staggerTestClock) Now() time.Time {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.now
+}
+
+func (c *staggerTestClock) Wait(ctx context.Context, delay time.Duration) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.waits = append(c.waits, delay)
+	c.now = c.now.Add(delay)
+	return nil
+}
+
+func (c *staggerTestClock) recordedWaits() []time.Duration {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return append([]time.Duration(nil), c.waits...)
+}
+
+// staggerDelivery is one prompt that reached the fake tmux deliverer.
+type staggerDelivery struct {
+	PaneID  string
+	Message string
+	At      time.Time
+}
+
+// staggerSpawnWorld is a hermetic --robot-spawn fixture: fake tmux topology,
+// readiness, observation, and a recording deliverer behind the real GetSpawn,
+// stagger planner, and canonical dispatch port.
+type staggerSpawnWorld struct {
+	session    string
+	clock      *staggerTestClock
+	mu         sync.Mutex
+	events     []string
+	deliveries []staggerDelivery
+	failPane   string
+	lifecycle  *SpawnLifecycleDependencies
+	assignment *SpawnAssignmentDependencies
+}
+
+func newStaggerSpawnWorld(t *testing.T, session string, agentTypes ...tmux.AgentType) *staggerSpawnWorld {
+	t.Helper()
+	world := &staggerSpawnWorld{session: session, clock: newStaggerTestClock()}
+	panes := []tmux.Pane{{ID: "%1", WindowIndex: 0, Index: 0, Title: session + "__user", Type: tmux.AgentUser}}
+	perType := map[tmux.AgentType]int{}
+	for i, agentType := range agentTypes {
+		perType[agentType]++
+		panes = append(panes, tmux.Pane{
+			ID: fmt.Sprintf("%%%d", i+2), WindowIndex: 0, Index: i + 1, Type: agentType,
+			Title: fmt.Sprintf("%s__%s_%d", session, agentType, perType[agentType]),
+		})
+	}
+	world.lifecycle = testSpawnLifecycleDependencies(panes)
+	world.lifecycle.WaitForReady = func(context.Context, *SpawnOutput, time.Duration) error {
+		world.record("ready")
+		return nil
+	}
+	world.lifecycle.Now = world.clock.Now
+	world.lifecycle.Wait = world.clock.Wait
+	world.assignment = &SpawnAssignmentDependencies{
+		ListPanes: func(context.Context, string) ([]tmux.Pane, error) {
+			return append([]tmux.Pane(nil), panes...), nil
+		},
+		ObserveSession: bulkSafeObserver(panes),
+		DispatchDeliverer: dispatchsvc.DelivererFunc(func(ctx context.Context, delivery dispatchsvc.Delivery) error {
+			if err := ctx.Err(); err != nil {
+				return err
+			}
+			world.record("deliver:" + delivery.Target.Ref.ID)
+			if delivery.Target.Ref.ID == world.failPane {
+				return errors.New("tmux refused the keystrokes")
+			}
+			world.mu.Lock()
+			world.deliveries = append(world.deliveries, staggerDelivery{
+				PaneID: delivery.Target.Ref.ID, Message: delivery.Message, At: world.clock.Now(),
+			})
+			world.mu.Unlock()
+			return nil
+		}),
+	}
+	return world
+}
+
+func (w *staggerSpawnWorld) record(event string) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.events = append(w.events, event)
+}
+
+func (w *staggerSpawnWorld) options(t *testing.T) SpawnOptions {
+	t.Helper()
+	return SpawnOptions{
+		Session: w.session, WorkingDir: t.TempDir(),
+		LifecycleDeps: w.lifecycle, AssignmentDeps: w.assignment,
+	}
+}
+
+func staggerAt(offset time.Duration) string {
+	return staggerTestStart.Add(offset).UTC().Format(time.RFC3339Nano)
+}
+
+func TestResolveSpawnStaggerModes(t *testing.T) {
+	tracker := ratelimit.NewRateLimitTracker("")
+	tracker.RecordRateLimit("anthropic", "spawn")
+	learned := tracker.GetOptimalDelay("anthropic")
+	claude := []string{"claude", "claude"}
+
+	for _, tc := range []struct {
+		name         string
+		req          SpawnStaggerRequest
+		tracker      *ratelimit.RateLimitTracker
+		wantMode     string
+		wantInterval time.Duration
+		wantProvider string
+	}{
+		{name: "empty mode is none", req: SpawnStaggerRequest{Delay: time.Minute}, wantMode: "none"},
+		{name: "explicit none ignores the fixed delay", req: SpawnStaggerRequest{Mode: "none", Delay: time.Minute}, wantMode: "none"},
+		{name: "fixed uses the delay", req: SpawnStaggerRequest{Mode: "fixed", Delay: 20 * time.Second}, wantMode: "fixed", wantInterval: 20 * time.Second},
+		{name: "fixed zero delay is unpaced", req: SpawnStaggerRequest{Mode: "fixed"}, wantMode: "fixed"},
+		{name: "legacy interval applies under none", req: SpawnStaggerRequest{Mode: "none", Legacy: 90 * time.Second}, wantMode: "legacy", wantInterval: 90 * time.Second},
+		{name: "explicit fixed wins over legacy", req: SpawnStaggerRequest{Mode: "fixed", Delay: 5 * time.Second, Legacy: 90 * time.Second}, wantMode: "fixed", wantInterval: 5 * time.Second},
+		{name: "smart reads the learned delay", req: SpawnStaggerRequest{Mode: "smart", Legacy: 90 * time.Second}, tracker: tracker, wantMode: "smart", wantInterval: learned, wantProvider: "anthropic"},
+		{name: "smart without history uses the built-in delay", req: SpawnStaggerRequest{Mode: "smart"}, wantMode: "smart", wantInterval: ratelimit.DefaultDelayAnthropic, wantProvider: "anthropic"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := ResolveSpawnStagger(tc.req, claude, tc.tracker)
+			if got.Mode != tc.wantMode || got.Interval != tc.wantInterval || got.Provider != tc.wantProvider {
+				t.Fatalf("ResolveSpawnStagger = %+v, want mode %q interval %v provider %q", got, tc.wantMode, tc.wantInterval, tc.wantProvider)
+			}
+			if got.Active() != (tc.wantInterval > 0) {
+				t.Fatalf("Active() = %t for %+v", got.Active(), got)
+			}
+			for order, want := range []time.Duration{0, tc.wantInterval, 2 * tc.wantInterval, 3 * tc.wantInterval} {
+				if delay := got.Delay(order); delay != want {
+					t.Fatalf("Delay(%d) = %v, want %v", order, delay, want)
+				}
+			}
+		})
+	}
+}
+
+// TestResolveSpawnStaggerSmartProviderPriority pins smart mode's provider
+// choice: the strictest provider present wins, and an omp-only batch uses
+// omp's own bucket rather than Anthropic's learned backoff.
+func TestResolveSpawnStaggerSmartProviderPriority(t *testing.T) {
+	tracker := ratelimit.NewRateLimitTracker("")
+	for i := 0; i < 3; i++ {
+		tracker.RecordRateLimit("anthropic", "spawn")
+	}
+	if tracker.GetOptimalDelay("anthropic") == tracker.GetOptimalDelay("omp") {
+		t.Fatal("control: the anthropic backoff must differ from the omp bucket")
+	}
+	for _, tc := range []struct {
+		types []string
+		want  string
+	}{
+		{types: []string{"omp", "omp"}, want: "omp"},
+		{types: []string{"cc", "omp"}, want: "anthropic"},
+		{types: []string{"codex", "gemini"}, want: "openai"},
+		{types: []string{"gemini", "antigravity", "omp"}, want: "google"},
+		{types: []string{"agy"}, want: "google"},
+		{types: []string{"opencode"}, want: "anthropic"},
+	} {
+		got := ResolveSpawnStagger(SpawnStaggerRequest{Mode: "smart"}, tc.types, tracker)
+		if got.Provider != tc.want || got.Interval != tracker.GetOptimalDelay(tc.want) {
+			t.Fatalf("types %v: smart stagger = %+v, want provider %q at %v", tc.types, got, tc.want, tracker.GetOptimalDelay(tc.want))
+		}
+	}
+}
+
+// TestGetSpawnDeliversInitialPromptInOrderWithFixedStagger drives
+// --robot-spawn --spawn-prompt --spawn-stagger-mode=fixed through GetSpawn:
+// the prompt waits for the readiness gate, reaches each agent in launch order
+// through the canonical dispatch port, and consecutive deliveries are exactly
+// one stagger interval apart on the injected clock.
+func TestGetSpawnDeliversInitialPromptInOrderWithFixedStagger(t *testing.T) {
+	world := newStaggerSpawnWorld(t, "stagger-prompts", tmux.AgentClaude, tmux.AgentClaude, tmux.AgentCodex)
+	opts := world.options(t)
+	opts.CCCount, opts.CodCount = 2, 1
+	opts.Prompt = "Read AGENTS.md first"
+	opts.StaggerMode, opts.StaggerDelay = config.SpawnStaggerFixed, 20*time.Second
+
+	out, err := GetSpawn(t.Context(), opts, testSpawnConfig())
+	if err != nil || !out.Success {
+		t.Fatalf("GetSpawn output=%+v err=%v", out, err)
+	}
+
+	if want := []string{"ready", "deliver:%2", "deliver:%3", "deliver:%4"}; !reflect.DeepEqual(world.events, want) {
+		t.Fatalf("events = %v, want readiness before every delivery in launch order %v", world.events, want)
+	}
+	if want := []time.Duration{20 * time.Second, 20 * time.Second}; !reflect.DeepEqual(world.clock.recordedWaits(), want) {
+		t.Fatalf("stagger waits = %v, want %v", world.clock.recordedWaits(), want)
+	}
+	for i, delivery := range world.deliveries {
+		if want := fmt.Sprintf("%%%d", i+2); delivery.PaneID != want || delivery.Message != opts.Prompt ||
+			!delivery.At.Equal(staggerTestStart.Add(time.Duration(i)*20*time.Second)) {
+			t.Fatalf("delivery %d = %+v, want prompt on %s at +%ds", i, delivery, want, 20*i)
+		}
+	}
+
+	plan := out.Stagger
+	if plan == nil || plan.Mode != "fixed" || plan.IntervalMs != 20000 || plan.Provider != "" || plan.Warning != "" || len(plan.Schedule) != 3 {
+		t.Fatalf("stagger plan = %+v", plan)
+	}
+	if len(out.PromptDeliveries) != 3 {
+		t.Fatalf("prompt deliveries = %+v", out.PromptDeliveries)
+	}
+	for i := range plan.Schedule {
+		offset := time.Duration(i) * 20 * time.Second
+		slot, delivery := plan.Schedule[i], out.PromptDeliveries[i]
+		wantPane, wantType := fmt.Sprintf("0.%d", i+1), []string{"claude", "claude", "codex"}[i]
+		if slot.Pane != wantPane || slot.AgentType != wantType || slot.Order != i+1 ||
+			slot.DelayMs != offset.Milliseconds() || slot.ScheduledAt != staggerAt(offset) {
+			t.Fatalf("schedule[%d] = %+v, want %s/%s order %d at +%v", i, slot, wantPane, wantType, i+1, offset)
+		}
+		if delivery.Pane != wantPane || delivery.AgentType != wantType || delivery.Order != i+1 ||
+			!delivery.PromptSent || delivery.DeliveredAt != staggerAt(offset) || delivery.Error != "" {
+			t.Fatalf("prompt_deliveries[%d] = %+v", i, delivery)
+		}
+	}
+
+	encoded, err := json.Marshal(out)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, field := range []string{`"stagger":{"mode":"fixed","interval_ms":20000,"schedule":[`, `"prompt_deliveries":[`, `"scheduled_at":"2026-10-07T12:00:40Z"`, `"delivered_at":"2026-10-07T12:00:20Z"`} {
+		if !strings.Contains(string(encoded), field) {
+			t.Fatalf("envelope missing %s: %s", field, encoded)
+		}
+	}
+}
+
+func TestGetSpawnWithoutStaggerDeliversBackToBack(t *testing.T) {
+	world := newStaggerSpawnWorld(t, "unpaced-prompts", tmux.AgentClaude, tmux.AgentClaude)
+	opts := world.options(t)
+	opts.CCCount = 2
+	opts.Prompt = "start"
+
+	out, err := GetSpawn(t.Context(), opts, testSpawnConfig())
+	if err != nil || !out.Success {
+		t.Fatalf("GetSpawn output=%+v err=%v", out, err)
+	}
+	if len(world.clock.recordedWaits()) != 0 || len(world.deliveries) != 2 {
+		t.Fatalf("unpaced spawn waited %v and delivered %+v", world.clock.recordedWaits(), world.deliveries)
+	}
+	if out.Stagger == nil || out.Stagger.Mode != "none" || out.Stagger.IntervalMs != 0 ||
+		out.Stagger.Schedule[1].DelayMs != 0 || out.Stagger.Schedule[1].ScheduledAt != staggerAt(0) {
+		t.Fatalf("unpaced plan = %+v", out.Stagger)
+	}
+}
+
+// TestGetSpawnSmartStaggerUsesLearnedRateLimitDelay pins smart mode to the
+// project's learned rate-limit history, and an unreadable history to the
+// provider's built-in delay with a visible warning.
+func TestGetSpawnSmartStaggerUsesLearnedRateLimitDelay(t *testing.T) {
+	learned := ratelimit.NewRateLimitTracker("")
+	learned.RecordRateLimit("anthropic", "spawn")
+	learned.RecordRateLimit("anthropic", "spawn")
+	for _, tc := range []struct {
+		name         string
+		load         func(string) (*ratelimit.RateLimitTracker, error)
+		wantInterval time.Duration
+		wantWarning  string
+	}{
+		{
+			name:         "learned history",
+			load:         func(string) (*ratelimit.RateLimitTracker, error) { return learned, nil },
+			wantInterval: learned.GetOptimalDelay("anthropic"),
+		},
+		{
+			name: "unreadable history",
+			load: func(string) (*ratelimit.RateLimitTracker, error) {
+				return nil, errors.New("parse rate limits file: bad json")
+			},
+			wantInterval: ratelimit.DefaultDelayAnthropic,
+			wantWarning:  "rate-limit history unavailable (parse rate limits file: bad json)",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			world := newStaggerSpawnWorld(t, "smart-prompts", tmux.AgentClaude, tmux.AgentCodex)
+			opts := world.options(t)
+			var loadedFrom string
+			world.lifecycle.LoadRateLimits = func(dir string) (*ratelimit.RateLimitTracker, error) {
+				loadedFrom = dir
+				return tc.load(dir)
+			}
+			opts.CCCount, opts.CodCount = 1, 1
+			opts.Prompt = "go"
+			opts.StaggerMode = config.SpawnStaggerSmart
+
+			out, err := GetSpawn(t.Context(), opts, testSpawnConfig())
+			if err != nil || !out.Success {
+				t.Fatalf("GetSpawn output=%+v err=%v", out, err)
+			}
+			if loadedFrom != opts.WorkingDir {
+				t.Fatalf("rate-limit history loaded from %q, want the project dir %q", loadedFrom, opts.WorkingDir)
+			}
+			plan := out.Stagger
+			if plan.Mode != "smart" || plan.Provider != "anthropic" || plan.IntervalMs != tc.wantInterval.Milliseconds() ||
+				!strings.HasPrefix(plan.Warning, tc.wantWarning) || (tc.wantWarning == "") != (plan.Warning == "") {
+				t.Fatalf("smart plan = %+v, want interval %v warning %q", plan, tc.wantInterval, tc.wantWarning)
+			}
+			if want := []time.Duration{tc.wantInterval}; !reflect.DeepEqual(world.clock.recordedWaits(), want) {
+				t.Fatalf("smart waits = %v, want %v", world.clock.recordedWaits(), want)
+			}
+		})
+	}
+}
+
+// TestGetSpawnAssignWorkPacesWorkPromptsAndCarriesInitialPrompt drives
+// --robot-spawn --spawn-assign-work with a fixed stagger and --spawn-prompt:
+// each agent's atomic claim+dispatch waits for its slot, and the initial
+// prompt prefixes the work prompt in that single delivery.
+func TestGetSpawnAssignWorkPacesWorkPromptsAndCarriesInitialPrompt(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	const session = "stagger-assign"
+	world := newStaggerSpawnWorld(t, session, tmux.AgentClaude, tmux.AgentClaude)
+	store := assignment.NewStore(session)
+	keys := 0
+	world.assignment.LoadAssignmentPolicy = func(string, string, bool) (*config.Config, error) { return testSpawnConfig(), nil }
+	world.assignment.FetchActionable = func(context.Context, string, int) ([]bv.TriageRecommendation, error) {
+		return []bv.TriageRecommendation{
+			{ID: "bd-one", Title: "First task", Status: "open", Priority: 1},
+			{ID: "bd-two", Title: "Second task", Status: "open", Priority: 2},
+		}, nil
+	}
+	world.assignment.LoadStore = func(string) (*assignment.AssignmentStore, error) { return store, nil }
+	world.assignment.ClaimBead = func(_ context.Context, _ string, beadID, actor string) (bv.BeadClaimResult, error) {
+		world.record("claim:" + beadID)
+		return bv.BeadClaimResult{ID: beadID, Actor: actor, Status: "in_progress", ClaimedAt: time.Now().UTC()}, nil
+	}
+	world.assignment.GetBeadDetails = spawnOpenAssignmentDetails
+	world.assignment.GetBeadStatus = func(context.Context, string, string) (string, error) { return "open", nil }
+	world.assignment.NewIdempotencyKey = func() (string, error) {
+		keys++
+		return fmt.Sprintf("stagger-key-%d", keys), nil
+	}
+
+	opts := world.options(t)
+	opts.CCCount = 2
+	opts.AssignWork, opts.AssignStrategy = true, "top-n"
+	opts.Prompt = "Read AGENTS.md first"
+	opts.StaggerMode, opts.StaggerDelay = config.SpawnStaggerFixed, 15*time.Second
+
+	out, err := GetSpawn(t.Context(), opts, testSpawnConfig())
+	if err != nil || !out.Success {
+		t.Fatalf("GetSpawn output=%+v err=%v", out, err)
+	}
+	// --spawn-prompt implies the readiness wait, and the second claim waits
+	// for its slot instead of being held across the stagger interval.
+	if want := []string{"ready", "claim:bd-one", "deliver:%2", "claim:bd-two", "deliver:%3"}; !reflect.DeepEqual(world.events, want) {
+		t.Fatalf("events = %v, want %v", world.events, want)
+	}
+	if want := []time.Duration{15 * time.Second}; !reflect.DeepEqual(world.clock.recordedWaits(), want) {
+		t.Fatalf("stagger waits = %v, want %v", world.clock.recordedWaits(), want)
+	}
+	for i, bead := range []string{"bd-one", "bd-two"} {
+		delivery := world.deliveries[i]
+		offset := time.Duration(i) * 15 * time.Second
+		if !strings.HasPrefix(delivery.Message, "Read AGENTS.md first\n\nWork on bead "+bead+":") || !delivery.At.Equal(staggerTestStart.Add(offset)) {
+			t.Fatalf("work delivery %d = %+v, want initial prompt + %s at +%v", i, delivery, bead, offset)
+		}
+		got := out.Assignments[i]
+		if got.BeadID != bead || !got.Claimed || !got.PromptSent || got.DeliveredAt != staggerAt(offset) {
+			t.Fatalf("assignments[%d] = %+v", i, got)
+		}
+		if slot := out.Stagger.Schedule[i]; slot.DelayMs != offset.Milliseconds() || slot.ScheduledAt != staggerAt(offset) {
+			t.Fatalf("schedule[%d] = %+v", i, slot)
+		}
+	}
+	if len(out.PromptDeliveries) != 0 {
+		t.Fatalf("assign mode must report outcomes on assignments[], got prompt_deliveries %+v", out.PromptDeliveries)
+	}
+}
+
+func TestGetSpawnPromptDeliveryFailureIsReportedPerAgent(t *testing.T) {
+	world := newStaggerSpawnWorld(t, "partial-prompts", tmux.AgentClaude, tmux.AgentClaude, tmux.AgentClaude)
+	world.failPane = "%3"
+	opts := world.options(t)
+	opts.CCCount = 3
+	opts.Prompt = "go"
+	opts.StaggerMode, opts.StaggerDelay = config.SpawnStaggerFixed, time.Second
+
+	out, err := GetSpawn(t.Context(), opts, testSpawnConfig())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out.Success || out.ErrorCode != ErrCodePromptSendFailed || out.Error != "1 of 3 spawn prompt deliveries failed" {
+		t.Fatalf("partial failure envelope = %+v", out.RobotResponse)
+	}
+	sent := []bool{out.PromptDeliveries[0].PromptSent, out.PromptDeliveries[1].PromptSent, out.PromptDeliveries[2].PromptSent}
+	if !reflect.DeepEqual(sent, []bool{true, false, true}) || !strings.Contains(out.PromptDeliveries[1].Error, "tmux refused the keystrokes") ||
+		out.PromptDeliveries[1].DeliveredAt != "" || len(out.Agents) != 4 {
+		t.Fatalf("per-agent outcomes = %+v (agents %d)", out.PromptDeliveries, len(out.Agents))
+	}
+	if want := []time.Duration{time.Second, time.Second}; !reflect.DeepEqual(world.clock.recordedWaits(), want) {
+		t.Fatalf("a failed delivery must keep later agents on schedule: waits %v", world.clock.recordedWaits())
+	}
+}
+
+func TestGetSpawnStaggerWaitCancellationStopsLaterDeliveries(t *testing.T) {
+	world := newStaggerSpawnWorld(t, "cancel-prompts", tmux.AgentClaude, tmux.AgentClaude, tmux.AgentClaude)
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	world.lifecycle.Wait = func(context.Context, time.Duration) error {
+		cancel()
+		return context.Canceled
+	}
+	opts := world.options(t)
+	opts.CCCount = 3
+	opts.Prompt = "go"
+	opts.StaggerMode, opts.StaggerDelay = config.SpawnStaggerFixed, time.Minute
+
+	out, err := GetSpawn(ctx, opts, testSpawnConfig())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out.Success || out.ErrorCode != ErrCodeTimeout || len(world.deliveries) != 1 {
+		t.Fatalf("canceled stagger = %+v with deliveries %+v", out.RobotResponse, world.deliveries)
+	}
+	if !out.PromptDeliveries[0].PromptSent || out.PromptDeliveries[1].PromptSent || out.PromptDeliveries[2].PromptSent ||
+		!strings.Contains(out.PromptDeliveries[2].Error, "canceled") {
+		t.Fatalf("canceled deliveries = %+v", out.PromptDeliveries)
+	}
+}
+
+// TestGetSpawnRejectsInvalidStaggerBeforeLifecycle pins INVALID_FLAG for an
+// unsupported mode or an out-of-range delay before any tmux side effect.
+func TestGetSpawnRejectsInvalidStaggerBeforeLifecycle(t *testing.T) {
+	for _, tc := range []struct {
+		mode    string
+		delay   time.Duration
+		wantErr string
+	}{
+		{mode: "adaptive", wantErr: `--spawn-stagger-mode must be one of none, fixed, or smart; got "adaptive"`},
+		{mode: "fixed", delay: -time.Second, wantErr: "--spawn-stagger-delay must be between 0 and 5m0s"},
+		{mode: "none", delay: config.MaxSpawnStaggerDelay + time.Second, wantErr: "--spawn-stagger-delay must be between 0 and 5m0s"},
+	} {
+		t.Run(tc.mode+"/"+tc.delay.String(), func(t *testing.T) {
+			var tmuxCalls atomic.Int32
+			lifecycle := &SpawnLifecycleDependencies{IsTMUXInstalled: func() bool { tmuxCalls.Add(1); return true }}
+			out, err := GetSpawn(t.Context(), SpawnOptions{
+				Session: "invalid-stagger", CCCount: 1, Prompt: "go", WorkingDir: t.TempDir(),
+				StaggerMode: tc.mode, StaggerDelay: tc.delay, LifecycleDeps: lifecycle,
+			}, testSpawnConfig())
+			if err != nil {
+				t.Fatal(err)
+			}
+			if out.Success || out.ErrorCode != ErrCodeInvalidFlag || out.Error != tc.wantErr || out.Hint == "" {
+				t.Fatalf("invalid stagger envelope = %+v, want INVALID_FLAG %q", out.RobotResponse, tc.wantErr)
+			}
+			if tmuxCalls.Load() != 0 || out.Agents == nil {
+				t.Fatalf("invalid stagger reached the tmux lifecycle (%d calls)", tmuxCalls.Load())
+			}
+		})
+	}
+}
+
+// Grok Build phase 2 (GH#251) implemented readiness and composer-gated
+// delivery, so a spawn prompt for Grok agents is accepted like any other.
+func TestValidateSpawnRequestAcceptsGrokSpawnPrompt(t *testing.T) {
+	if _, err := validateSpawnRequest(SpawnOptions{Session: "grok-prompt", GrokCount: 1, Prompt: "go"}); err != nil {
+		t.Fatalf("validateSpawnRequest refused a Grok spawn prompt: %v", err)
+	}
+}
+
+// TestGetSpawnDryRunPreviewsStaggerSchedule pins that a dry run reports the
+// per-agent delays it would use without waiting, delivering, or stamping
+// scheduled times.
+func TestGetSpawnDryRunPreviewsStaggerSchedule(t *testing.T) {
+	world := newStaggerSpawnWorld(t, "dry-stagger", tmux.AgentClaude, tmux.AgentCodex)
+	opts := world.options(t)
+	opts.CCCount, opts.CodCount = 1, 1
+	opts.Prompt = "go"
+	opts.StaggerMode, opts.StaggerDelay = config.SpawnStaggerFixed, 25*time.Second
+	opts.DryRun = true
+
+	out, err := GetSpawn(t.Context(), opts, testSpawnConfig())
+	if err != nil || !out.Success || !out.DryRun {
+		t.Fatalf("dry run output=%+v err=%v", out, err)
+	}
+	if out.Stagger == nil || len(out.Stagger.Schedule) != 2 || out.Stagger.Schedule[1].DelayMs != 25000 ||
+		out.Stagger.Schedule[0].AgentType != "claude" || out.Stagger.Schedule[1].ScheduledAt != "" {
+		t.Fatalf("dry-run plan = %+v", out.Stagger)
+	}
+	if len(world.events) != 0 || len(world.clock.recordedWaits()) != 0 || out.PromptDeliveries != nil {
+		t.Fatalf("dry run actuated: events %v waits %v deliveries %+v", world.events, world.clock.recordedWaits(), out.PromptDeliveries)
 	}
 }

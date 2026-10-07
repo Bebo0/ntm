@@ -1107,7 +1107,7 @@ ntm --robot-pipeline-cancel=run-abc123
 
 ## Feature 7: Thundering Herd Prevention
 
-**Status: Partial** — `ntm spawn --stagger/--stagger-mode/--stagger-delay`, `ntm spawn --assign`, `--robot-spawn --spawn-assign-work`, and the `NTM_SPAWN_*` env vars are shipped. NOT shipped: stagger flags on `--robot-spawn` and a `[spawn]` config table (the 90s default is built-in).
+**Status: Shipped** — `ntm spawn --stagger/--stagger-mode/--stagger-delay`, `ntm spawn --assign`, the `NTM_SPAWN_*` env vars (`ntm spawn`), `--robot-spawn --spawn-assign-work`, `--robot-spawn --spawn-prompt/--spawn-prompt-file`, `--robot-spawn --spawn-stagger-mode/--spawn-stagger-delay`, and the `[spawn]` config table (`stagger_mode`, `stagger_delay`) are shipped. Both surfaces resolve stagger through one planner (`robot.ResolveSpawnStagger`).
 
 ### Problem Statement
 
@@ -1299,20 +1299,79 @@ ntm spawn myproject --cc=4 --stagger-mode=fixed --stagger-delay=20s
 ntm spawn myproject --cc=3 --assign
 ntm spawn myproject --cc=3 --assign --strategy=dependency
 
-# Robot mode (no stagger flags on --robot-spawn; stagger is a `ntm spawn` feature)
-ntm --robot-spawn=myproject --spawn-cc=3 --spawn-assign-work --strategy=diverse
+# Robot mode: initial prompt + the same stagger modes
+ntm --robot-spawn=myproject --spawn-cc=3 --spawn-prompt='Read AGENTS.md, then pick ready work' \
+    --spawn-stagger-mode=fixed --spawn-stagger-delay=90s
+ntm --robot-spawn=myproject --spawn-cc=5 --spawn-prompt-file=boot.md --spawn-stagger-mode=smart
+ntm --robot-spawn=myproject --spawn-cc=3 --spawn-assign-work --strategy=diverse \
+    --spawn-stagger-mode=fixed --spawn-stagger-delay=30s
 ```
 
-Staggered prompts are scheduled in spawn state and reported on the CLI as each
-agent's prompt delay; there is no JSON stagger-schedule envelope.
+`--spawn-prompt` (or `--spawn-prompt-file`, `-` for stdin) is delivered to
+every spawned agent only after the readiness wait — it implies `--spawn-wait` —
+and goes through the same canonical dispatch port as robot send and spawn work
+assignment (final-message redaction, per-agent delivery protocol, and a
+dispatch-time re-observation that refuses any pane that is not freshly idle;
+never raw send-keys). With `--spawn-assign-work` the initial prompt prefixes
+each agent's work prompt, so both arrive in one atomic, paced delivery — a
+second back-to-back dispatch would be refused by the idle gate once the first
+prompt is running. Grok Build panes take spawn prompts like any other agent
+(readiness and composer-gated delivery shipped in phase 2, GH#251).
+
+Pacing is identical on both surfaces: the agent at delivery position `i`
+(0-based, launch order) receives its prompt `i × interval` after the first.
+`fixed` uses `--stagger-delay` / `--spawn-stagger-delay`; `smart` uses the
+learned delay of the strictest provider in the batch from the project's
+`.ntm/rate_limits.json` (anthropic, then openai, then google, then omp's own
+bucket); `none` delivers back to back. `ntm spawn --stagger[=DURATION]`
+remains the legacy fixed interval when no mode is chosen. In assignment mode
+each agent's whole claim-and-dispatch waits for its slot, so no bead claim is
+held across a stagger wait.
+
+`ntm spawn` reports each pane's `prompt_delay_ms` and, when pacing is active,
+`stagger: {enabled, mode, interval_ms}`. `--robot-spawn` reports a `stagger`
+plan whenever it delivers prompts (including `--dry-run`, which previews the
+delays without delivering):
+
+```json
+"stagger": {
+  "mode": "fixed", "interval_ms": 90000,
+  "schedule": [
+    {"pane": "0.1", "agent_type": "claude", "order": 1, "delay_ms": 0,      "scheduled_at": "2026-10-07T12:00:00Z"},
+    {"pane": "0.2", "agent_type": "claude", "order": 2, "delay_ms": 90000,  "scheduled_at": "2026-10-07T12:01:30Z"},
+    {"pane": "0.3", "agent_type": "claude", "order": 3, "delay_ms": 180000, "scheduled_at": "2026-10-07T12:03:00Z"}
+  ]
+},
+"prompt_deliveries": [
+  {"pane": "0.1", "agent_type": "claude", "order": 1, "prompt_sent": true, "delivered_at": "2026-10-07T12:00:00Z"}
+]
+```
+
+`prompt_deliveries[]` holds one `--spawn-prompt` outcome per agent; any failed
+delivery makes the envelope fail with `PROMPT_SEND_FAILED` while every
+launched pane keeps running. In assignment mode the outcome is on
+`assignments[]` (`prompt_sent`, `delivered_at`). Smart mode adds `provider`,
+and a `warning` when the rate-limit history is unreadable (the provider's
+built-in delay is used). An unsupported mode or a delay outside 0–5m fails
+with `INVALID_FLAG` before any session is touched.
 
 ### Configuration
 
-There is no `[spawn]` config table: the 90s stagger default is built in
-(`--stagger` with no value), and stagger is opt-in per spawn — there is no
-config key to change the default or auto-enable it. Spawn *rate* pacing
-(concurrent spawn limits per provider) is configured separately via
-`[spawn_pacing]`.
+The `[spawn]` table supplies defaults for both `ntm spawn` and
+`--robot-spawn`. A flag always wins; `[spawn]` applies only when the flag is
+not given (an explicit `ntm spawn --stagger` also counts as choosing the
+mode):
+
+```toml
+[spawn]
+stagger_mode = "fixed"   # none (default), fixed, or smart
+stagger_delay = "90s"    # fixed-mode interval between agents, 0-5m (default 30s)
+```
+
+An invalid value is reported against its key (`[spawn] stagger_mode must be
+one of none, fixed, or smart`) and by `ntm config validate`. The bare
+`--stagger` default stays 90s. Spawn *rate* pacing (concurrent spawn limits per
+provider) is configured separately via `[spawn_pacing]`.
 
 ---
 

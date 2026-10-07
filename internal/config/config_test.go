@@ -2436,6 +2436,7 @@ func TestPrintIncludesRemainingLiveConfigSections(t *testing.T) {
 		"[assign]",
 		"[spawn_pacing]",
 		"[spawn_pacing.agent_caps]",
+		"[spawn]",
 		"[encryption]",
 		"[send]",
 		"[prompts]",

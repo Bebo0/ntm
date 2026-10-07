@@ -16771,6 +16771,10 @@
             "type": "boolean",
             "description": "Claimed"
           },
+          "delivered_at": {
+            "type": "string",
+            "description": "Delivered at"
+          },
           "dispatch_receipt_id": {
             "type": "string",
             "description": "Dispatch receipt i d"
@@ -16902,6 +16906,13 @@
             "type": "string",
             "description": "Preset used"
           },
+          "prompt_deliveries": {
+            "type": "array",
+            "description": "Prompt deliveries",
+            "items": {
+              "$ref": "#/components/schemas/SpawnPromptDelivery"
+            }
+          },
           "recovery": {
             "description": "Recovery",
             "$ref": "#/components/schemas/SpawnRecovery"
@@ -16909,6 +16920,10 @@
           "session": {
             "type": "string",
             "description": "Session"
+          },
+          "stagger": {
+            "description": "Stagger",
+            "$ref": "#/components/schemas/SpawnStaggerPlan"
           },
           "structured_error": {
             "description": "Structured error",
@@ -16958,6 +16973,41 @@
           "monitor_started"
         ]
       },
+      "SpawnPromptDelivery": {
+        "type": "object",
+        "properties": {
+          "agent_type": {
+            "type": "string",
+            "description": "Agent type"
+          },
+          "delivered_at": {
+            "type": "string",
+            "description": "Delivered at"
+          },
+          "error": {
+            "type": "string",
+            "description": "Error"
+          },
+          "order": {
+            "type": "integer",
+            "description": "Order"
+          },
+          "pane": {
+            "type": "string",
+            "description": "Pane"
+          },
+          "prompt_sent": {
+            "type": "boolean",
+            "description": "Prompt sent"
+          }
+        },
+        "required": [
+          "pane",
+          "agent_type",
+          "order",
+          "prompt_sent"
+        ]
+      },
       "SpawnRecovery": {
         "type": "object",
         "properties": {
@@ -16990,6 +17040,70 @@
             "description": "Status"
           }
         }
+      },
+      "SpawnStaggerPlan": {
+        "type": "object",
+        "properties": {
+          "interval_ms": {
+            "type": "integer",
+            "description": "Interval ms"
+          },
+          "mode": {
+            "type": "string",
+            "description": "Mode"
+          },
+          "provider": {
+            "type": "string",
+            "description": "Provider"
+          },
+          "schedule": {
+            "type": "array",
+            "description": "Schedule",
+            "items": {
+              "$ref": "#/components/schemas/SpawnStaggerSlot"
+            }
+          },
+          "warning": {
+            "type": "string",
+            "description": "Warning"
+          }
+        },
+        "required": [
+          "mode",
+          "interval_ms",
+          "schedule"
+        ]
+      },
+      "SpawnStaggerSlot": {
+        "type": "object",
+        "properties": {
+          "agent_type": {
+            "type": "string",
+            "description": "Agent type"
+          },
+          "delay_ms": {
+            "type": "integer",
+            "description": "Delay ms"
+          },
+          "order": {
+            "type": "integer",
+            "description": "Order"
+          },
+          "pane": {
+            "type": "string",
+            "description": "Pane"
+          },
+          "scheduled_at": {
+            "type": "string",
+            "description": "Scheduled at"
+          }
+        },
+        "required": [
+          "pane",
+          "agent_type",
+          "order",
+          "delay_ms"
+        ]
       },
       "SpawnedAgent": {
         "type": "object",

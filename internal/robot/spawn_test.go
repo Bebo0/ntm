@@ -2249,7 +2249,7 @@ func TestAssignWorkEmptyVerifiedPlanReplaysOnlyExactDurableSentIntent(t *testing
 
 			got, err := assignWorkToAgentsWithError(
 				t.Context(), output, t.TempDir(), session, "top-n", config.Default(),
-				true, reservationPaths, deps, emptyPlan,
+				true, reservationPaths, deps, emptyPlan, "", nil,
 			)
 			if err != nil {
 				t.Fatalf("assignWorkToAgentsWithError: %v", err)

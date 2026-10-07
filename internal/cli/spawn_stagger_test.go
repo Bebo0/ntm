@@ -6,7 +6,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Dicklesworthstone/ntm/internal/config"
 	"github.com/Dicklesworthstone/ntm/internal/ratelimit"
+	"github.com/Dicklesworthstone/ntm/internal/robot"
 )
 
 func TestOptionalDurationValue_Set(t *testing.T) {
@@ -140,11 +142,11 @@ func TestValidateSpawnStaggerOptions(t *testing.T) {
 		},
 		{
 			name: "legacy maximum is accepted",
-			opts: SpawnOptions{Stagger: maxStaggerInterval},
+			opts: SpawnOptions{Stagger: config.MaxSpawnStaggerDelay},
 		},
 		{
 			name:    "legacy interval above maximum is rejected",
-			opts:    SpawnOptions{Stagger: maxStaggerInterval + time.Second},
+			opts:    SpawnOptions{Stagger: config.MaxSpawnStaggerDelay + time.Second},
 			wantErr: "--stagger must be between 0 and 5m0s",
 		},
 		{
@@ -154,7 +156,7 @@ func TestValidateSpawnStaggerOptions(t *testing.T) {
 		},
 		{
 			name: "fixed maximum is accepted",
-			opts: SpawnOptions{StaggerMode: "fixed", StaggerDelay: maxStaggerInterval},
+			opts: SpawnOptions{StaggerMode: "fixed", StaggerDelay: config.MaxSpawnStaggerDelay},
 		},
 		{
 			name: "smart mode is accepted",
@@ -167,7 +169,12 @@ func TestValidateSpawnStaggerOptions(t *testing.T) {
 		},
 		{
 			name:    "fixed interval above maximum is rejected",
-			opts:    SpawnOptions{StaggerMode: "fixed", StaggerDelay: maxStaggerInterval + time.Second},
+			opts:    SpawnOptions{StaggerMode: "fixed", StaggerDelay: config.MaxSpawnStaggerDelay + time.Second},
+			wantErr: "--stagger-delay must be between 0 and 5m0s",
+		},
+		{
+			name:    "out-of-range delay is rejected in any mode, like --robot-spawn",
+			opts:    SpawnOptions{StaggerMode: "smart", StaggerDelay: -time.Second},
 			wantErr: "--stagger-delay must be between 0 and 5m0s",
 		},
 	}
@@ -191,7 +198,7 @@ func TestValidateSpawnStaggerOptions(t *testing.T) {
 func TestSpawnRejectsInvalidStaggerBeforeLifecycleValidation(t *testing.T) {
 	err := spawnSessionLogicComposable(context.Background(), SpawnOptions{
 		Session: "invalid session name",
-		Stagger: maxStaggerInterval + time.Second,
+		Stagger: config.MaxSpawnStaggerDelay + time.Second,
 	})
 	if err == nil || !strings.Contains(err.Error(), "--stagger must be between 0 and 5m0s") {
 		t.Fatalf("spawnSessionLogicComposable() error = %v, want stagger validation error", err)
@@ -448,179 +455,127 @@ func TestStaggerDisabledNoDelay(t *testing.T) {
 	}
 }
 
-func TestResolveEffectiveStaggerMode(t *testing.T) {
+// TestSpawnStaggerRequestResolvesThroughSharedPlanner pins how `ntm spawn`'s
+// flags map onto the stagger planner it shares with --robot-spawn: an
+// explicit --stagger-mode wins over the legacy --stagger, and the legacy
+// interval only applies when it was actually enabled with a positive value.
+func TestSpawnStaggerRequestResolvesThroughSharedPlanner(t *testing.T) {
+	tracker := ratelimit.NewRateLimitTracker("")
+	tracker.RecordRateLimit("anthropic", "spawn")
+	learned := tracker.GetOptimalDelay("anthropic")
+	claude := []FlatAgent{{Type: AgentTypeClaude, Index: 1}, {Type: AgentTypeClaude, Index: 2}}
+
 	tests := []struct {
-		name string
-		opts SpawnOptions
-		want string
+		name         string
+		opts         SpawnOptions
+		wantMode     string
+		wantInterval time.Duration
 	}{
 		{
-			name: "explicit smart overrides legacy flags",
-			opts: SpawnOptions{
-				StaggerMode:    "smart",
-				StaggerEnabled: true,
-				Stagger:        90 * time.Second,
-			},
-			want: "smart",
+			name:     "explicit smart overrides legacy flags",
+			opts:     SpawnOptions{StaggerMode: "smart", StaggerEnabled: true, Stagger: 90 * time.Second, Agents: claude},
+			wantMode: "smart", wantInterval: learned,
 		},
 		{
-			name: "explicit fixed mode",
-			opts: SpawnOptions{
-				StaggerMode: "fixed",
-			},
-			want: "fixed",
+			name:     "explicit fixed mode uses the fixed delay",
+			opts:     SpawnOptions{StaggerMode: "fixed", StaggerDelay: 20 * time.Second, StaggerEnabled: true, Stagger: 90 * time.Second},
+			wantMode: "fixed", wantInterval: 20 * time.Second,
 		},
 		{
-			name: "legacy fallback when mode none and legacy enabled",
-			opts: SpawnOptions{
-				StaggerMode:    "none",
-				StaggerEnabled: true,
-				Stagger:        90 * time.Second,
-			},
-			want: "legacy",
+			name:     "legacy fallback when mode none and legacy enabled",
+			opts:     SpawnOptions{StaggerMode: "none", StaggerEnabled: true, Stagger: 90 * time.Second},
+			wantMode: "legacy", wantInterval: 90 * time.Second,
 		},
 		{
-			name: "legacy fallback when mode empty and legacy enabled",
-			opts: SpawnOptions{
-				StaggerMode:    "",
-				StaggerEnabled: true,
-				Stagger:        90 * time.Second,
-			},
-			want: "legacy",
+			name:     "legacy fallback when mode empty and legacy enabled",
+			opts:     SpawnOptions{StaggerEnabled: true, Stagger: 45 * time.Second},
+			wantMode: "legacy", wantInterval: 45 * time.Second,
 		},
 		{
-			name: "none stays none when legacy disabled",
-			opts: SpawnOptions{
-				StaggerMode:    "none",
-				StaggerEnabled: false,
-				Stagger:        90 * time.Second,
-			},
-			want: "none",
+			name:     "flag default duration without --stagger stays unpaced",
+			opts:     SpawnOptions{StaggerMode: "none", Stagger: 90 * time.Second},
+			wantMode: "none",
 		},
 		{
-			name: "empty stays empty when legacy disabled",
-			opts: SpawnOptions{
-				StaggerMode:    "",
-				StaggerEnabled: false,
-				Stagger:        90 * time.Second,
-			},
-			want: "",
+			name:     "--stagger=0 stays unpaced",
+			opts:     SpawnOptions{StaggerMode: "none", StaggerEnabled: true},
+			wantMode: "none",
 		},
 	}
-
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := resolveEffectiveStaggerMode(tt.opts); got != tt.want {
-				t.Errorf("resolveEffectiveStaggerMode() = %q, want %q", got, tt.want)
+			got := robot.ResolveSpawnStagger(spawnStaggerRequest(tt.opts), spawnStaggerAgentTypes(tt.opts.Agents), tracker)
+			if got.Mode != tt.wantMode || got.Interval != tt.wantInterval {
+				t.Fatalf("resolved stagger = %+v, want mode %q interval %v", got, tt.wantMode, tt.wantInterval)
+			}
+			if got.Delay(3) != 3*tt.wantInterval {
+				t.Fatalf("4th agent delay = %v, want %v", got.Delay(3), 3*tt.wantInterval)
 			}
 		})
 	}
 }
 
-func TestResolveStaggerInterval_LegacyAndFixed(t *testing.T) {
-	opts := SpawnOptions{
-		Stagger:      90 * time.Second,
-		StaggerDelay: 20 * time.Second,
-	}
-
-	if got := resolveStaggerInterval("legacy", opts, nil); got != opts.Stagger {
-		t.Errorf("legacy interval = %v, want %v", got, opts.Stagger)
-	}
-
-	if got := resolveStaggerInterval("fixed", opts, nil); got != opts.StaggerDelay {
-		t.Errorf("fixed interval = %v, want %v", got, opts.StaggerDelay)
-	}
-}
-
-func TestResolveStaggerInterval_SmartUsesRateLimitTracker(t *testing.T) {
-	tracker := ratelimit.NewRateLimitTracker("")
-	tracker.RecordRateLimit("anthropic", "spawn")
-
-	opts := SpawnOptions{
-		Stagger:      90 * time.Second,
-		StaggerDelay: 20 * time.Second,
-	}
-
-	expected := tracker.GetOptimalDelay("anthropic")
-	got := resolveStaggerInterval("smart", opts, tracker)
-
-	if got != expected {
-		t.Errorf("smart interval = %v, want %v", got, expected)
-	}
-	if got == opts.StaggerDelay || got == opts.Stagger {
-		t.Errorf("smart interval should come from tracker, got %v", got)
-	}
-}
-
-// TestResolveStaggerInterval_SmartOmpUsesOwnBucket pins that an omp-only
-// spawn is not staggered on Anthropic's learned backoff: omp has its own
-// tracker bucket, while a mixed cc+omp spawn keeps the strictest provider.
-func TestResolveStaggerInterval_SmartOmpUsesOwnBucket(t *testing.T) {
+// TestSpawnStaggerAgentTypesFeedSmartProviderSelection pins that the CLI
+// hands its concrete agent list to the shared planner, so an omp-only spawn
+// uses omp's own bucket while a mixed cc+omp spawn keeps the strictest one.
+func TestSpawnStaggerAgentTypesFeedSmartProviderSelection(t *testing.T) {
 	tracker := ratelimit.NewRateLimitTracker("")
 	for i := 0; i < 3; i++ {
 		tracker.RecordRateLimit("anthropic", "spawn")
 	}
-	anthropic := tracker.GetOptimalDelay("anthropic")
-	omp := tracker.GetOptimalDelay("omp")
+	anthropic, omp := tracker.GetOptimalDelay("anthropic"), tracker.GetOptimalDelay("omp")
 	if anthropic == omp {
 		t.Fatalf("control: anthropic backoff (%v) must differ from the omp bucket (%v)", anthropic, omp)
 	}
+	smart := robot.SpawnStaggerRequest{Mode: "smart"}
 
-	ompOnly := SpawnOptions{Stagger: 90 * time.Second, Agents: []FlatAgent{{Type: AgentTypeOmp, Index: 1}, {Type: AgentTypeOmp, Index: 2}}}
-	if got := resolveStaggerInterval("smart", ompOnly, tracker); got != omp {
-		t.Fatalf("omp-only smart interval = %v, want the omp bucket %v (not anthropic %v)", got, omp, anthropic)
+	ompOnly := []FlatAgent{{Type: AgentTypeOmp, Index: 1}, {Type: AgentTypeOmp, Index: 2}}
+	if got := robot.ResolveSpawnStagger(smart, spawnStaggerAgentTypes(ompOnly), tracker); got.Interval != omp || got.Provider != "omp" {
+		t.Fatalf("omp-only smart stagger = %+v, want the omp bucket %v", got, omp)
 	}
-	if got := resolveStaggerInterval("smart", SpawnOptions{OmpCount: 8}, tracker); got != omp {
-		t.Fatalf("--omp=8 smart interval = %v, want %v", got, omp)
-	}
-	mixed := SpawnOptions{Agents: []FlatAgent{{Type: AgentTypeClaude, Index: 1}, {Type: AgentTypeOmp, Index: 1}}}
-	if got := resolveStaggerInterval("smart", mixed, tracker); got != anthropic {
-		t.Fatalf("cc+omp smart interval = %v, want strictest anthropic %v", got, anthropic)
+	mixed := []FlatAgent{{Type: AgentTypeClaude, Index: 1}, {Type: AgentTypeOmp, Index: 1}}
+	if got := robot.ResolveSpawnStagger(smart, spawnStaggerAgentTypes(mixed), tracker); got.Interval != anthropic || got.Provider != "anthropic" {
+		t.Fatalf("cc+omp smart stagger = %+v, want strictest anthropic %v", got, anthropic)
 	}
 }
 
-func TestResolveEffectiveStaggerMode_LegacyRequiresPositiveDuration(t *testing.T) {
-	opts := SpawnOptions{
-		StaggerMode:    "none",
-		StaggerEnabled: true,
-		Stagger:        0,
+// TestResolveSpawnStaggerDefaultsFlagsWinOverSpawnConfig pins the [spawn]
+// precedence both `ntm spawn` and `--robot-spawn` resolve through: an explicit
+// flag wins, [spawn] fills what was not given, and an invalid config value is
+// reported against its config key.
+func TestResolveSpawnStaggerDefaultsFlagsWinOverSpawnConfig(t *testing.T) {
+	cfg := config.Default()
+	cfg.Spawn.StaggerMode = config.SpawnStaggerFixed
+	cfg.Spawn.StaggerDelay = 45 * time.Second
+
+	mode, delay, err := resolveSpawnStaggerDefaults(cfg, "none", false, config.DefaultSpawnStaggerDelay, false)
+	if err != nil || mode != "fixed" || delay != 45*time.Second {
+		t.Fatalf("config defaults = (%q, %v, %v), want (fixed, 45s, nil)", mode, delay, err)
+	}
+	mode, delay, err = resolveSpawnStaggerDefaults(cfg, "smart", true, 10*time.Second, true)
+	if err != nil || mode != "smart" || delay != 10*time.Second {
+		t.Fatalf("explicit flags = (%q, %v, %v), want (smart, 10s, nil)", mode, delay, err)
+	}
+	mode, delay, err = resolveSpawnStaggerDefaults(cfg, "none", true, config.DefaultSpawnStaggerDelay, false)
+	if err != nil || mode != "none" || delay != 45*time.Second {
+		t.Fatalf("explicit mode with config delay = (%q, %v, %v), want (none, 45s, nil)", mode, delay, err)
+	}
+	if mode, delay, err = resolveSpawnStaggerDefaults(nil, "none", false, 30*time.Second, false); err != nil || mode != "none" || delay != 30*time.Second {
+		t.Fatalf("nil config = (%q, %v, %v), want flag values unchanged", mode, delay, err)
 	}
 
-	if got := resolveEffectiveStaggerMode(opts); got != "none" {
-		t.Errorf("resolveEffectiveStaggerMode() = %q, want %q", got, "none")
+	bad := config.Default()
+	bad.Spawn.StaggerMode = "adaptive"
+	if _, _, err := resolveSpawnStaggerDefaults(bad, "none", false, 0, true); err == nil || !strings.Contains(err.Error(), "[spawn] stagger_mode must be one of none, fixed, or smart") {
+		t.Fatalf("invalid config mode error = %v", err)
 	}
-}
-
-func TestResolveStaggerInterval_SmartFallbackWhenTrackerNil(t *testing.T) {
-	opts := SpawnOptions{
-		Stagger:      45 * time.Second,
-		StaggerDelay: 20 * time.Second,
+	if _, _, err := resolveSpawnStaggerDefaults(bad, "fixed", true, 0, true); err != nil {
+		t.Fatalf("explicit flags must not consult an invalid config value: %v", err)
 	}
-
-	if got := resolveStaggerInterval("smart", opts, nil); got != opts.Stagger {
-		t.Errorf("smart interval without tracker = %v, want %v", got, opts.Stagger)
-	}
-}
-
-func TestSmartStaggerPromptDelayUsesTracker(t *testing.T) {
-	opts := SpawnOptions{
-		StaggerMode: "smart",
-		Stagger:     90 * time.Second,
-	}
-	tracker := ratelimit.NewRateLimitTracker("")
-	tracker.RecordRateLimit("anthropic", "spawn")
-
-	mode := resolveEffectiveStaggerMode(opts)
-	if mode != "smart" {
-		t.Fatalf("resolveEffectiveStaggerMode() = %q, want %q", mode, "smart")
-	}
-
-	interval := resolveStaggerInterval(mode, opts, tracker)
-	agentIdx := 3
-	got := time.Duration(agentIdx) * interval
-	want := time.Duration(agentIdx) * tracker.GetOptimalDelay("anthropic")
-	if got != want {
-		t.Errorf("smart prompt delay = %v, want %v", got, want)
+	bad = config.Default()
+	bad.Spawn.StaggerDelay = config.MaxSpawnStaggerDelay + time.Second
+	if _, _, err := resolveSpawnStaggerDefaults(bad, "fixed", true, 0, false); err == nil || !strings.Contains(err.Error(), "[spawn] stagger_delay must be between 0 and 5m0s") {
+		t.Fatalf("invalid config delay error = %v", err)
 	}
 }
 

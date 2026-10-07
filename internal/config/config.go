@@ -114,6 +114,7 @@ type Config struct {
 	Ensemble        EnsembleConfig        `toml:"ensemble"`         // Reasoning ensemble defaults
 	Swarm           SwarmConfig           `toml:"swarm"`            // Weighted multi-project agent swarm
 	SpawnPacing     SpawnPacingConfig     `toml:"spawn_pacing"`     // Spawn scheduler pacing configuration
+	Spawn           SpawnConfig           `toml:"spawn"`            // Spawn defaults (prompt stagger) for ntm spawn and --robot-spawn
 	Safety          SafetyConfig          `toml:"safety"`           // Safety profile selection + defaults
 	Preflight       PreflightConfig       `toml:"preflight"`        // Prompt preflight/lint configuration
 	Redaction       RedactionConfig       `toml:"redaction"`        // Secrets/PII redaction configuration
@@ -2507,6 +2508,7 @@ func Default() *Config {
 		Privacy:         DefaultPrivacyConfig(),
 		Encryption:      DefaultEncryptionConfig(),
 		SpawnPacing:     DefaultSpawnPacingConfig(),
+		Spawn:           DefaultSpawnConfig(),
 		Retry:           DefaultRetryConfig(),
 		Routing:         DefaultRoutingConfig(),
 		Coordinator:     DefaultCoordinatorConfig(),
@@ -4350,6 +4352,12 @@ func Print(cfg *Config, w io.Writer) error {
 	fmt.Fprintf(w, "omp_max_concurrent = %d\n", cfg.SpawnPacing.AgentCaps.OmpMaxConcurrent)
 	fmt.Fprintln(w)
 
+	fmt.Fprintln(w, "[spawn]")
+	fmt.Fprintln(w, "# Defaults for `ntm spawn` and `--robot-spawn` when the flag is not given (flags win)")
+	fmt.Fprintf(w, "stagger_mode = %q  # Prompt pacing between agents: none, fixed, or smart\n", cfg.Spawn.StaggerMode)
+	fmt.Fprintf(w, "stagger_delay = %q  # Fixed-mode interval between consecutive agents (0-5m)\n", cfg.Spawn.StaggerDelay.String())
+	fmt.Fprintln(w)
+
 	fmt.Fprintln(w, "[file_reservation]")
 	fmt.Fprintln(w, "# Automatic Agent Mail file reservation settings")
 	fmt.Fprintf(w, "enabled = %t\n", cfg.FileReservation.Enabled)
@@ -5312,6 +5320,16 @@ func GetValue(cfg *Config, path string) (interface{}, error) {
 				return cfg.SpawnPacing.AgentCaps.OmpMaxConcurrent, nil
 			}
 		}
+	case "spawn":
+		if len(parts) < 2 {
+			return cfg.Spawn, nil
+		}
+		switch parts[1] {
+		case "stagger_mode":
+			return cfg.Spawn.StaggerMode, nil
+		case "stagger_delay":
+			return cfg.Spawn.StaggerDelay, nil
+		}
 	case "swarm":
 		if len(parts) < 2 {
 			return cfg.Swarm, nil
@@ -6006,6 +6024,10 @@ func Diff(cfg *Config) []ConfigDiff {
 	addDiff("spawn_pacing.max_concurrent_spawns", defaults.SpawnPacing.MaxConcurrentSpawns, cfg.SpawnPacing.MaxConcurrentSpawns)
 	addDiff("spawn_pacing.agent_caps", defaults.SpawnPacing.AgentCaps, cfg.SpawnPacing.AgentCaps)
 
+	// Spawn defaults
+	addDiff("spawn.stagger_mode", defaults.Spawn.StaggerMode, cfg.Spawn.StaggerMode)
+	addDiff("spawn.stagger_delay", defaults.Spawn.StaggerDelay, cfg.Spawn.StaggerDelay)
+
 	// Coordinator
 	addDiff("coordinator.poll_interval", defaults.Coordinator.PollInterval, cfg.Coordinator.PollInterval)
 	addDiff("coordinator.digest_interval", defaults.Coordinator.DigestInterval, cfg.Coordinator.DigestInterval)
@@ -6116,6 +6138,11 @@ func Validate(cfg *Config) []error {
 	// Validate spawn pacing config
 	if err := ValidateSpawnPacingConfig(&cfg.SpawnPacing); err != nil {
 		errs = append(errs, fmt.Errorf("spawn_pacing: %w", err))
+	}
+
+	// Validate spawn defaults
+	if err := ValidateSpawnConfig(&cfg.Spawn); err != nil {
+		errs = append(errs, fmt.Errorf("spawn: %w", err))
 	}
 
 	// Validate file reservation config

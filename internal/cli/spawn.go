@@ -65,8 +65,6 @@ type optionalDurationValue struct {
 	enabled         *bool
 }
 
-const maxStaggerInterval = 5 * time.Minute
-
 func newOptionalDurationValue(defaultDur time.Duration, dur *time.Duration, enabled *bool) *optionalDurationValue {
 	*dur = defaultDur // Set default
 	return &optionalDurationValue{
@@ -102,8 +100,8 @@ func (v *optionalDurationValue) Set(s string) error {
 	if dur < 0 {
 		return fmt.Errorf("stagger duration cannot be negative")
 	}
-	if dur > maxStaggerInterval {
-		return fmt.Errorf("stagger duration cannot exceed %s", maxStaggerInterval)
+	if dur > config.MaxSpawnStaggerDelay {
+		return fmt.Errorf("stagger duration cannot exceed %s", config.MaxSpawnStaggerDelay)
 	}
 	*v.duration = dur
 	return nil
@@ -676,19 +674,47 @@ func normalizeSpawnOptions(opts *SpawnOptions) {
 	}
 }
 
+// validateSpawnStaggerOptions checks the stagger flags against the shared
+// vocabulary and bounds in internal/config (the same ones --robot-spawn and
+// the [spawn] table use). An out-of-range delay is rejected whatever the
+// mode, exactly as --robot-spawn rejects it.
 func validateSpawnStaggerOptions(opts SpawnOptions) error {
-	switch opts.StaggerMode {
-	case "", "none", "fixed", "smart":
-	default:
-		return fmt.Errorf("--stagger-mode must be one of none, fixed, or smart; got %q", opts.StaggerMode)
+	if err := config.ValidateSpawnStaggerMode(opts.StaggerMode); err != nil {
+		return fmt.Errorf("--stagger-mode %w", err)
 	}
-	if opts.Stagger < 0 || opts.Stagger > maxStaggerInterval {
-		return fmt.Errorf("--stagger must be between 0 and %s", maxStaggerInterval)
+	if err := config.ValidateSpawnStaggerDelay(opts.Stagger); err != nil {
+		return fmt.Errorf("--stagger %w", err)
 	}
-	if opts.StaggerMode == "fixed" && (opts.StaggerDelay < 0 || opts.StaggerDelay > maxStaggerInterval) {
-		return fmt.Errorf("--stagger-delay must be between 0 and %s", maxStaggerInterval)
+	if err := config.ValidateSpawnStaggerDelay(opts.StaggerDelay); err != nil {
+		return fmt.Errorf("--stagger-delay %w", err)
 	}
 	return nil
+}
+
+// resolveSpawnStaggerDefaults fills the stagger settings a caller did not set
+// explicitly from the [spawn] config table: an explicit flag wins, then
+// [spawn], then the built-in default. `ntm spawn` and `--robot-spawn` both
+// resolve through here so they honor the table identically. A config-sourced
+// value is validated here so its error names the config key, not a flag.
+func resolveSpawnStaggerDefaults(cfg *config.Config, mode string, modeSet bool, delay time.Duration, delaySet bool) (string, time.Duration, error) {
+	if cfg == nil {
+		return mode, delay, nil
+	}
+	if !modeSet {
+		if err := config.ValidateSpawnStaggerMode(cfg.Spawn.StaggerMode); err != nil {
+			return "", 0, fmt.Errorf("[spawn] stagger_mode %w", err)
+		}
+		if cfg.Spawn.StaggerMode != "" {
+			mode = cfg.Spawn.StaggerMode
+		}
+	}
+	if !delaySet {
+		if err := config.ValidateSpawnStaggerDelay(cfg.Spawn.StaggerDelay); err != nil {
+			return "", 0, fmt.Errorf("[spawn] stagger_delay %w", err)
+		}
+		delay = cfg.Spawn.StaggerDelay
+	}
+	return mode, delay, nil
 }
 
 func validateSpawnPaneEnv(env map[string]string) error {
@@ -1207,71 +1233,25 @@ func (v *optionalDurationValue) NoOptDefVal() string {
 	return v.defaultDuration.String()
 }
 
-func resolveEffectiveStaggerMode(opts SpawnOptions) string {
-	effective := opts.StaggerMode
-	if effective == "" || effective == "none" {
-		if opts.StaggerEnabled && opts.Stagger > 0 {
-			return "legacy"
-		}
+// spawnStaggerRequest maps the stagger flags onto the shared stagger contract.
+// A bare --stagger (or --stagger=DURATION) is the legacy interval and applies
+// only while --stagger-mode is none.
+func spawnStaggerRequest(opts SpawnOptions) robot.SpawnStaggerRequest {
+	request := robot.SpawnStaggerRequest{Mode: opts.StaggerMode, Delay: opts.StaggerDelay}
+	if opts.StaggerEnabled {
+		request.Legacy = opts.Stagger
 	}
-	return effective
+	return request
 }
 
-func resolveStaggerInterval(mode string, opts SpawnOptions, tracker *ratelimit.RateLimitTracker) time.Duration {
-	interval := opts.Stagger
-	switch mode {
-	case "fixed":
-		interval = opts.StaggerDelay
-	case "smart":
-		if tracker != nil {
-			// Determine provider priority: Anthropic > OpenAI > Google
-			provider := "anthropic" // Default to strictest
-
-			hasAnthropic := opts.CCCount > 0
-			hasOpenAI := opts.CodCount > 0
-			hasGoogle := opts.GmiCount > 0 || opts.AgyCount > 0
-			hasOmp := opts.OmpCount > 0
-
-			// Check detailed agent list if available (source of truth)
-			if len(opts.Agents) > 0 {
-				hasAnthropic = false
-				hasOpenAI = false
-				hasGoogle = false
-				hasOmp = false
-				for _, a := range opts.Agents {
-					switch a.Type {
-					case AgentTypeClaude:
-						hasAnthropic = true
-					case AgentTypeCodex:
-						hasOpenAI = true
-					case AgentTypeGemini:
-						hasGoogle = true
-					case AgentTypeAntigravity:
-						hasGoogle = true
-					case AgentTypeOmp:
-						hasOmp = true
-					}
-				}
-			}
-
-			if hasAnthropic {
-				provider = "anthropic"
-			} else if hasOpenAI {
-				provider = "openai"
-			} else if hasGoogle {
-				provider = "google"
-			} else if hasOmp {
-				// omp routes panes through its own configured providers, so an
-				// omp-only spawn uses the tracker's own "omp" bucket (what
-				// ratelimit.NormalizeProvider("omp") records into) instead of
-				// inheriting Anthropic's learned, strictest delay.
-				provider = ratelimit.NormalizeProvider(string(AgentTypeOmp))
-			}
-
-			interval = tracker.GetOptimalDelay(provider)
-		}
+// spawnStaggerAgentTypes lists the batch's agent types in launch order for
+// smart-mode provider selection.
+func spawnStaggerAgentTypes(agents []FlatAgent) []string {
+	types := make([]string, 0, len(agents))
+	for _, agent := range agents {
+		types = append(types, string(agent.Type))
 	}
-	return interval
+	return types
 }
 
 func codexCooldownRemaining(tracker *ratelimit.RateLimitTracker, alreadyWaited bool) (time.Duration, bool) {
@@ -1826,6 +1806,8 @@ Stagger mode (--stagger-mode):
 
   Legacy --stagger flag still works for duration-based staggering.
   Smart mode automatically backs off on rate limits and speeds up on success.
+  Defaults come from the [spawn] config table (stagger_mode, stagger_delay)
+  when the flags are not given; --robot-spawn shares the same stagger planner.
 
 Worktree isolation (--worktrees):
   Creates separate Git worktrees for each agent, allowing safe parallel work.
@@ -2088,6 +2070,18 @@ Examples:
 				agentsFlat = expanded
 			}
 
+			// [spawn] supplies stagger defaults beneath the flags. An explicit
+			// legacy --stagger also counts as choosing the mode, so it is not
+			// overridden by a configured stagger_mode.
+			var staggerErr error
+			staggerMode, staggerDelay, staggerErr = resolveSpawnStaggerDefaults(
+				cfg, staggerMode, cmd.Flags().Changed("stagger-mode") || cmd.Flags().Changed("stagger"),
+				staggerDelay, cmd.Flags().Changed("stagger-delay"),
+			)
+			if staggerErr != nil {
+				return staggerErr
+			}
+
 			opts := SpawnOptions{
 				Session:                 sessionName,
 				PaneEnv:                 paneEnv,
@@ -2186,8 +2180,8 @@ Examples:
 	cmd.Flags().Lookup("stagger").NoOptDefVal = staggerValue.NoOptDefVal()
 
 	// New stagger mode flags (bd-2wih)
-	cmd.Flags().StringVar(&staggerMode, "stagger-mode", "none", "Stagger mode: smart (adaptive), fixed, or none")
-	cmd.Flags().DurationVar(&staggerDelay, "stagger-delay", 30*time.Second, "Fixed delay between agents (used with --stagger-mode=fixed)")
+	cmd.Flags().StringVar(&staggerMode, "stagger-mode", config.SpawnStaggerNone, "Stagger mode: smart (adaptive), fixed, or none (unset: [spawn] stagger_mode)")
+	cmd.Flags().DurationVar(&staggerDelay, "stagger-delay", config.DefaultSpawnStaggerDelay, "Fixed delay between agents (used with --stagger-mode=fixed; unset: [spawn] stagger_delay)")
 
 	// CASS context flags
 	cmd.Flags().StringVar(&contextQuery, "cass-context", "", "Explicit context query for CASS")
@@ -2914,7 +2908,7 @@ func spawnSessionLogicContextWithOutput(ctx context.Context, opts SpawnOptions, 
 			}
 		}
 	}
-	if opts.StaggerMode == "smart" || hasCodex {
+	if opts.StaggerMode == config.SpawnStaggerSmart || hasCodex {
 		rateLimitTracker = ratelimit.NewRateLimitTracker(dir)
 		if err := rateLimitTracker.LoadFromDir(dir); err != nil {
 			if !IsJSONOutput() {
@@ -2923,16 +2917,16 @@ func spawnSessionLogicContextWithOutput(ctx context.Context, opts SpawnOptions, 
 		}
 	}
 
-	// Determine effective stagger mode (new mode takes precedence over legacy)
-	effectiveStaggerMode := resolveEffectiveStaggerMode(opts)
+	// Resolve the stagger through the planner shared with --robot-spawn (an
+	// explicit --stagger-mode takes precedence over the legacy --stagger).
+	stagger := robot.ResolveSpawnStagger(spawnStaggerRequest(opts), spawnStaggerAgentTypes(opts.Agents), rateLimitTracker)
 
 	// Spawn state for dashboard display (only used when stagger is enabled)
 	var spawnState *SpawnState
-	staggerInterval := resolveStaggerInterval(effectiveStaggerMode, opts, rateLimitTracker)
-	if effectiveStaggerMode != "none" && effectiveStaggerMode != "" && spawnHasPromptDelivery(opts) {
-		spawnState = NewSpawnState(spawnCtx.BatchID, int(staggerInterval.Seconds()), len(opts.Agents))
+	if stagger.Mode != config.SpawnStaggerNone && spawnHasPromptDelivery(opts) {
+		spawnState = NewSpawnState(spawnCtx.BatchID, int(stagger.Interval.Seconds()), len(opts.Agents))
 	}
-	isStaggered := effectiveStaggerMode != "none" && effectiveStaggerMode != "" && staggerInterval > 0
+	isStaggered := stagger.Active()
 	openAICooldownWaited := false
 
 	// Resolve CASS context if enabled
@@ -3302,10 +3296,7 @@ func spawnSessionLogicContextWithOutput(ctx context.Context, opts SpawnOptions, 
 		agentCmd = prependSpawnPaneEnv(agentCmd, paneEnv)
 
 		// Calculate stagger delay for this agent (used for spawn context)
-		var promptDelay time.Duration
-		if isStaggered {
-			promptDelay = time.Duration(staggerAgentIdx) * staggerInterval
-		}
+		promptDelay := stagger.Delay(staggerAgentIdx)
 
 		// Create agent-specific spawn context with order (1-based) and stagger delay
 		agentSpawnCtx := spawnCtx.ForAgent(staggerAgentIdx+1, promptDelay)
@@ -3814,12 +3805,14 @@ func spawnSessionLogicContextWithOutput(ctx context.Context, opts SpawnOptions, 
 			incrementAgentCounts(&agentCounts, p.Type)
 		}
 
-		// Build stagger config if enabled
+		// Report the resolved stagger (flag, [spawn] config, or legacy
+		// --stagger) whenever prompt delivery is actually paced.
 		var staggerCfg *output.StaggerConfig
-		if opts.StaggerEnabled {
+		if stagger.Active() {
 			staggerCfg = &output.StaggerConfig{
 				Enabled:    true,
-				IntervalMs: opts.Stagger.Milliseconds(),
+				Mode:       stagger.Mode,
+				IntervalMs: stagger.Interval.Milliseconds(),
 			}
 		}
 

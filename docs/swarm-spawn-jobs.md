@@ -54,9 +54,11 @@ later launches. It does not roll back a session or agents already created.
 A cancelled job may acquire its partial result after its worker has unwound;
 inspect that result before retrying to avoid duplicating a swarm.
 
-This control is on the asynchronous `swarm_spawn` Jobs API. It does not add a
-`--spawn-stagger` flag to `--robot-spawn`, and does not change the human
-`ntm spawn --stagger` prompt-stagger behavior.
+This control is on the asynchronous `swarm_spawn` Jobs API and paces process
+launches. It is distinct from prompt stagger — `--robot-spawn
+--spawn-stagger-mode/--spawn-stagger-delay`, `ntm spawn --stagger-mode`, and
+the `[spawn]` config table — which paces prompt delivery after the agents are
+up, and it changes neither.
 
 Regression coverage: `TestSpawnLaunchInterval*` in `internal/robot` exercises
 real pacing, receipt preservation, and cancellation. `TestSwarmJobLaunchPacing*`

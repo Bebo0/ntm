@@ -124,8 +124,9 @@ type AgentCountsResponse struct {
 
 // StaggerConfig represents stagger settings in spawn response
 type StaggerConfig struct {
-	Enabled    bool  `json:"enabled"`
-	IntervalMs int64 `json:"interval_ms,omitempty"`
+	Enabled    bool   `json:"enabled"`
+	Mode       string `json:"mode,omitempty"` // fixed, smart, or legacy (bare --stagger)
+	IntervalMs int64  `json:"interval_ms,omitempty"`
 }
 
 // AgentMailSpawnStatus represents Agent Mail registration status for a spawn operation

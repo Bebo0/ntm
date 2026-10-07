@@ -265,6 +265,12 @@ func init() {
 	// Swarm launch stagger (swarm.go).
 	config.RegisterReader("swarm.stagger_delay_ms", runSwarm)
 
+	// [spawn] prompt-stagger defaults, applied beneath the flags of both
+	// `ntm spawn` (spawn.go) and `--robot-spawn` (root.go
+	// applyRobotSpawnPromptFlags) by the shared resolver.
+	config.RegisterReader("spawn.stagger_mode", resolveSpawnStaggerDefaults)
+	config.RegisterReader("spawn.stagger_delay", resolveSpawnStaggerDefaults)
+
 	// Swarm global-auth clobber escape hatch (swarm.go): the config value
 	// seeds the --force-global-auth-clobber flag default (bd-6otuk fixed the
 	// prior wiring bug where the flag's hard-coded false overwrote the config

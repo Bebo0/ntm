@@ -3,7 +3,82 @@ package config
 import (
 	"fmt"
 	"sort"
+	"time"
 )
+
+// Spawn stagger modes: how `ntm spawn` and `--robot-spawn` pace prompt
+// delivery between agents so they do not all select work at the same instant
+// (thundering-herd prevention, docs/ORCHESTRATION_FEATURES.md Feature 7). The
+// vocabulary and bounds live here so config validation, both flag surfaces,
+// and the shared planner (robot.ResolveSpawnStagger) agree on one definition.
+const (
+	// SpawnStaggerNone delivers every agent's prompt without pacing.
+	SpawnStaggerNone = "none"
+	// SpawnStaggerFixed spaces consecutive agents by a fixed delay.
+	SpawnStaggerFixed = "fixed"
+	// SpawnStaggerSmart spaces consecutive agents by the learned rate-limit
+	// delay of the strictest provider in the batch.
+	SpawnStaggerSmart = "smart"
+
+	// MaxSpawnStaggerDelay bounds every per-agent stagger interval.
+	MaxSpawnStaggerDelay = 5 * time.Minute
+	// DefaultSpawnStaggerDelay is the fixed-mode interval when none is set.
+	DefaultSpawnStaggerDelay = 30 * time.Second
+)
+
+// SpawnConfig holds the [spawn] defaults shared by `ntm spawn` and
+// `--robot-spawn`. Each value applies only when the corresponding flag is not
+// given; an explicit flag always wins.
+type SpawnConfig struct {
+	// StaggerMode paces prompt delivery between spawned agents: none (the
+	// default), fixed (StaggerDelay apart), or smart (learned rate-limit delay).
+	StaggerMode string `toml:"stagger_mode"`
+	// StaggerDelay is the fixed-mode interval between consecutive agents
+	// (0 to 5m, e.g. "30s").
+	StaggerDelay time.Duration `toml:"stagger_delay"`
+}
+
+// DefaultSpawnConfig returns the built-in [spawn] defaults: no pacing unless
+// asked, and a 30s fixed-mode interval.
+func DefaultSpawnConfig() SpawnConfig {
+	return SpawnConfig{
+		StaggerMode:  SpawnStaggerNone,
+		StaggerDelay: DefaultSpawnStaggerDelay,
+	}
+}
+
+// ValidateSpawnStaggerMode accepts none (or empty), fixed, or smart. The error
+// omits the setting name so each surface can prefix its own flag or key.
+func ValidateSpawnStaggerMode(mode string) error {
+	switch mode {
+	case "", SpawnStaggerNone, SpawnStaggerFixed, SpawnStaggerSmart:
+		return nil
+	default:
+		return fmt.Errorf("must be one of none, fixed, or smart; got %q", mode)
+	}
+}
+
+// ValidateSpawnStaggerDelay bounds a stagger interval to [0, MaxSpawnStaggerDelay].
+func ValidateSpawnStaggerDelay(delay time.Duration) error {
+	if delay < 0 || delay > MaxSpawnStaggerDelay {
+		return fmt.Errorf("must be between 0 and %s", MaxSpawnStaggerDelay)
+	}
+	return nil
+}
+
+// ValidateSpawnConfig validates the [spawn] table.
+func ValidateSpawnConfig(cfg *SpawnConfig) error {
+	if cfg == nil {
+		return nil
+	}
+	if err := ValidateSpawnStaggerMode(cfg.StaggerMode); err != nil {
+		return fmt.Errorf("stagger_mode %w", err)
+	}
+	if err := ValidateSpawnStaggerDelay(cfg.StaggerDelay); err != nil {
+		return fmt.Errorf("stagger_delay %w", err)
+	}
+	return nil
+}
 
 // SpawnPacingConfig configures the spawn admission control consulted by the
 // robot spawn surface (internal/robot/spawn.go).

@@ -1345,7 +1345,7 @@ func readPromptFileOrStdin(path string) ([]byte, error) {
 	if path == "-" {
 		// Read one byte past the limit so oversize input is a loud error
 		// instead of a silent mid-prompt truncation (mirrors
-		// loadRobotSendMessage's overflow detection).
+		// loadRobotMessageInput's overflow detection).
 		const limit = 10 * 1024 * 1024
 		data, err := io.ReadAll(io.LimitReader(os.Stdin, limit+1))
 		if err != nil {

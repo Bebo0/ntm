@@ -1289,6 +1289,10 @@ func buildCommandRegistry() []RobotCommandInfo {
 				{Name: "spawn-label", Flag: "--spawn-label", Type: "string", Required: false, Description: "Goal label for multi-session support (creates SESSION--LABEL)"},
 				{Name: "spawn-assign-work", Flag: "--spawn-assign-work", Type: "bool", Required: false, Description: "Claim and assign ready work during spawn"},
 				{Name: "strategy", Flag: "--strategy", Type: "string", Required: false, Default: "top-n", Description: "Assignment strategy when --spawn-assign-work is enabled: top-n, diverse, dependency-aware, skill-matched"},
+				{Name: "spawn-prompt", Flag: "--spawn-prompt", Type: "string", Required: false, Description: "Initial prompt delivered to every agent after the readiness wait (implies --spawn-wait) through robot send's dispatch path; prefixes each work prompt with --spawn-assign-work. Outcomes in prompt_deliveries[]"},
+				{Name: "spawn-prompt-file", Flag: "--spawn-prompt-file", Type: "string", Required: false, Description: "Read the --spawn-prompt text from a file, or stdin with '-'"},
+				{Name: "spawn-stagger-mode", Flag: "--spawn-stagger-mode", Type: "string", Required: false, Description: "Pace prompt delivery between agents: none, fixed, or smart (learned rate-limit delay); default [spawn] stagger_mode, else none. Plan in stagger.schedule[]"},
+				{Name: "spawn-stagger-delay", Flag: "--spawn-stagger-delay", Type: "duration", Required: false, Description: "Interval between consecutive agents for --spawn-stagger-mode=fixed (0-5m); default [spawn] stagger_delay, else 30s"},
 				{Name: "dry-run", Flag: "--dry-run", Type: "bool", Required: false, Description: "Preview without executing"},
 			},
 			Examples: []string{
@@ -1300,6 +1304,7 @@ func buildCommandRegistry() []RobotCommandInfo {
 				"ntm --robot-spawn=myproject --spawn-preset=standard",
 				"ntm --robot-spawn=myproject --spawn-label=frontend --spawn-cc=3",
 				"ntm --robot-spawn=myproject --spawn-assign-work --strategy=dependency-aware",
+				"ntm --robot-spawn=myproject --spawn-cc=3 --spawn-prompt='Read AGENTS.md, then pick ready work' --spawn-stagger-mode=fixed --spawn-stagger-delay=90s",
 			},
 		},
 		{

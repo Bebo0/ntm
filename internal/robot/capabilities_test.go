@@ -635,7 +635,7 @@ func TestBuildCommandRegistry_UsesCanonicalSharedFlagsForAdjacentCommands(t *tes
 		{command: sendCmd, flags: []string{"--timeout", "--poll"}},
 		{command: ackCmd, flags: []string{"--timeout", "--poll"}},
 		{command: interruptCmd, flags: []string{"--msg", "--all", "--force", "--no-wait", "--timeout"}},
-		{command: spawnCmd, flags: []string{"--spawn-wait", "--timeout", "--spawn-assign-work", "--strategy"}},
+		{command: spawnCmd, flags: []string{"--spawn-wait", "--timeout", "--spawn-assign-work", "--strategy", "--spawn-prompt", "--spawn-prompt-file", "--spawn-stagger-mode", "--spawn-stagger-delay"}},
 		{command: restartPaneCmd, flags: []string{"--panes", "--type", "--all", "--dry-run", "--restart-bead", "--restart-prompt"}},
 		{command: activityCmd, flags: []string{"--panes", "--activity-type"}},
 		{command: isWorkingCmd, flags: []string{"--verbose"}},

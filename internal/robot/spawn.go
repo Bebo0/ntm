@@ -26,6 +26,7 @@ import (
 	"github.com/Dicklesworthstone/ntm/internal/policy"
 	"github.com/Dicklesworthstone/ntm/internal/pressure"
 	"github.com/Dicklesworthstone/ntm/internal/process"
+	"github.com/Dicklesworthstone/ntm/internal/ratelimit"
 	"github.com/Dicklesworthstone/ntm/internal/recovery"
 	"github.com/Dicklesworthstone/ntm/internal/resilience"
 	"github.com/Dicklesworthstone/ntm/internal/state"
@@ -92,8 +93,19 @@ type SpawnOptions struct {
 	CustomNames         []string      // Custom agent names (used in order, then NATO alphabet)
 	RequireReservation  bool
 	ReservationPaths    []string
-	AssignmentDeps      *SpawnAssignmentDependencies
-	LifecycleDeps       *SpawnLifecycleDependencies
+	// Prompt is delivered to every spawned agent after the readiness wait
+	// (a non-blank Prompt implies WaitReady) through the canonical robot
+	// dispatch port. With AssignWork it prefixes each agent's work prompt
+	// instead: one atomic delivery, because a second back-to-back dispatch
+	// would be refused by the idle gate once the first prompt is running.
+	Prompt string
+	// StaggerMode/StaggerDelay pace prompt delivery (Prompt and AssignWork
+	// prompts) between agents, resolved by ResolveSpawnStagger exactly as
+	// `ntm spawn --stagger-mode/--stagger-delay`. Empty mode means none.
+	StaggerMode    string
+	StaggerDelay   time.Duration
+	AssignmentDeps *SpawnAssignmentDependencies
+	LifecycleDeps  *SpawnLifecycleDependencies
 }
 
 // SpawnLifecycleDependencies exposes tmux lifecycle ports for deterministic
@@ -115,10 +127,20 @@ type SpawnLifecycleDependencies struct {
 	// port (resilience.StartSessionMonitor in production; WS0-G6 single
 	// code path with CLI spawn, bd-ws1-truth-safety-l5ddi.8).
 	StartSessionMonitor func(context.Context, resilience.SpawnMonitorRequest) (*resilience.SpawnMonitorResult, error)
+	// Now and Wait are the prompt-stagger clock: Now anchors and stamps the
+	// delivery schedule and Wait holds a slot until it is due. Tests inject a
+	// fake clock so paced delivery is asserted without real sleeps.
+	Now  func() time.Time
+	Wait func(context.Context, time.Duration) error
+	// LoadRateLimits loads the learned rate-limit history smart stagger reads.
+	LoadRateLimits func(dir string) (*ratelimit.RateLimitTracker, error)
 }
 
 // SpawnAssignmentDependencies exposes assignment side-effect ports for focused
 // tests while production uses the durable Beads, ledger, and dispatch services.
+// Its prompt-dispatch ports (ListPanes, ObserveSession, DispatchDeliverer,
+// DispatchPacer) also carry --spawn-prompt delivery, which uses the same
+// canonical dispatch port as work assignment.
 type SpawnAssignmentDependencies struct {
 	LoadAssignmentPolicy             func(string, string, bool) (*config.Config, error)
 	FetchActionable                  func(context.Context, string, int) ([]bv.TriageRecommendation, error)
@@ -166,7 +188,14 @@ type SpawnOutput struct {
 	Mode                string            `json:"mode,omitempty"`
 	Assignments         []SpawnAssignment `json:"assignments,omitempty"`
 	AssignStrategy      string            `json:"assign_strategy,omitempty"`
-	Recovery            *SpawnRecovery    `json:"recovery,omitempty"`
+	// Stagger is the prompt pacing plan, present whenever prompts are
+	// delivered (--spawn-prompt or --spawn-assign-work), including dry runs.
+	Stagger *SpawnStaggerPlan `json:"stagger,omitempty"`
+	// PromptDeliveries holds one --spawn-prompt outcome per agent in stagger
+	// order. With --spawn-assign-work the prompt rides inside each work
+	// prompt, so assignments[] carries the outcome instead.
+	PromptDeliveries []SpawnPromptDelivery `json:"prompt_deliveries,omitempty"`
+	Recovery         *SpawnRecovery        `json:"recovery,omitempty"`
 	// WorkSourceMismatch is the STALE_WORK_COORDINATION remediation receipt.
 	WorkSourceMismatch *worksource.StaleError `json:"work_source_mismatch,omitempty"`
 	// Admission is the pre-spawn resource-pressure admission result.
@@ -262,6 +291,38 @@ func validateSpawnRequest(opts SpawnOptions) (string, error) {
 	return strategy, nil
 }
 
+// validateSpawnStagger rejects an unsupported stagger mode or an out-of-range
+// stagger delay before any lifecycle side effect.
+func validateSpawnStagger(opts SpawnOptions) error {
+	if err := config.ValidateSpawnStaggerMode(opts.StaggerMode); err != nil {
+		return fmt.Errorf("--spawn-stagger-mode %w", err)
+	}
+	if err := config.ValidateSpawnStaggerDelay(opts.StaggerDelay); err != nil {
+		return fmt.Errorf("--spawn-stagger-delay %w", err)
+	}
+	return nil
+}
+
+// hasInitialPrompt reports whether a --spawn-prompt should be delivered.
+func (opts SpawnOptions) hasInitialPrompt() bool {
+	return strings.TrimSpace(opts.Prompt) != ""
+}
+
+// deliversPrompts reports whether the spawn delivers any prompt, and so
+// paces deliveries and reports a stagger plan.
+func (opts SpawnOptions) deliversPrompts() bool {
+	return opts.AssignWork || opts.hasInitialPrompt()
+}
+
+// composeSpawnWorkPrompt prefixes a work-assignment prompt with the initial
+// --spawn-prompt so both reach the agent in one paced, atomic delivery.
+func composeSpawnWorkPrompt(initialPrompt, workPrompt string) string {
+	if strings.TrimSpace(initialPrompt) == "" {
+		return workPrompt
+	}
+	return initialPrompt + "\n\n" + workPrompt
+}
+
 // spawnAgentPaneRange returns the first pane index agents occupy and how many
 // agent panes the request needs. Pane 0 is reserved for the user unless
 // NoUserPane is set; agents of every type follow it positionally.
@@ -327,6 +388,11 @@ func spawnLifecycleDeps(custom *SpawnLifecycleDependencies) SpawnLifecycleDepend
 		LaunchAgent:         launchAgent,
 		WaitForReady:        waitForAgentsReady,
 		StartSessionMonitor: resilience.StartSessionMonitor,
+		Now:                 time.Now,
+		Wait: func(ctx context.Context, delay time.Duration) error {
+			return dispatchsvc.TimerPacer{}.Wait(ctx, dispatchsvc.Pace{Delay: delay})
+		},
+		LoadRateLimits: loadSpawnRateLimits,
 	}
 	if custom == nil {
 		return deps
@@ -364,6 +430,15 @@ func spawnLifecycleDeps(custom *SpawnLifecycleDependencies) SpawnLifecycleDepend
 	if custom.StartSessionMonitor != nil {
 		deps.StartSessionMonitor = custom.StartSessionMonitor
 	}
+	if custom.Now != nil {
+		deps.Now = custom.Now
+	}
+	if custom.Wait != nil {
+		deps.Wait = custom.Wait
+	}
+	if custom.LoadRateLimits != nil {
+		deps.LoadRateLimits = custom.LoadRateLimits
+	}
 	return deps
 }
 
@@ -394,6 +469,17 @@ type SpawnAssignment struct {
 	ClaimError        string `json:"claim_error,omitempty"`   // Error during claim, if any
 	PromptError       string `json:"prompt_error,omitempty"`  // Error sending prompt, if any
 	AssignReason      string `json:"assign_reason,omitempty"` // Strategy rationale for this pairing (e.g. skill-matched capability score)
+	DeliveredAt       string `json:"delivered_at,omitempty"`  // When this run delivered the work prompt (RFC3339Nano); see stagger.schedule
+}
+
+// SpawnPromptDelivery is one agent's --spawn-prompt delivery outcome.
+type SpawnPromptDelivery struct {
+	Pane        string `json:"pane"`
+	AgentType   string `json:"agent_type"`
+	Order       int    `json:"order"` // 1-based position in stagger.schedule
+	PromptSent  bool   `json:"prompt_sent"`
+	DeliveredAt string `json:"delivered_at,omitempty"` // RFC3339Nano, present when prompt_sent
+	Error       string `json:"error,omitempty"`
 }
 
 // SpawnedAgent represents an agent created during spawn.
@@ -640,6 +726,12 @@ func GetSpawn(ctx context.Context, opts SpawnOptions, cfg *config.Config) (*Spaw
 	opts = expanded
 	output.PresetUsed = opts.Preset
 
+	if staggerErr := validateSpawnStagger(opts); staggerErr != nil {
+		output.Error = staggerErr.Error()
+		output.RobotResponse = NewErrorResponse(staggerErr, ErrCodeInvalidFlag,
+			"Use --spawn-stagger-mode=none|fixed|smart and a --spawn-stagger-delay between 0 and 5m (e.g. 20s)")
+		return output, nil
+	}
 	assignStrategy, validationErr := validateSpawnRequest(opts)
 	if validationErr != nil {
 		output.Error = validationErr.Error()
@@ -684,6 +776,8 @@ func GetSpawn(ctx context.Context, opts SpawnOptions, cfg *config.Config) (*Spaw
 		"safety":          opts.Safety,
 		"assign_work":     opts.AssignWork,
 		"assign_strategy": opts.AssignStrategy,
+		"initial_prompt":  opts.hasInitialPrompt(),
+		"stagger_mode":    opts.StaggerMode,
 		"correlation_id":  correlationID,
 	}, nil)
 	defer func() {
@@ -998,6 +1092,11 @@ func GetSpawn(ctx context.Context, opts SpawnOptions, cfg *config.Config) (*Spaw
 		}
 
 		applySpawnRecipePreview(output.WouldCreate, recipeLaunches)
+		if opts.deliversPrompts() {
+			// Preview the per-agent delays; scheduled_at stays absent because
+			// nothing is delivered.
+			_, output.Stagger = planSpawnStagger(opts, dir, output.WouldCreate, deps)
+		}
 		output.Layout = "tiled"
 		return output, nil
 	}
@@ -1267,8 +1366,9 @@ func GetSpawn(ctx context.Context, opts SpawnOptions, cfg *config.Config) (*Spaw
 		return output, nil
 	}
 
-	// Wait for agents to be ready if requested
-	if opts.WaitReady {
+	// Wait for agents to be ready if requested. A --spawn-prompt is only ever
+	// delivered after this readiness wait, so it implies the wait.
+	if opts.WaitReady || opts.hasInitialPrompt() {
 		timeout := opts.ReadyTimeout
 		if timeout <= 0 {
 			timeout = 30 * time.Second
@@ -1284,6 +1384,15 @@ func GetSpawn(ctx context.Context, opts SpawnOptions, cfg *config.Config) (*Spaw
 		}
 	}
 
+	// Prompt deliveries (initial prompts and work assignments) are paced on
+	// one shared stagger schedule in agent launch order.
+	var pacer *spawnStaggerPacer
+	if opts.deliversPrompts() {
+		stagger, plan := planSpawnStagger(opts, dir, output.Agents, deps)
+		output.Stagger = plan
+		pacer = newSpawnStaggerPacer(stagger, plan, deps)
+	}
+
 	// Orchestrator work assignment mode
 	if opts.AssignWork {
 		output.Mode = "orchestrator"
@@ -1291,6 +1400,7 @@ func GetSpawn(ctx context.Context, opts SpawnOptions, cfg *config.Config) (*Spaw
 		assignments, assignmentErr := assignWorkToAgentsWithError(
 			ctx, output, dir, opts.Session, output.AssignStrategy, cfg,
 			opts.RequireReservation, opts.ReservationPaths, opts.AssignmentDeps, verifiedAssignmentPlan,
+			opts.Prompt, pacer,
 		)
 		output.Assignments = assignments
 		ensureSpawnAssignmentCoverage(output)
@@ -1303,6 +1413,16 @@ func GetSpawn(ctx context.Context, opts SpawnOptions, cfg *config.Config) (*Spaw
 			setSpawnCancellation(output, err)
 			return output, nil
 		}
+	} else if opts.hasInitialPrompt() {
+		deliveries, deliveryErr := deliverSpawnInitialPrompts(
+			ctx, output, opts.Session, opts.Prompt, cfg, spawnAssignmentDeps(opts.AssignmentDeps), pacer,
+		)
+		output.PromptDeliveries = deliveries
+		if cancelErr := spawnCancellationError(ctx, deliveryErr); cancelErr != nil {
+			setSpawnCancellation(output, cancelErr)
+			return output, nil
+		}
+		finalizeSpawnPromptDeliveries(output)
 	}
 	if err := ctx.Err(); err != nil {
 		setSpawnCancellation(output, err)
@@ -1956,7 +2076,11 @@ func normalizeAssignStrategyStrict(strategy string) (string, error) {
 	}
 }
 
-func assignWorkToAgentsWithError(ctx context.Context, output *SpawnOutput, workDir, session, strategy string, cfg *config.Config, requireReservation bool, reservationPaths []string, customDeps *SpawnAssignmentDependencies, verifiedPlan *bv.TriageResponse) ([]SpawnAssignment, error) {
+// assignWorkToAgentsWithError claims and dispatches one work item per agent.
+// Each agent's atomic claim+dispatch waits for its stagger slot (pacer; nil
+// never waits) so work prompts reach agents paced like `ntm spawn` prompts,
+// and initialPrompt, when set, prefixes every work prompt.
+func assignWorkToAgentsWithError(ctx context.Context, output *SpawnOutput, workDir, session, strategy string, cfg *config.Config, requireReservation bool, reservationPaths []string, customDeps *SpawnAssignmentDependencies, verifiedPlan *bv.TriageResponse, initialPrompt string, pacer *spawnStaggerPacer) ([]SpawnAssignment, error) {
 	var assignments []SpawnAssignment
 	if ctx == nil {
 		return []SpawnAssignment{{ClaimError: "spawn assignment context is required"}}, nil
@@ -2084,6 +2208,14 @@ func assignWorkToAgentsWithError(ctx context.Context, output *SpawnOutput, workD
 			terminalErr = err
 			break
 		}
+		// Hold the whole claim+dispatch until this agent's stagger slot, so the
+		// claim is never held across the wait and the dispatch-time observation
+		// below is fresh.
+		if err := pacer.await(ctx, i); err != nil {
+			assignments = append(assignments, spawnAgentPlanErrors(readyAgents[i:], fmt.Errorf("spawn assignment stagger wait: %w", err))...)
+			terminalErr = spawnCancellationError(ctx, err)
+			break
+		}
 
 		item := workItems[i]
 		spawnAssignment := SpawnAssignment{
@@ -2106,7 +2238,7 @@ func assignWorkToAgentsWithError(ctx context.Context, output *SpawnOutput, workD
 		if target == "" {
 			target = pane.Ref().Physical()
 		}
-		prompt := generateWorkPrompt(item)
+		prompt := composeSpawnWorkPrompt(initialPrompt, generateWorkPrompt(item))
 		agentName := ""
 		idempotencyKey := ""
 		if replay := robotAtomicReplayIntent(store, item.ID, target, pane.Index, agent.Type, prompt, requireReservation, reservationPaths); replay != nil {
@@ -2238,6 +2370,9 @@ func assignWorkToAgentsWithError(ctx context.Context, output *SpawnOutput, workD
 			}
 		} else {
 			spawnAssignment.PromptSent = result.Sent
+			if result.Sent && !result.Replayed {
+				spawnAssignment.DeliveredAt = pacer.stamp()
+			}
 		}
 
 		assignments = append(assignments, spawnAssignment)
@@ -2353,6 +2488,105 @@ func finalizeSpawnAssignmentOutput(output *SpawnOutput) {
 		fmt.Errorf("%s", output.Error),
 		"ASSIGNMENT_FAILED",
 		"Inspect assignments[].claim_error and assignments[].prompt_error; failed targets were not dispatched",
+	)
+}
+
+// deliverSpawnInitialPrompts sends prompt to every launched agent in stagger
+// order through the canonical robot dispatch port shared with work
+// assignment: robot send's final-message redaction and delivery-protocol
+// planning, plus a dispatch-time re-observation that refuses any pane not
+// freshly idle. It never types into a pane outside that gate; a refused pane
+// is reported, and later agents still get their slot.
+func deliverSpawnInitialPrompts(
+	ctx context.Context,
+	output *SpawnOutput,
+	session, prompt string,
+	cfg *config.Config,
+	deps SpawnAssignmentDependencies,
+	pacer *spawnStaggerPacer,
+) ([]SpawnPromptDelivery, error) {
+	agents := make([]SpawnedAgent, 0, len(output.Agents))
+	for _, agent := range output.Agents {
+		if agent.Type != "user" {
+			agents = append(agents, agent)
+		}
+	}
+	deliveries := make([]SpawnPromptDelivery, len(agents))
+	for i, agent := range agents {
+		deliveries[i] = SpawnPromptDelivery{Pane: agent.Pane, AgentType: agent.Type, Order: i + 1}
+	}
+	failFrom := func(start int, err error) {
+		for i := start; i < len(deliveries); i++ {
+			deliveries[i].Error = err.Error()
+		}
+	}
+	if deps.ListPanes == nil {
+		failFrom(0, errors.New("spawn prompt topology reader is unavailable"))
+		return deliveries, nil
+	}
+	panes, err := deps.ListPanes(ctx, session)
+	if err != nil {
+		wrapped := fmt.Errorf("load pane topology for spawn prompt: %w", err)
+		failFrom(0, wrapped)
+		return deliveries, spawnCancellationError(ctx, wrapped)
+	}
+	redactionConfig := config.Default().Redaction.ToRedactionLibConfig()
+	if cfg != nil {
+		redactionConfig = cfg.Redaction.ToRedactionLibConfig()
+	}
+	port := newRobotAtomicPaneDispatchPort(session, deps.ListPanes, deps.ObserveSession, redactionConfig, deps.DispatchDeliverer, deps.DispatchPacer)
+	for i, agent := range agents {
+		if err := pacer.await(ctx, i); err != nil {
+			wrapped := fmt.Errorf("spawn prompt stagger wait: %w", err)
+			failFrom(i, wrapped)
+			return deliveries, spawnCancellationError(ctx, wrapped)
+		}
+		resolved, resolveErr := tmux.ResolvePaneSelectors(panes, []string{agent.Pane}, true)
+		if resolveErr != nil {
+			deliveries[i].Error = fmt.Sprintf("resolve pane %s: %v", agent.Pane, resolveErr)
+			continue
+		}
+		pane := resolved[0]
+		target := pane.ID
+		if target == "" {
+			target = pane.Ref().Physical()
+		}
+		if _, dispatchErr := port.Dispatch(ctx, assignment.DispatchRequest{
+			Target: target, Pane: pane.Index, AgentType: agent.Type, Prompt: prompt,
+		}); dispatchErr != nil {
+			deliveries[i].Error = dispatchErr.Error()
+			if cancelErr := spawnCancellationError(ctx, dispatchErr); cancelErr != nil {
+				failFrom(i+1, cancelErr)
+				return deliveries, cancelErr
+			}
+			continue
+		}
+		deliveries[i].PromptSent = true
+		deliveries[i].DeliveredAt = pacer.stamp()
+	}
+	return deliveries, nil
+}
+
+// finalizeSpawnPromptDeliveries fails the envelope when any agent did not
+// receive its --spawn-prompt; the session and every launched pane remain.
+func finalizeSpawnPromptDeliveries(output *SpawnOutput) {
+	if output == nil {
+		return
+	}
+	failed := 0
+	for _, delivery := range output.PromptDeliveries {
+		if !delivery.PromptSent {
+			failed++
+		}
+	}
+	if failed == 0 {
+		return
+	}
+	output.Error = fmt.Sprintf("%d of %d spawn prompt deliveries failed", failed, len(output.PromptDeliveries))
+	output.RobotResponse = NewErrorResponse(
+		fmt.Errorf("%s", output.Error),
+		ErrCodePromptSendFailed,
+		"Inspect prompt_deliveries[].error; agents with prompt_sent=false did not receive the prompt and remain running (resend with --robot-send)",
 	)
 }
 

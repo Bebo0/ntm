@@ -74,6 +74,14 @@ ntm spawn myproject --persona=architect --persona=implementer:2
 ntm spawn myproject --stagger-mode=smart --cc=6 --cod=4
 ```
 
+Stagger defaults can live in config so every spawn paces prompts (flags win):
+
+```toml
+[spawn]
+stagger_mode = "fixed"   # none | fixed | smart
+stagger_delay = "90s"    # 0-5m
+```
+
 ## Dispatch and Reusable Assets
 
 High-leverage NTM usage is not just `spawn` plus `send`. The real power shows up when
@@ -205,6 +213,7 @@ ntm --robot-terse
 Common task-specific robot surfaces:
 
 ```bash
+ntm --robot-spawn=myproject --spawn-cc=3 --spawn-prompt="Read AGENTS.md and start on ready work" --spawn-stagger-mode=fixed --spawn-stagger-delay=90s
 ntm --robot-send=myproject --msg="Summarize blockers." --type=claude
 ntm --robot-ack=myproject --ack-timeout=30s
 ntm --robot-tail=myproject --lines=50
@@ -214,6 +223,12 @@ ntm --robot-beads-list --beads-status=open
 ntm --robot-bead-claim=br-123 --bead-assignee=agent1
 ntm --robot-bead-close=br-123 --bead-close-reason="Completed"
 ```
+
+`--spawn-prompt` (or `--spawn-prompt-file`) waits for readiness, then reaches
+each agent through robot send's dispatch path; the JSON reports the
+`stagger.schedule[]` (per-agent `delay_ms`/`scheduled_at`) and
+`prompt_deliveries[]` (per-agent `prompt_sent`/`delivered_at`). The same
+`--spawn-stagger-*` flags pace `--spawn-assign-work` prompts.
 
 Operator loop:
 

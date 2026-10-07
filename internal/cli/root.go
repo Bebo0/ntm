@@ -1687,7 +1687,7 @@ Shell Integration:
 			// The message being routed (--msg/--msg-file) feeds reservation
 			// affinity: the affinity strategy ranks by it, and the affinity
 			// bonus scores with it under every strategy when enabled.
-			routedMsg, err := loadRobotSendMessage(robotSendMsg, robotSendMsgFile)
+			routedMsg, err := loadRobotMessageInput(robotSendMsg, robotSendMsgFile, "--msg", "--msg-file")
 			if err != nil {
 				failRobotCommand(err, robot.ErrCodeInvalidArgs, "Provide a readable --msg or --msg-file", "robot-route")
 				return
@@ -2063,7 +2063,7 @@ Shell Integration:
 				return
 			}
 			// Load message from --msg or --msg-file
-			msg, err := loadRobotSendMessage(robotSendMsg, robotSendMsgFile)
+			msg, err := loadRobotMessageInput(robotSendMsg, robotSendMsgFile, "--msg", "--msg-file")
 			if err != nil {
 				// Missing/empty message content is an argument problem, not a
 				// malformed flag (INVALID_ARGS per the robot taxonomy).
@@ -2314,7 +2314,7 @@ Shell Integration:
 				return
 			}
 			// Load message from --msg or --msg-file (reuse logic from robot-send)
-			msg, err := loadRobotSendMessage(robotSendMsg, robotSendMsgFile)
+			msg, err := loadRobotMessageInput(robotSendMsg, robotSendMsgFile, "--msg", "--msg-file")
 			if err != nil {
 				failRobotCommand(err, robot.ErrCodeInvalidArgs, "Provide a readable non-empty --msg or --msg-file", "robot-ack")
 				return
@@ -2454,6 +2454,10 @@ Shell Integration:
 			opts, err := robotSpawnOptionsFromFlags(cmd, spawnTimeout, reservationPaths, robotDryRunEffective)
 			if err != nil {
 				failRobotCommand(err, robot.ErrCodeInvalidFlag, "Use count[:model[:effort]] (effort also as model@effort), e.g. --spawn-cod=2 or --spawn-cod=8:gpt-5.3-codex:high", "robot-spawn")
+				return
+			}
+			if err := applyRobotSpawnPromptFlags(cmd, cfg, &opts); err != nil {
+				failRobotCommand(err, robot.ErrCodeInvalidFlag, "Use one of --spawn-prompt/--spawn-prompt-file, --spawn-stagger-mode=none|fixed|smart, and a --spawn-stagger-delay such as 20s (0-5m); fix any invalid [spawn] config value", "robot-spawn")
 				return
 			}
 			if err := robot.PrintSpawn(cmd.Context(), opts, cfg); err != nil {
@@ -3804,9 +3808,13 @@ func goPlatform() string {
 	return fmt.Sprintf("%s/%s", runtime.GOOS, runtime.GOARCH)
 }
 
-func loadRobotSendMessage(msg, msgFile string) (string, error) {
+// loadRobotMessageInput returns a robot prompt given inline (msgFlag) or via a
+// file or stdin (fileFlag, "-" for stdin). The flag names only label errors;
+// --robot-send (--msg/--msg-file) and --robot-spawn
+// (--spawn-prompt/--spawn-prompt-file) share this reader.
+func loadRobotMessageInput(msg, msgFile, msgFlag, fileFlag string) (string, error) {
 	if msg != "" && msgFile != "" {
-		return "", fmt.Errorf("use either --msg or --msg-file, not both")
+		return "", fmt.Errorf("use either %s or %s, not both", msgFlag, fileFlag)
 	}
 	if msgFile == "" {
 		return msg, nil
@@ -3825,7 +3833,7 @@ func loadRobotSendMessage(msg, msgFile string) (string, error) {
 		var err error
 		f, err = os.Open(msgFile)
 		if err != nil {
-			return "", fmt.Errorf("open msg file: %w", err)
+			return "", fmt.Errorf("open %s: %w", fileFlag, err)
 		}
 	}
 
@@ -3836,20 +3844,20 @@ func loadRobotSendMessage(msg, msgFile string) (string, error) {
 		if f != os.Stdin {
 			_ = f.Close()
 		}
-		return "", fmt.Errorf("read msg file: %w", err)
+		return "", fmt.Errorf("read %s: %w", fileFlag, err)
 	}
 	if f != os.Stdin {
 		if err := f.Close(); err != nil {
-			return "", fmt.Errorf("close msg file: %w", err)
+			return "", fmt.Errorf("close %s: %w", fileFlag, err)
 		}
 	}
 
 	if int64(len(data)) > limit {
-		return "", fmt.Errorf("message file too large (max 10MB)")
+		return "", fmt.Errorf("%s content too large (max 10MB)", fileFlag)
 	}
 
 	if len(data) == 0 || strings.TrimSpace(string(data)) == "" {
-		return "", fmt.Errorf("message file is empty")
+		return "", fmt.Errorf("%s content is empty", fileFlag)
 	}
 	return string(data), nil
 }
@@ -4018,6 +4026,11 @@ var (
 	robotSpawnStrategy   string // assignment strategy: top-n, diverse, dependency-aware, skill-matched
 	robotSpawnNames      string // custom agent names (comma-separated)
 	robotSpawnLabel      string // goal label for multi-session support
+	// Initial prompt + thundering-herd pacing for --robot-spawn
+	robotSpawnPrompt       string // initial prompt delivered to every agent after readiness
+	robotSpawnPromptFile   string // file (or '-' for stdin) holding the initial prompt
+	robotSpawnStaggerMode  string // none, fixed, smart ("" = [spawn] stagger_mode)
+	robotSpawnStaggerDelay string // fixed-mode interval ("" = [spawn] stagger_delay)
 
 	// Robot-agent-names flag for querying agent name mappings
 	robotAgentNames string // session name for --robot-agent-names
@@ -4700,6 +4713,10 @@ func init() {
 	rootCmd.Flags().StringVar(&robotSpawnStrategy, "spawn-assign-strategy", "top-n", "Work assignment strategy (use with --spawn-assign-work). Values: top-n, diverse, dependency-aware, skill-matched")
 	rootCmd.Flags().StringVar(&robotSpawnNames, "spawn-names", "", "Custom agent names (comma-separated). Use with --robot-spawn. Example: --spawn-names=alice,bob,charlie")
 	rootCmd.Flags().StringVar(&robotSpawnLabel, "spawn-label", "", "Goal label for multi-session support. Use with --robot-spawn. Creates session PROJECT--LABEL. Example: --spawn-label=frontend")
+	rootCmd.Flags().StringVar(&robotSpawnPrompt, "spawn-prompt", "", "Initial prompt delivered to every spawned agent once it is ready (implies --spawn-wait; uses robot send's dispatch path). With --spawn-assign-work it prefixes each work prompt. Use with --robot-spawn. Example: --spawn-prompt='Read AGENTS.md first'")
+	rootCmd.Flags().StringVar(&robotSpawnPromptFile, "spawn-prompt-file", "", "Read the --spawn-prompt text from a file, or stdin with '-'. Use with --robot-spawn")
+	rootCmd.Flags().StringVar(&robotSpawnStaggerMode, "spawn-stagger-mode", "", "Pace prompt delivery between agents (thundering-herd prevention): none, fixed, or smart (learned rate-limit delay). Default: [spawn] stagger_mode, else none. Use with --robot-spawn")
+	rootCmd.Flags().StringVar(&robotSpawnStaggerDelay, "spawn-stagger-delay", "", "Interval between consecutive agents' prompts for --spawn-stagger-mode=fixed, 0-5m (e.g. 20s). Default: [spawn] stagger_delay, else 30s. Use with --robot-spawn")
 
 	// Robot-agent-names flag for querying agent name mappings
 	rootCmd.Flags().StringVar(&robotAgentNames, "robot-agent-names", "", "Get agent name mappings for a session (JSON). Names are generated using NATO phonetic alphabet. Example: ntm --robot-agent-names=myproject")
@@ -5700,6 +5717,35 @@ func robotSpawnOptionsFromFlags(cmd *cobra.Command, readyTimeout time.Duration, 
 	}, nil
 }
 
+// applyRobotSpawnPromptFlags resolves the initial prompt (--spawn-prompt or
+// --spawn-prompt-file) and the prompt stagger (--spawn-stagger-mode and
+// --spawn-stagger-delay over the [spawn] config defaults, flags winning) onto
+// opts. Range and vocabulary checks stay in robot.GetSpawn so every caller of
+// the spawn engine is held to the same contract.
+func applyRobotSpawnPromptFlags(cmd *cobra.Command, cfg *config.Config, opts *robot.SpawnOptions) error {
+	prompt, err := loadRobotMessageInput(robotSpawnPrompt, robotSpawnPromptFile, "--spawn-prompt", "--spawn-prompt-file")
+	if err != nil {
+		return err
+	}
+	modeSet := cmd != nil && cmd.Flags().Changed("spawn-stagger-mode")
+	delaySet := cmd != nil && cmd.Flags().Changed("spawn-stagger-delay")
+	delay := config.DefaultSpawnStaggerDelay
+	if delaySet {
+		delay, err = time.ParseDuration(strings.TrimSpace(robotSpawnStaggerDelay))
+		if err != nil {
+			return fmt.Errorf("invalid --spawn-stagger-delay %q: %w", robotSpawnStaggerDelay, err)
+		}
+	}
+	mode, delay, err := resolveSpawnStaggerDefaults(cfg, strings.TrimSpace(robotSpawnStaggerMode), modeSet, delay, delaySet)
+	if err != nil {
+		return err
+	}
+	opts.Prompt = prompt
+	opts.StaggerMode = mode
+	opts.StaggerDelay = delay
+	return nil
+}
+
 func parseRobotReservationPathsArg(raw string) ([]string, error) {
 	if strings.TrimSpace(raw) == "" {
 		return nil, nil
@@ -6273,6 +6319,10 @@ Examples:
 					},
 					"gemini_setup": map[string]interface{}{
 						"auto_select_pro_model": effectiveCfg.GeminiSetup.AutoSelectProModel,
+					},
+					"spawn": map[string]interface{}{
+						"stagger_mode":  effectiveCfg.Spawn.StaggerMode,
+						"stagger_delay": effectiveCfg.Spawn.StaggerDelay.String(),
 					},
 					"context_rotation": map[string]interface{}{
 						"rotate_threshold":  effectiveCfg.ContextRotation.RotateThreshold,

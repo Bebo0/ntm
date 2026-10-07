@@ -312,6 +312,32 @@ ntm spawn payments --label frontend --cc=2
 ntm add payments --label frontend --cc=1
 ```
 
+#### Staggered prompts (thundering-herd prevention)
+
+When several agents boot together and all pick work from `bv`/`br` at once,
+they race for the same bead. Stagger their initial prompts so each agent has
+claimed something before the next one starts looking:
+
+```bash
+ntm spawn payments --cc=3 --prompt="Read AGENTS.md, then pick ready work" --stagger-mode=fixed --stagger-delay=90s
+ntm spawn payments --cc=5 --prompt="..." --stagger-mode=smart   # learned rate-limit spacing
+ntm --robot-spawn=payments --spawn-cc=3 --spawn-prompt="Read AGENTS.md, then pick ready work" \
+    --spawn-stagger-mode=fixed --spawn-stagger-delay=90s
+```
+
+The agent at position `i` receives its prompt `i × interval` after the first.
+`--robot-spawn --spawn-prompt` (or `--spawn-prompt-file`, `-` for stdin)
+waits for readiness, delivers through robot send's dispatch path, and reports
+`stagger.schedule[]` and per-agent `prompt_deliveries[]`; the same
+`--spawn-stagger-*` flags pace `--spawn-assign-work` prompts. Set defaults for
+both commands in `~/.config/ntm/config.toml` (flags still win):
+
+```toml
+[spawn]
+stagger_mode = "fixed"   # none (default), fixed, or smart
+stagger_delay = "90s"    # fixed-mode interval, 0-5m (default 30s)
+```
+
 #### Worktree isolation and reservations
 
 Use `--worktrees` when agents need independent Git checkouts as well as separate

@@ -9,9 +9,213 @@ import (
 
 	"github.com/Dicklesworthstone/ntm/internal/config"
 	"github.com/Dicklesworthstone/ntm/internal/pressure"
+	"github.com/Dicklesworthstone/ntm/internal/ratelimit"
 	"github.com/Dicklesworthstone/ntm/internal/resilience"
 	"github.com/Dicklesworthstone/ntm/internal/tmux"
 )
+
+// SpawnStaggerRequest is the requested thundering-herd prompt pacing for one
+// spawn batch (docs/ORCHESTRATION_FEATURES.md Feature 7). It is the single
+// stagger contract of `ntm spawn` and `--robot-spawn`: both surfaces resolve
+// it with ResolveSpawnStagger, so a mode means the same thing everywhere.
+type SpawnStaggerRequest struct {
+	// Mode is config.SpawnStagger{None,Fixed,Smart}; empty means none.
+	Mode string
+	// Delay is the fixed-mode interval between consecutive agents.
+	Delay time.Duration
+	// Legacy is the `ntm spawn --stagger[=DURATION]` interval. It applies only
+	// when Mode is none (an explicit mode wins); zero disables it.
+	Legacy time.Duration
+}
+
+// SpawnStaggerLegacy is the resolved mode of `ntm spawn --stagger[=DURATION]`
+// without --stagger-mode. It is a resolution result, never a requested mode.
+const SpawnStaggerLegacy = "legacy"
+
+// SpawnStagger is a resolved pacing policy: the agent at delivery order i
+// (0-based) receives its prompt i*Interval after the first agent.
+type SpawnStagger struct {
+	Mode     string        // none, fixed, smart, or legacy
+	Interval time.Duration // gap between consecutive agents' deliveries
+	Provider string        // smart only: rate-limit bucket Interval was learned from
+}
+
+// ResolveSpawnStagger resolves req for a batch of agent types (any spelling
+// ratelimit.NormalizeProvider accepts, e.g. "cc", "claude", "cod", "omp").
+// Smart mode reads the learned delay of the strictest provider in the batch
+// from tracker; a nil tracker means no learned history, i.e. that provider's
+// built-in default delay.
+func ResolveSpawnStagger(req SpawnStaggerRequest, agentTypes []string, tracker *ratelimit.RateLimitTracker) SpawnStagger {
+	switch req.Mode {
+	case config.SpawnStaggerFixed:
+		return SpawnStagger{Mode: config.SpawnStaggerFixed, Interval: req.Delay}
+	case config.SpawnStaggerSmart:
+		if tracker == nil {
+			tracker = ratelimit.NewRateLimitTracker("")
+		}
+		provider := spawnStaggerProvider(agentTypes)
+		return SpawnStagger{Mode: config.SpawnStaggerSmart, Interval: tracker.GetOptimalDelay(provider), Provider: provider}
+	}
+	if req.Legacy > 0 {
+		return SpawnStagger{Mode: SpawnStaggerLegacy, Interval: req.Legacy}
+	}
+	return SpawnStagger{Mode: config.SpawnStaggerNone}
+}
+
+// spawnStaggerProvider picks the strictest rate-limit bucket present in the
+// batch: anthropic, then openai, then google. omp routes panes through its own
+// configured providers, so an omp-only batch uses the tracker's own omp bucket
+// instead of inheriting Anthropic's learned delay. A batch with none of these
+// types uses anthropic, the strictest default.
+func spawnStaggerProvider(agentTypes []string) string {
+	present := make(map[string]bool, len(agentTypes))
+	for _, agentType := range agentTypes {
+		present[ratelimit.NormalizeProvider(agentType)] = true
+	}
+	for _, provider := range []string{"anthropic", "openai", "google", ratelimit.NormalizeProvider("omp")} {
+		if present[provider] {
+			return provider
+		}
+	}
+	return "anthropic"
+}
+
+// Active reports whether deliveries are paced at all.
+func (s SpawnStagger) Active() bool {
+	return s.Mode != "" && s.Mode != config.SpawnStaggerNone && s.Interval > 0
+}
+
+// Delay is the offset of delivery order (0-based) from the first delivery.
+func (s SpawnStagger) Delay(order int) time.Duration {
+	if !s.Active() || order <= 0 {
+		return 0
+	}
+	return time.Duration(order) * s.Interval
+}
+
+// SpawnStaggerPlan reports how --robot-spawn paces prompt delivery (initial
+// --spawn-prompt prompts and --spawn-assign-work prompts) between agents.
+type SpawnStaggerPlan struct {
+	Mode       string             `json:"mode"`               // none, fixed, or smart
+	IntervalMs int64              `json:"interval_ms"`        // gap between consecutive agents' deliveries
+	Provider   string             `json:"provider,omitempty"` // smart: rate-limit bucket the interval was learned from
+	Warning    string             `json:"warning,omitempty"`  // smart: learned history unreadable, built-in delay used
+	Schedule   []SpawnStaggerSlot `json:"schedule"`
+}
+
+// SpawnStaggerSlot is one agent's place in the delivery schedule.
+type SpawnStaggerSlot struct {
+	Pane        string `json:"pane"`
+	AgentType   string `json:"agent_type"`
+	Order       int    `json:"order"`                  // 1-based delivery position
+	DelayMs     int64  `json:"delay_ms"`               // offset from the first delivery
+	ScheduledAt string `json:"scheduled_at,omitempty"` // planned delivery time (RFC3339Nano); absent until delivery starts
+}
+
+// loadSpawnRateLimits loads the project's learned rate-limit history
+// (.ntm/rate_limits.json), the same store `ntm spawn` smart mode reads.
+func loadSpawnRateLimits(dir string) (*ratelimit.RateLimitTracker, error) {
+	tracker := ratelimit.NewRateLimitTracker(dir)
+	if err := tracker.LoadFromDir(dir); err != nil {
+		return nil, err
+	}
+	return tracker, nil
+}
+
+// planSpawnStagger resolves the batch's stagger over agents (user panes are
+// skipped) and builds its reportable schedule. An unreadable rate-limit
+// history degrades smart mode to the built-in provider delay and says so.
+func planSpawnStagger(opts SpawnOptions, dir string, agents []SpawnedAgent, deps SpawnLifecycleDependencies) (SpawnStagger, *SpawnStaggerPlan) {
+	agentTypes := make([]string, 0, len(agents))
+	for _, agent := range agents {
+		if agent.Type != "user" {
+			agentTypes = append(agentTypes, agent.Type)
+		}
+	}
+	var tracker *ratelimit.RateLimitTracker
+	warning := ""
+	if opts.StaggerMode == config.SpawnStaggerSmart && deps.LoadRateLimits != nil {
+		loaded, err := deps.LoadRateLimits(dir)
+		if err != nil {
+			warning = fmt.Sprintf("rate-limit history unavailable (%v); using the provider's built-in delay", err)
+		} else {
+			tracker = loaded
+		}
+	}
+	stagger := ResolveSpawnStagger(SpawnStaggerRequest{Mode: opts.StaggerMode, Delay: opts.StaggerDelay}, agentTypes, tracker)
+	plan := &SpawnStaggerPlan{
+		Mode:       stagger.Mode,
+		IntervalMs: stagger.Interval.Milliseconds(),
+		Provider:   stagger.Provider,
+		Warning:    warning,
+		Schedule:   make([]SpawnStaggerSlot, 0, len(agentTypes)),
+	}
+	for _, agent := range agents {
+		if agent.Type == "user" {
+			continue
+		}
+		order := len(plan.Schedule)
+		plan.Schedule = append(plan.Schedule, SpawnStaggerSlot{
+			Pane: agent.Pane, AgentType: agent.Type, Order: order + 1,
+			DelayMs: stagger.Delay(order).Milliseconds(),
+		})
+	}
+	return stagger, plan
+}
+
+// spawnStaggerPacer holds each delivery slot until its planned offset from
+// the first slot, which starts the schedule. Slots run in order; a slow
+// delivery consumes the following gap instead of shifting later agents.
+type spawnStaggerPacer struct {
+	stagger SpawnStagger
+	plan    *SpawnStaggerPlan
+	now     func() time.Time
+	wait    func(context.Context, time.Duration) error
+	base    time.Time
+	started bool
+}
+
+func newSpawnStaggerPacer(stagger SpawnStagger, plan *SpawnStaggerPlan, deps SpawnLifecycleDependencies) *spawnStaggerPacer {
+	return &spawnStaggerPacer{stagger: stagger, plan: plan, now: deps.Now, wait: deps.Wait}
+}
+
+// await blocks until slot order (0-based) is due. The first call anchors the
+// schedule and stamps every slot's scheduled_at. A nil pacer never waits.
+func (p *spawnStaggerPacer) await(ctx context.Context, order int) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if p == nil {
+		return nil
+	}
+	if p.now == nil || p.wait == nil {
+		return errors.New("spawn stagger requires a clock and a wait port")
+	}
+	if !p.started {
+		p.started = true
+		p.base = p.now()
+		if p.plan != nil {
+			for i := range p.plan.Schedule {
+				due := p.base.Add(p.stagger.Delay(p.plan.Schedule[i].Order - 1))
+				p.plan.Schedule[i].ScheduledAt = due.UTC().Format(time.RFC3339Nano)
+			}
+		}
+	}
+	if remaining := p.base.Add(p.stagger.Delay(order)).Sub(p.now()); remaining > 0 {
+		if err := p.wait(ctx, remaining); err != nil {
+			return err
+		}
+	}
+	return ctx.Err()
+}
+
+// stamp is the delivery time reported for a slot that just delivered.
+func (p *spawnStaggerPacer) stamp() string {
+	if p == nil || p.now == nil {
+		return time.Now().UTC().Format(time.RFC3339Nano)
+	}
+	return p.now().UTC().Format(time.RFC3339Nano)
+}
 
 // SpawnAdmissionError retains a machine-readable admission decision for launch
 // surfaces which return errors rather than a SpawnOutput (notably add/scale).
