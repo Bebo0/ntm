@@ -60,4 +60,3 @@ func TestNewPromptInjectorWithClient(t *testing.T) {
 // ---------------------------------------------------------------------------
 // ReviewPromptGenerator.WithReviewLogger — 0% → 100%
 // ---------------------------------------------------------------------------
-

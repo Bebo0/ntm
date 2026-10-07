@@ -351,7 +351,7 @@ func fakeUBS(t *testing.T, stdout, stderr string, code int) *Scanner {
 func TestScanTreatsUBSExit2AsIncomplete(t *testing.T) {
 	cases := map[string]*Scanner{
 		// The --exclude guard prints nothing on stdout.
-		"empty stdout": fakeUBS(t, "", "✗ --exclude now takes path globs; 'golang' names a language. Use --exclude-langs=golang to skip the language.\n", 2),
+		"empty stdout":   fakeUBS(t, "", "✗ --exclude now takes path globs; 'golang' names a language. Use --exclude-langs=golang to skip the language.\n", 2),
 		"error envelope": fakeUBS(t, `{"error":"refused","status":"refused","reason":"home-directory","exit_code":2,"project":"/home/u","message":"refusing to scan $HOME"}`, "", 2),
 		"partial report": fakeUBS(t, `{"project":"/p","timestamp":"t","status":"partial","failed_modules":[{"language":"rust","status":"timeout"}],"error":"","scanners":[],"totals":{"critical":0,"warning":0,"info":0,"files":3},"exit_code":2}`, "", 2),
 	}
