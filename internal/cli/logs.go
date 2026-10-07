@@ -22,7 +22,6 @@ import (
 )
 
 func newLogsCmd() *cobra.Command {
-	var since string
 	var panesArg string
 	var follow bool
 	var filter string
@@ -39,7 +38,6 @@ and customize the output.
 
 Examples:
   ntm logs myproject                    # All agent logs
-  ntm logs myproject --since=5m         # Logs from last 5 minutes
   ntm logs myproject --panes=1,2        # Only panes 1 and 2
   ntm logs myproject --follow           # Stream new logs
   ntm logs myproject --filter="error"   # Filter by regex pattern
@@ -75,19 +73,8 @@ The prefix shows agent type and pane index.`,
 				}
 			}
 
-			// Parse since duration
-			var sinceDuration time.Duration
-			if since != "" {
-				var err error
-				sinceDuration, err = time.ParseDuration(since)
-				if err != nil {
-					return fmt.Errorf("invalid --since duration: %w", err)
-				}
-			}
-
 			opts := robot.LogsOptions{
 				Session: session,
-				Since:   sinceDuration,
 				Panes:   panes,
 				Limit:   limit,
 				Filter:  filter,
@@ -125,7 +112,6 @@ The prefix shows agent type and pane index.`,
 		},
 	}
 
-	cmd.Flags().StringVar(&since, "since", "", "Show logs since duration (e.g., 5m, 1h)")
 	cmd.Flags().StringVar(&panesArg, "panes", "", "Filter to specific pane indices (comma-separated)")
 	cmd.Flags().BoolVarP(&follow, "follow", "f", false, "Stream new logs continuously")
 	cmd.Flags().StringVar(&filter, "filter", "", "Filter lines by regex pattern")

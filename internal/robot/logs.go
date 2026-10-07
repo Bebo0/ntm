@@ -15,11 +15,10 @@ import (
 
 // LogsOptions configures the robot-logs operation.
 type LogsOptions struct {
-	Session string        // Session name
-	Since   time.Duration // Only show logs since this duration ago
-	Panes   []int         // Filter to specific pane indices (empty = all)
-	Limit   int           // Max lines per pane (default: 100)
-	Filter  string        // Regex filter pattern
+	Session string // Session name
+	Panes   []int  // Filter to specific pane indices (empty = all)
+	Limit   int    // Max lines per pane (default: 100)
+	Filter  string // Regex filter pattern
 }
 
 // LogEntry represents a single log line from a pane.
