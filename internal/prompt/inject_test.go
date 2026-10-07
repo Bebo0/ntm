@@ -103,6 +103,46 @@ func TestInjectFiles(t *testing.T) {
 	}
 }
 
+func TestFileContextBlockIsExactlyWhatInjectFilesPrepends(t *testing.T) {
+	tmpDir := t.TempDir()
+	first := filepath.Join(tmpDir, "a.go")
+	second := filepath.Join(tmpDir, "b.txt")
+	if err := os.WriteFile(first, []byte("package a"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(second, []byte("one\ntwo\nthree\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	specs := []FileSpec{{Path: first}, {Path: second, StartLine: 2, EndLine: 3}}
+
+	block, err := FileContextBlock(specs)
+	if err != nil {
+		t.Fatalf("FileContextBlock error: %v", err)
+	}
+	want := "# File: " + first + "\n```go\npackage a\n```\n\n" +
+		"# File: " + second + " (lines 2-3)\n```\ntwo\nthree\n```\n\n---\n\n"
+	if block != want {
+		t.Fatalf("FileContextBlock = %q, want %q", block, want)
+	}
+	for _, body := range []string{"Agent #1 body", "Agent #2 body", ""} {
+		injected, err := InjectFiles(specs, body)
+		if err != nil {
+			t.Fatalf("InjectFiles error: %v", err)
+		}
+		if injected != block+body {
+			t.Fatalf("InjectFiles(%q) = %q, want block+body", body, injected)
+		}
+	}
+
+	empty, err := FileContextBlock(nil)
+	if err != nil || empty != "" {
+		t.Fatalf("FileContextBlock(nil) = %q, %v; want empty", empty, err)
+	}
+	if _, err := FileContextBlock([]FileSpec{{Path: filepath.Join(tmpDir, "missing.go")}}); err == nil {
+		t.Fatal("FileContextBlock with a missing file succeeded, want error")
+	}
+}
+
 func TestInjectFilesWithLineRange(t *testing.T) {
 	tmpDir := t.TempDir()
 	testFile := filepath.Join(tmpDir, "test.txt")

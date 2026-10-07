@@ -4,6 +4,8 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"reflect"
+	"strings"
 	"testing"
 )
 
@@ -226,6 +228,103 @@ Focus on: {{focus}}
 			t.Error("Execute should fail with missing required variable")
 		}
 	})
+}
+
+func TestTemplate_ExecuteRefusesUnresolvedPlaceholders(t *testing.T) {
+	tmpl := &Template{
+		Name: "roll_call",
+		Body: "Agent #{{agent_num}} ({{AGENT_TYPE}}) on {{BEAD_ID}}: {{TITLE}} via {{channel}}{{#extra}} {{extra}}{{/extra}}",
+	}
+
+	t.Run("lists every unresolved name canonically", func(t *testing.T) {
+		_, err := tmpl.Execute(ExecutionContext{})
+		var unresolved *UnresolvedVariablesError
+		if !errors.As(err, &unresolved) {
+			t.Fatalf("Execute error = %v, want *UnresolvedVariablesError", err)
+		}
+		want := []string{"agent_num", "agent_type", "bead_id", "bead_title", "channel"}
+		if !reflect.DeepEqual(unresolved.Names, want) {
+			t.Fatalf("unresolved names = %v, want %v (aliases folded, sorted, conditional body skipped)", unresolved.Names, want)
+		}
+		if unresolved.Template != "roll_call" || !strings.Contains(err.Error(), `template "roll_call" has unresolved variable(s): agent_num, agent_type, bead_id, bead_title, channel`) {
+			t.Fatalf("error message = %q", err.Error())
+		}
+	})
+
+	t.Run("full context renders with aliases", func(t *testing.T) {
+		ctx := ExecutionContext{Variables: map[string]string{"channel": "mail"}}.
+			WithBead("bd-7", "Fix it", "", "", "", "").
+			WithAgent(3, "codex", "", "%12")
+		got, err := tmpl.Execute(ctx)
+		if err != nil {
+			t.Fatalf("Execute: %v", err)
+		}
+		if want := "Agent #3 (codex) on bd-7: Fix it via mail"; got != want {
+			t.Fatalf("Execute = %q, want %q", got, want)
+		}
+	})
+
+	t.Run("user-supplied canonical variable fills its alias", func(t *testing.T) {
+		ctx := ExecutionContext{Variables: map[string]string{
+			"channel": "mail", "bead_id": "bd-9", "bead_title": "Typed by hand",
+			"agent_num": "1", "agent_type": "claude",
+		}}
+		got, err := tmpl.Execute(ctx)
+		if err != nil {
+			t.Fatalf("Execute: %v", err)
+		}
+		if want := "Agent #1 (claude) on bd-9: Typed by hand via mail"; got != want {
+			t.Fatalf("Execute = %q, want %q", got, want)
+		}
+	})
+
+	t.Run("substituted values are neither checked nor re-expanded", func(t *testing.T) {
+		fileTmpl := &Template{Name: "review", Body: "Review:\n{{file}}"}
+		got, err := fileTmpl.Execute(ExecutionContext{FileContent: "<p>{{user_name}}</p>"})
+		if err != nil {
+			t.Fatalf("Execute: %v", err)
+		}
+		if want := "Review:\n<p>{{user_name}}</p>"; got != want {
+			t.Fatalf("Execute = %q, want %q", got, want)
+		}
+	})
+}
+
+func TestTemplate_ExecuteSharedDefersOnlyPaneContext(t *testing.T) {
+	tmpl := &Template{
+		Name: "assignment",
+		Body: "{{send_num}}/{{send_total}} Agent #{{AGENT_NUM}} ({{agent_type}}{{#agent_variant}}:{{agent_variant}}{{/agent_variant}}) pane {{agent_pane}} index {{send_index}}: {{bead_id}}",
+	}
+
+	shared, err := tmpl.ExecuteShared(ExecutionContext{}.WithBead("bd-3", "T", "", "", "", ""))
+	if err != nil {
+		t.Fatalf("ExecuteShared with bead context: %v", err)
+	}
+	if want := "{{send_num}}/{{send_total}} Agent #{{AGENT_NUM}} ({{agent_type}}) pane {{agent_pane}} index {{send_index}}: bd-3"; shared != want {
+		t.Fatalf("ExecuteShared = %q, want pane placeholders kept and bead filled: %q", shared, want)
+	}
+
+	_, err = tmpl.ExecuteShared(ExecutionContext{})
+	var unresolved *UnresolvedVariablesError
+	if !errors.As(err, &unresolved) || !reflect.DeepEqual(unresolved.Names, []string{"bead_id"}) {
+		t.Fatalf("ExecuteShared without bead error = %v, want only bead_id unresolved", err)
+	}
+
+	_, err = tmpl.Execute(ExecutionContext{}.WithBead("bd-3", "T", "", "", "", ""))
+	if !errors.As(err, &unresolved) || !reflect.DeepEqual(unresolved.Names, []string{"agent_num", "agent_pane", "agent_type", "send_index", "send_num", "send_total"}) {
+		t.Fatalf("Execute without pane context error = %v, want every pane variable unresolved", err)
+	}
+
+	perPane, err := tmpl.Execute(ExecutionContext{}.
+		WithBead("bd-3", "T", "", "", "", "").
+		WithAgent(2, "claude", "opus", "%5").
+		WithSendBatch(1, 4))
+	if err != nil {
+		t.Fatalf("Execute with pane context: %v", err)
+	}
+	if want := "2/4 Agent #2 (claude:opus) pane %5 index 1: bd-3"; perPane != want {
+		t.Fatalf("Execute = %q, want %q", perPane, want)
+	}
 }
 
 func TestLoader_Load_ReturnsParseError(t *testing.T) {

@@ -1,6 +1,8 @@
 package templates
 
 import (
+	"errors"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -62,7 +64,8 @@ func TestListBuiltins(t *testing.T) {
 }
 
 func TestBuiltinTemplates_Executable(t *testing.T) {
-	// Test that all builtin templates can execute with their required variables
+	// Every builtin must render completely from its required variables plus
+	// the context `ntm send` supplies (--file, --bead, per-pane agent/batch).
 	builtins := ListBuiltins()
 
 	for _, tmpl := range builtins {
@@ -81,16 +84,69 @@ func TestBuiltinTemplates_Executable(t *testing.T) {
 
 			// Also set FileContent for templates that use {{file}}
 			ctx.FileContent = "// Sample code content\nfunc main() {}"
+			ctx = ctx.WithBead("bd-exec1", "Sample bead", "P2", "", "open", "task").
+				WithAgent(2, "claude", "", "%7").
+				WithSendBatch(0, 3)
 
 			result, err := tmpl.Execute(ctx)
 			if err != nil {
-				t.Errorf("Execute() failed: %v", err)
+				t.Fatalf("Execute() failed: %v", err)
 			}
-
 			if result == "" {
-				t.Error("Execute() returned empty result")
+				t.Fatal("Execute() returned empty result")
+			}
+			if strings.Contains(result, "{{") {
+				t.Fatalf("Execute() left a placeholder in the output:\n%s", result)
 			}
 		})
+	}
+}
+
+// TestWorkflowTemplates_RefuseMissingContext pins the bug these templates
+// shipped with: rendered without bead/agent context they produced
+// "You are Agent #{{agent_num}} ({{agent_type}})" and sent it verbatim.
+func TestWorkflowTemplates_RefuseMissingContext(t *testing.T) {
+	cases := map[string]map[string]string{
+		"marching_orders": nil,
+		"self_review":     nil,
+		"cross_review":    {"author_agent": "2"},
+		"handoff":         {"target_agent": "3"},
+		"batch_assign":    nil,
+	}
+	for name, vars := range cases {
+		t.Run(name, func(t *testing.T) {
+			tmpl := GetBuiltin(name)
+			if tmpl == nil {
+				t.Fatalf("builtin %s missing", name)
+			}
+			_, err := tmpl.Execute(ExecutionContext{Variables: vars})
+			var unresolved *UnresolvedVariablesError
+			if !errors.As(err, &unresolved) {
+				t.Fatalf("Execute without context error = %v, want *UnresolvedVariablesError", err)
+			}
+			if !slices.Contains(unresolved.Names, "bead_id") || !slices.Contains(unresolved.Names, "agent_num") {
+				t.Fatalf("unresolved names = %v, want bead_id and agent_num", unresolved.Names)
+			}
+			if slices.Contains(unresolved.Names, "BEAD_ID") || slices.Contains(unresolved.Names, "TITLE") {
+				t.Fatalf("unresolved names = %v, want aliases folded into canonical names", unresolved.Names)
+			}
+		})
+	}
+}
+
+func TestWorkflowTemplates_DeclareUnconditionalUserVariablesRequired(t *testing.T) {
+	for name, variable := range map[string]string{"cross_review": "author_agent", "handoff": "target_agent"} {
+		tmpl := GetBuiltin(name)
+		if tmpl == nil {
+			t.Fatalf("builtin %s missing", name)
+		}
+		ctx := ExecutionContext{Variables: map[string]string{}}.
+			WithBead("bd-req1", "Title", "", "", "", "").
+			WithAgent(1, "claude", "", "%1")
+		_, err := tmpl.Execute(ctx)
+		if err == nil || err.Error() != "missing required variable: "+variable {
+			t.Fatalf("%s without %s: error = %v, want missing required variable", name, variable, err)
+		}
 	}
 }
 

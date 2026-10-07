@@ -394,9 +394,6 @@ internal/swarm/prompt_injector.go:PromptInjector.WithAdaptiveDelay	bd-ld4j2	reac
 internal/swarm/prompt_injector.go:PromptInjector.WithRateLimitTracker	bd-ld4j2	reachable only through RTA's reflection rule at the 2026-10-05 baseline; wire it (surface + behavioral test) or delete it
 internal/swarm/prompt_injector.go:PromptInjector.WithStaggerDelay	bd-ld4j2	reachable only through RTA's reflection rule at the 2026-10-05 baseline; wire it (surface + behavioral test) or delete it
 internal/swarm/prompt_injector.go:PromptInjector.sessionOrchestrator	bd-ld4j2	reachable only through RTA's reflection rule at the 2026-10-05 baseline; wire it (surface + behavioral test) or delete it
-internal/templates/template.go:ExecutionContext.WithAgent	bd-ld4j2	reachable only through RTA's reflection rule at the 2026-10-05 baseline; wire it (surface + behavioral test) or delete it
-internal/templates/template.go:ExecutionContext.WithBead	bd-ld4j2	reachable only through RTA's reflection rule at the 2026-10-05 baseline; wire it (surface + behavioral test) or delete it
-internal/templates/template.go:ExecutionContext.WithSendBatch	bd-ld4j2	reachable only through RTA's reflection rule at the 2026-10-05 baseline; wire it (surface + behavioral test) or delete it
 internal/templates/template.go:Template.HasVariable	bd-ld4j2	reachable only through RTA's reflection rule at the 2026-10-05 baseline; wire it (surface + behavioral test) or delete it
 internal/tmux/backpressure.go:CaptureBackpressureInput	bd-ld4j2	reachable only through RTA's reflection rule at the 2026-10-05 baseline; wire it (surface + behavioral test) or delete it
 internal/tmux/backpressure.go:Client.CaptureBackpressureInputs	bd-ld4j2	reachable only through RTA's reflection rule at the 2026-10-05 baseline; wire it (surface + behavioral test) or delete it

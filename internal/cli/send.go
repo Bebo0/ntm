@@ -386,6 +386,15 @@ type SendOptions struct {
 	// identity and reject prompt-echo ambiguity after all enrichment. The
 	// canonical service invokes this immediately before any delivery.
 	beforeDispatch func(context.Context, dispatchsvc.Request, []dispatchsvc.Delivery) error
+
+	// promptForTarget renders the prompt body for one selected pane, given its
+	// 0-based position in send order and the number of targets. Template sends
+	// set it so per-pane context ({{agent_num}}, {{agent_type}}, {{send_num}},
+	// ...) is filled for every target. Prompt then carries the target-
+	// independent rendering seen only by stages that run before targets are
+	// resolved (redaction preflight, routing, duplicate check, pre-send hooks);
+	// delivery, dry-run, DCG and history use the per-target renderings.
+	promptForTarget func(pane tmux.Pane, index, total int) (string, error)
 }
 
 // SendTarget represents a send target with optional variant filter.
@@ -624,6 +633,7 @@ func newSendCmd() *cobra.Command {
 	var contextFiles []string
 	var templateName string
 	var templateVars []string
+	var templateBead string
 	var tags []string
 	var dryRun bool
 	var cassCheck bool
@@ -680,6 +690,12 @@ func newSendCmd() *cobra.Command {
 		Template Usage:
 		Use --template (-t) to use a named prompt template with variable substitution.
 		Templates support {{variable}} placeholders and {{#var}}...{{/var}} conditionals.
+		The template is rendered separately for every target pane, filling
+		{{agent_num}} (N in cc_N), {{agent_type}}, {{agent_variant}}, {{agent_pane}},
+		{{send_num}}/{{send_index}} and {{send_total}} for that pane.
+		Use --bead <id> to fill {{bead_id}}, {{bead_title}}, {{bead_description}},
+		{{bead_priority}}, {{bead_status}} and {{bead_type}} from 'br show'.
+		A placeholder nothing fills is an error; it is never sent as literal text.
 		See 'ntm template list' for available templates.
 
 		File Context Injection:
@@ -724,6 +740,7 @@ func newSendCmd() *cobra.Command {
 		  ntm send myproject -c a.go -c b.go "Compare these"    # Multiple files
 		  ntm send myproject -t code_review --file src/main.go  # Template with file
 		  ntm send myproject -t fix --var issue="null pointer" --file src/app.go  # Template with vars
+		  ntm send myproject --cc -t marching_orders --bead bd-123  # Per-pane orders for a bead
 		  ntm send myproject --smart "fix auth bug"             # Auto-select best agent
 		  ntm send myproject --smart --route=sticky "auth"      # Prefer same agent for related tasks`,
 		Args: cobra.ArbitraryArgs,
@@ -754,6 +771,9 @@ func newSendCmd() *cobra.Command {
 			}
 			if skipFirst && smartRoute {
 				return earlyError(fmt.Errorf("cannot combine --skip-first with --smart"))
+			}
+			if err := validateSendTemplateFlags(cmd, templateName, &templateBead, projectFilter != "", codexGoal, distribute, batchFile != ""); err != nil {
+				return earlyError(err)
 			}
 
 			// Handle --project mode: broadcast to all matching sessions (bd-3cu02.14)
@@ -892,7 +912,7 @@ func newSendCmd() *cobra.Command {
 			if templateName != "" {
 				opts.TemplateName = templateName
 				opts.PromptSource = fmt.Sprintf("template:%s", templateName)
-				return earlyError(runSendWithTemplate(templateVars, promptFile, contextFiles, opts))
+				return earlyError(runSendWithTemplate(templateVars, promptFile, contextFiles, templateBead, opts))
 			}
 
 			promptText, promptSource, err := getPromptContent(args[1:], promptFile, prefix, suffix)
@@ -955,6 +975,7 @@ func newSendCmd() *cobra.Command {
 	cmd.Flags().StringArrayVarP(&contextFiles, "context", "c", nil, "file to include as context (repeatable, supports path:start-end)")
 	cmd.Flags().StringVarP(&templateName, "template", "t", "", "use a named prompt template (see 'ntm template list')")
 	cmd.Flags().StringArrayVar(&templateVars, "var", nil, "template variable in key=value format (repeatable)")
+	cmd.Flags().StringVar(&templateBead, "bead", "", "fill the template's bead_* variables from this bead via 'br show' (requires --template)")
 	cmd.Flags().StringSliceVar(&tags, "tag", nil, "filter by tag (OR logic)")
 
 	// Smart routing flags
@@ -1404,8 +1425,49 @@ func buildPrompt(content, prefix, suffix string) string {
 	return strings.Join(parts, "\n")
 }
 
+// validateSendTemplateFlags rejects --bead without --template, and --template
+// in send modes that never render it (they would silently drop the template
+// and any bead context). It trims the bead ID in place.
+func validateSendTemplateFlags(cmd *cobra.Command, templateName string, beadID *string, project, codexGoal, distribute, batch bool) error {
+	*beadID = strings.TrimSpace(*beadID)
+	if cmd.Flags().Changed("bead") && *beadID == "" {
+		return markCLIInvalidInput(errors.New("--bead requires a bead ID"))
+	}
+	if *beadID != "" && templateName == "" {
+		return markCLIInvalidInput(errors.New("--bead only fills template variables; use it with --template"))
+	}
+	if templateName == "" {
+		return nil
+	}
+	for _, mode := range []struct {
+		set  bool
+		flag string
+	}{
+		{project, "--project"},
+		{codexGoal, "--codex-goal"},
+		{distribute, "--distribute"},
+		{batch, "--batch"},
+	} {
+		if mode.set {
+			return markCLIInvalidInput(fmt.Errorf("cannot combine --template with %s", mode.flag))
+		}
+	}
+	return nil
+}
+
 // runSendWithTemplate handles template-based prompt generation and sending.
-func runSendWithTemplate(templateVars []string, promptFile string, contextFiles []string, opts SendOptions) error {
+//
+// Session-level context (--var, --file, {{session}}, --bead) is known up
+// front, but per-pane context ({{agent_num}}, {{agent_type}}, {{send_num}},
+// ...) only exists once runSendInternal resolves the targets. The template is
+// therefore validated and rendered once here without pane context, and
+// rendered again for every selected pane through promptForTarget, so each
+// agent receives its own identity instead of a literal "{{agent_num}}".
+func runSendWithTemplate(templateVars []string, promptFile string, contextFiles []string, beadID string, opts SendOptions) error {
+	if opts.Context == nil {
+		opts.Context = context.Background()
+	}
+
 	// Load the template
 	loader := templates.NewLoader()
 	tmpl, err := loader.Load(opts.TemplateName)
@@ -1418,13 +1480,13 @@ func runSendWithTemplate(templateVars []string, promptFile string, contextFiles 
 	for _, v := range templateVars {
 		parts := strings.SplitN(v, "=", 2)
 		if len(parts) != 2 {
-			return fmt.Errorf("invalid --var format '%s' (expected key=value)", v)
+			return markCLIInvalidInput(fmt.Errorf("invalid --var format '%s' (expected key=value)", v))
 		}
 		vars[parts[0]] = parts[1]
 	}
 
 	// Build execution context
-	ctx := templates.ExecutionContext{
+	execCtx := templates.ExecutionContext{
 		Variables: vars,
 		Session:   opts.Session,
 	}
@@ -1436,34 +1498,123 @@ func runSendWithTemplate(templateVars []string, promptFile string, contextFiles 
 		if err != nil {
 			return fmt.Errorf("reading file '%s': %w", promptFile, err)
 		}
-		ctx.FileContent = string(content)
+		execCtx.FileContent = string(content)
 	}
 
-	// Execute the template
-	promptText, err := tmpl.Execute(ctx)
-	if err != nil {
-		return fmt.Errorf("executing template: %w", err)
-	}
-
-	// Inject additional file context if specified (via --context)
-	if len(contextFiles) > 0 {
-		var specs []prompt.FileSpec
-		for _, cf := range contextFiles {
-			spec, err := prompt.ParseFileSpec(cf)
-			if err != nil {
-				return fmt.Errorf("invalid --context spec '%s': %w", cf, err)
-			}
-			specs = append(specs, spec)
-		}
-
-		promptText, err = prompt.InjectFiles(specs, promptText)
+	if beadID != "" {
+		session, bead, err := lookupSendTemplateBead(opts.Context, opts.Session, beadID)
 		if err != nil {
 			return err
 		}
+		opts.Session = session
+		execCtx.Session = session
+		execCtx = execCtx.WithBead(bead.ID, bead.Title, fmt.Sprintf("P%d", bead.Priority), bead.Description, bead.Status, bead.IssueType)
 	}
 
-	opts.Prompt = promptText
+	// Render everything known before targeting. This fails on any
+	// placeholder that no --var, --file, --bead or builtin fills.
+	sharedText, err := tmpl.ExecuteShared(execCtx)
+	if err != nil {
+		return markCLIInvalidInput(explainSendTemplateError(err))
+	}
+
+	// Additional file context (--context) is read once so every pane gets
+	// the same snapshot.
+	var specs []prompt.FileSpec
+	for _, cf := range contextFiles {
+		spec, err := prompt.ParseFileSpec(cf)
+		if err != nil {
+			return fmt.Errorf("invalid --context spec '%s': %w", cf, err)
+		}
+		specs = append(specs, spec)
+	}
+	fileContext, err := prompt.FileContextBlock(specs)
+	if err != nil {
+		return err
+	}
+
+	opts.Prompt = fileContext + sharedText
+	opts.promptForTarget = func(pane tmux.Pane, index, total int) (string, error) {
+		// agent_type uses the long robot-output names (claude, codex, ...).
+		paneCtx := execCtx.
+			WithAgent(pane.NTMIndex, robot.ResolveAgentType(string(pane.Type)), pane.Variant, pane.ID).
+			WithSendBatch(index, total)
+		body, err := tmpl.Execute(paneCtx)
+		if err != nil {
+			return "", markCLIInvalidInput(explainSendTemplatePaneError(pane, err))
+		}
+		return fileContext + body, nil
+	}
 	return runSendWithTargets(opts)
+}
+
+// lookupSendTemplateBead reads --bead from the target session's project with
+// the same `br show --json` contract assignment uses, failing closed rather
+// than consulting whatever project the caller's working directory belongs to.
+// It returns the resolved session name alongside the bead.
+func lookupSendTemplateBead(ctx context.Context, session, beadID string) (string, *bv.BeadAssignmentDetails, error) {
+	resolved, _, err := resolveSendSessionForCommandContext(ctx, session)
+	if err != nil {
+		return "", nil, fmt.Errorf("resolve session for --bead %s: %w", beadID, err)
+	}
+	projectDir, err := resolveExplicitProjectDirForSessionContext(ctx, resolved)
+	if err != nil {
+		return "", nil, fmt.Errorf("resolve project for session %s to read --bead %s: %w", resolved, beadID, err)
+	}
+	details, err := bv.GetBeadAssignmentDetailsContext(ctx, projectDir, beadID)
+	if err != nil {
+		return "", nil, fmt.Errorf("read --bead %s in %s: %w", beadID, projectDir, err)
+	}
+	return resolved, details, nil
+}
+
+// explainSendTemplateError adds the flag that fills each kind of unresolved
+// session-level variable.
+func explainSendTemplateError(err error) error {
+	var unresolved *templates.UnresolvedVariablesError
+	if !errors.As(err, &unresolved) {
+		return fmt.Errorf("executing template: %w", err)
+	}
+	needsBead, needsVar := false, false
+	for _, name := range unresolved.Names {
+		if strings.HasPrefix(name, "bead_") {
+			needsBead = true
+		} else {
+			needsVar = true
+		}
+	}
+	var hints []string
+	if needsBead {
+		hints = append(hints, "pass --bead <id> to fill bead_* variables")
+	}
+	if needsVar {
+		hints = append(hints, "pass --var name=value")
+	}
+	return fmt.Errorf("%w (%s)", err, strings.Join(hints, "; "))
+}
+
+// explainSendTemplatePaneError names the pane whose per-pane context could not
+// fill the template and why.
+func explainSendTemplatePaneError(pane tmux.Pane, err error) error {
+	var unresolved *templates.UnresolvedVariablesError
+	if !errors.As(err, &unresolved) {
+		return err
+	}
+	var reasons []string
+	for _, name := range unresolved.Names {
+		switch name {
+		case "agent_num":
+			reasons = append(reasons, fmt.Sprintf("pane title %q carries no ntm agent number", pane.Title))
+		case "agent_variant":
+			reasons = append(reasons, "pane has no variant; wrap it in {{#agent_variant}}...{{/agent_variant}}")
+		case "agent_pane":
+			reasons = append(reasons, "pane has no tmux pane ID")
+		}
+	}
+	if len(reasons) == 0 {
+		return err
+	}
+	return fmt.Errorf("%w (%s)", err, strings.Join(reasons, "; "))
 }
 
 // runSendWithTargets sends prompts using the new SendTargets filtering
@@ -1596,6 +1747,9 @@ func runSendInternal(opts SendOptions) (err error) {
 		histAgentTypes []string
 		histErr        error
 		histSuccess    bool
+		// histGroups holds each distinct outbound prompt and its panes once
+		// targets resolve; before that the shared prompt is recorded.
+		histGroups []sendPromptGroup
 	)
 
 	// Redaction preflight for outbound prompts
@@ -1666,6 +1820,8 @@ func runSendInternal(opts SendOptions) (err error) {
 				code = "SENSITIVE_DATA_BLOCKED"
 			} else if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 				code = robot.ErrCodeTimeout
+			} else if errors.Is(err, errCLIInvalidInput) {
+				code = robot.ErrCodeInvalidFlag
 			}
 			result := SendResult{
 				Success:              false,
@@ -1748,33 +1904,41 @@ func runSendInternal(opts SendOptions) (err error) {
 	// Start time tracking for history
 	start := time.Now()
 
-	// Defer history logic
+	// Defer history logic. One entry per distinct outbound prompt: a plain
+	// send records one; a per-pane template render records what each group
+	// of panes actually received.
 	defer func() {
 		if dryRun {
 			return
 		}
-		entry := history.NewEntry(session, histTargets, prompt, history.SourceCLI)
-		entry.SetAgentTypes(histAgentTypes)
-		entry.Template = templateName
-		entry.DurationMs = int(time.Since(start) / time.Millisecond)
-		if histSuccess {
-			entry.SetSuccess()
-		} else {
-			entry.SetError(histErr)
+		groups := histGroups
+		if len(groups) == 0 {
+			groups = []sendPromptGroup{{prompt: prompt, targets: histTargets, agentTypes: histAgentTypes, delivered: delivered}}
 		}
-		_ = history.Append(entry)
+		for _, group := range groups {
+			entry := history.NewEntry(session, group.targets, group.prompt, history.SourceCLI)
+			entry.SetAgentTypes(group.agentTypes)
+			entry.Template = templateName
+			entry.DurationMs = int(time.Since(start) / time.Millisecond)
+			if histSuccess {
+				entry.SetSuccess()
+			} else {
+				entry.SetError(histErr)
+			}
+			_ = history.Append(entry)
 
-		// Session prompt history is replayable restart state, so only record
-		// prompts that reached at least one pane. Global history above retains
-		// failed attempts with their error metadata.
-		promptEntry := sessionPkg.PromptEntry{
-			Session:  session,
-			Content:  prompt,
-			Targets:  histTargets,
-			Source:   "cli",
-			Template: templateName,
+			// Session prompt history is replayable restart state, so only record
+			// prompts that reached at least one pane. Global history above retains
+			// failed attempts with their error metadata.
+			promptEntry := sessionPkg.PromptEntry{
+				Session:  session,
+				Content:  group.prompt,
+				Targets:  group.targets,
+				Source:   "cli",
+				Template: templateName,
+			}
+			_ = saveDeliveredPrompt(group.delivered, promptEntry)
 		}
-		_ = saveDeliveredPrompt(delivered, promptEntry)
 	}()
 
 	// Smart routing: select best agent automatically.
@@ -2068,6 +2232,15 @@ func runSendInternal(opts SendOptions) (err error) {
 	histAgentTypes = targetAgentTypes
 	dispatchPacing := buildDispatchPacingDecision(opts, session, selectedPanes, multiWindow)
 
+	// Template sends render once per selected pane, in send order, before
+	// anything is delivered: a pane the template cannot be filled for fails
+	// the whole send with no pane touched. targetPrompts is nil for plain
+	// sends, which deliver the shared prompt everywhere.
+	targetPrompts, err := renderSendTargetPrompts(opts, selectedPanes, multiWindow)
+	if err != nil {
+		return outputError(err)
+	}
+
 	if opts.Randomize && len(targetPanes) > 1 && !jsonOutput && !silent {
 		fmt.Fprintf(os.Stderr, "Randomized send order (seed=%d): %v\n", seedUsed, targetPanes)
 	}
@@ -2101,6 +2274,13 @@ func runSendInternal(opts SendOptions) (err error) {
 		if injectRes.Success && injectRes.ModifiedPrompt != "" {
 			prompt = injectRes.ModifiedPrompt
 			opts.Prompt = prompt
+			// The context found for the shared prompt is injected into every
+			// per-pane rendering the same way.
+			for i := range targetPrompts {
+				if perTarget := cass.InjectContext(targetPrompts[i], filterRes.Hits, cassInject); perTarget.Success && perTarget.ModifiedPrompt != "" {
+					targetPrompts[i] = perTarget.ModifiedPrompt
+				}
+			}
 		}
 		if !jsonOutput && !silent {
 			switch {
@@ -2113,9 +2293,18 @@ func runSendInternal(opts SendOptions) (err error) {
 		}
 	}
 
+	// From here on every stage sees exactly what each pane will receive.
+	histGroups = groupSendPrompts(prompt, targetPrompts, selectedPanes, multiWindow)
+	previewPrompt := prompt
+	if len(targetPrompts) > 0 {
+		previewPrompt = targetPrompts[0]
+	}
+
 	// Apply DCG safety check for non-Claude agents
-	if err := maybeBlockSendWithDCG(ctx, prompt, session, selectedPanes); err != nil {
-		return outputError(err)
+	for _, group := range histGroups {
+		if err := maybeBlockSendWithDCG(ctx, group.prompt, session, group.panes); err != nil {
+			return outputError(err)
+		}
 	}
 
 	if len(selectedPanes) == 0 {
@@ -2123,7 +2312,7 @@ func runSendInternal(opts SendOptions) (err error) {
 		result := SendResult{
 			Success:              false,
 			Session:              session,
-			PromptPreview:        truncatePrompt(prompt, 50),
+			PromptPreview:        truncatePrompt(previewPrompt, 50),
 			NonInteractiveForced: opts.ForceNonInteractive,
 			Redaction:            redactionSummary,
 			Warnings:             redactionWarnings,
@@ -2143,7 +2332,7 @@ func runSendInternal(opts SendOptions) (err error) {
 	}
 
 	dispatchRedactCfg := activeShellDispatchRedactionConfig()
-	dispatchService, err := newShellDispatchServiceWithGate(session, selectedPanes, dispatchRedactCfg, opts.beforeDispatch)
+	dispatchService, err := newShellDispatchServiceWithGate(session, selectedPanes, sendTargetMessages(selectedPanes, targetPrompts), dispatchRedactCfg, opts.beforeDispatch)
 	if err != nil {
 		return outputError(err)
 	}
@@ -2166,6 +2355,10 @@ func runSendInternal(opts SendOptions) (err error) {
 			return outputError(dispatchErr)
 		}
 		entries := buildSendDryRunEntries(selectedPanes, prompt, promptSource, multiWindow)
+		for i := range targetPrompts {
+			entries[i].Prompt = targetPrompts[i]
+			entries[i].PromptPreview = truncateForPreview(targetPrompts[i], 80)
+		}
 		return finishSendDryRunResult(opts, SendDryRunResult{
 			Success:              true,
 			DryRun:               true,
@@ -2183,6 +2376,7 @@ func runSendInternal(opts SendOptions) (err error) {
 	}
 	delivered = dispatchResult.Delivered
 	failed = dispatchResult.Failed
+	countSendGroupDeliveries(histGroups, dispatchResult.Receipts)
 	var firstDeliveryErr error
 	var firstFailedPane string
 	for _, receipt := range dispatchResult.Receipts {
@@ -2212,7 +2406,7 @@ func runSendInternal(opts SendOptions) (err error) {
 			result := SendResult{
 				Success:              false,
 				Session:              session,
-				PromptPreview:        truncatePrompt(prompt, 50),
+				PromptPreview:        truncatePrompt(previewPrompt, 50),
 				NonInteractiveForced: opts.ForceNonInteractive,
 				Redaction:            redactionSummary,
 				Warnings:             redactionWarnings,
@@ -2236,7 +2430,7 @@ func runSendInternal(opts SendOptions) (err error) {
 		result := SendResult{
 			Success:              true,
 			Session:              session,
-			PromptPreview:        truncatePrompt(prompt, 50),
+			PromptPreview:        truncatePrompt(previewPrompt, 50),
 			NonInteractiveForced: opts.ForceNonInteractive,
 			Redaction:            redactionSummary,
 			Warnings:             redactionWarnings,
@@ -2297,7 +2491,7 @@ func runSendInternal(opts SendOptions) (err error) {
 	result := SendResult{
 		Success:              failed == 0 && firstDeliveryErr == nil,
 		Session:              session,
-		PromptPreview:        truncatePrompt(prompt, 50),
+		PromptPreview:        truncatePrompt(previewPrompt, 50),
 		NonInteractiveForced: opts.ForceNonInteractive,
 		Redaction:            redactionSummary,
 		Warnings:             redactionWarnings,
@@ -2345,6 +2539,101 @@ func runSendInternal(opts SendOptions) (err error) {
 	}
 
 	return nil
+}
+
+// renderSendTargetPrompts renders opts.promptForTarget for every selected pane
+// (0-based send position, target count) and composes each rendering the way
+// runSendInternal composes the shared prompt: base prompt first, then redact
+// mode rewriting, so dry-run output and history never hold a secret the shared
+// preflight would have redacted. Block mode needs no per-pane pass: the shared
+// rendering carries every session-level value and was already refused, and
+// the dispatch redactor still enforces policy on each final message. It
+// returns nil when the send has no per-target renderer.
+func renderSendTargetPrompts(opts SendOptions, panes []tmux.Pane, multiWindow bool) ([]string, error) {
+	if opts.promptForTarget == nil {
+		return nil, nil
+	}
+	redactCfg := activeShellDispatchRedactionConfig()
+	prompts := make([]string, len(panes))
+	for i, pane := range panes {
+		body, err := opts.promptForTarget(pane, i, len(panes))
+		if err != nil {
+			return nil, fmt.Errorf("rendering prompt for pane %s: %w", tmux.PaneTargetKey(pane, multiWindow), err)
+		}
+		composed := applyBasePrompt(opts.BasePrompt, body)
+		if redactCfg.Mode == redaction.ModeRedact {
+			composed = redaction.ScanAndRedact(composed, redactCfg).Output
+		}
+		prompts[i] = composed
+	}
+	return prompts, nil
+}
+
+// sendPromptGroup is one distinct outbound prompt and the selected panes that
+// receive it, in send order.
+type sendPromptGroup struct {
+	prompt     string
+	panes      []tmux.Pane
+	targets    []string
+	agentTypes []string
+	delivered  int
+}
+
+// groupSendPrompts partitions the selected panes by the exact prompt each one
+// receives: a plain send (perTarget nil) is a single group, while a per-pane
+// template render yields one group per distinct rendering.
+func groupSendPrompts(shared string, perTarget []string, panes []tmux.Pane, multiWindow bool) []sendPromptGroup {
+	var groups []sendPromptGroup
+	byPrompt := make(map[string]int)
+	for i, pane := range panes {
+		text := shared
+		if perTarget != nil {
+			text = perTarget[i]
+		}
+		index, ok := byPrompt[text]
+		if !ok {
+			index = len(groups)
+			byPrompt[text] = index
+			groups = append(groups, sendPromptGroup{prompt: text})
+		}
+		group := &groups[index]
+		group.panes = append(group.panes, pane)
+		group.targets = append(group.targets, tmux.PaneTargetKey(pane, multiWindow))
+		group.agentTypes = append(group.agentTypes, pane.Type.String())
+	}
+	return groups
+}
+
+// countSendGroupDeliveries records how many of each group's panes the
+// dispatch receipts report as delivered.
+func countSendGroupDeliveries(groups []sendPromptGroup, receipts []dispatchsvc.Receipt) {
+	delivered := make(map[string]bool, len(receipts))
+	for _, receipt := range receipts {
+		if receipt.Status == dispatchsvc.ReceiptDelivered {
+			delivered[receipt.Target.Ref.StableKey()] = true
+		}
+	}
+	for i := range groups {
+		groups[i].delivered = 0
+		for _, pane := range groups[i].panes {
+			if delivered[pane.Ref().StableKey()] {
+				groups[i].delivered++
+			}
+		}
+	}
+}
+
+// sendTargetMessages keys per-pane prompts by stable pane identity for the
+// dispatch message builder; nil means every target receives the base message.
+func sendTargetMessages(panes []tmux.Pane, prompts []string) map[string]string {
+	if prompts == nil {
+		return nil
+	}
+	messages := make(map[string]string, len(panes))
+	for i, pane := range panes {
+		messages[pane.Ref().StableKey()] = prompts[i]
+	}
+	return messages
 }
 
 func saveDeliveredPrompt(delivered int, entry sessionPkg.PromptEntry) error {
@@ -3691,18 +3980,31 @@ func shellFinalMessageRedactor(redactCfg redaction.Config) dispatchsvc.FinalMess
 }
 
 func newShellDispatchService(session string, selected []tmux.Pane, redactCfg redaction.Config) (*dispatchsvc.Service, error) {
-	return newShellDispatchServiceWithGate(session, selected, redactCfg, nil)
+	return newShellDispatchServiceWithGate(session, selected, nil, redactCfg, nil)
 }
 
+// newShellDispatchServiceWithGate builds the shell send dispatch service.
+// targetMessages, keyed by pane stable key, replaces the request's base message
+// per target (per-pane template renders); nil sends the base message to every
+// target, and a non-nil map missing a planned target fails preflight.
 func newShellDispatchServiceWithGate(
 	session string,
 	selected []tmux.Pane,
+	targetMessages map[string]string,
 	redactCfg redaction.Config,
 	beforeDispatch func(context.Context, dispatchsvc.Request, []dispatchsvc.Delivery) error,
 ) (*dispatchsvc.Service, error) {
 	return dispatchsvc.NewService(dispatchsvc.Ports{
 		Builder: dispatchsvc.FinalMessageBuilderFunc(func(_ context.Context, input dispatchsvc.BuildInput) (string, error) {
-			return stampMarchingOrders(input.BaseMessage, session, input.Target.Pane.WindowIndex, input.Target.Pane.Index), nil
+			message := input.BaseMessage
+			if targetMessages != nil {
+				perTarget, ok := targetMessages[input.Target.Ref.StableKey()]
+				if !ok {
+					return "", fmt.Errorf("no rendered prompt for pane %s", input.Target.Address)
+				}
+				message = perTarget
+			}
+			return stampMarchingOrders(message, session, input.Target.Pane.WindowIndex, input.Target.Pane.Index), nil
 		}),
 		Redactor:  shellFinalMessageRedactor(redactCfg),
 		Orderer:   shellDispatchOrderer(selected),

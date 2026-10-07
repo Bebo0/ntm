@@ -54,6 +54,7 @@ ntm send myproject --base-prompt-file ./common-instructions.txt --file ./task.tx
 ntm send myproject -c internal/auth/service.go "Refactor this safely"
 ntm send myproject -c a.go -c b.go "Compare these implementations"
 ntm send myproject -t fix --var issue="nil pointer" --file internal/auth/service.go
+ntm send myproject --cc -t marching_orders --bead bd-123   # per-pane {{agent_num}}/{{agent_type}}, bead from br show
 
 # Smart routing and automated distribution
 ntm send myproject --smart "Take the next auth follow-up"

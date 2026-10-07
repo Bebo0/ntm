@@ -625,6 +625,7 @@ ntm workflow run red-green --var feature="parser rewrite"
 ntm workflow run ./my-flow.toml --session payments
 ntm template list
 ntm template show fix-bug
+ntm send payments --cc -t marching_orders --bead bd-123   # rendered per pane: own {{agent_num}}/{{agent_type}}
 
 ntm pipeline run .ntm/pipelines/review.yaml --session payments
 ntm pipeline status run-20241230-123456-abcd

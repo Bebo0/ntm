@@ -119,8 +119,20 @@ func ParseFileSpec(spec string) (FileSpec, error) {
 // InjectFiles reads the specified files and prepends them to the prompt
 // with proper formatting (code fences, language detection, headers).
 func InjectFiles(specs []FileSpec, prompt string) (string, error) {
+	block, err := FileContextBlock(specs)
+	if err != nil {
+		return "", err
+	}
+	return block + prompt, nil
+}
+
+// FileContextBlock reads the specified files and renders exactly the text
+// InjectFiles prepends to a prompt, trailing separator included, so a caller
+// composing several prompts from one set of files reads each file once and
+// every prompt sees the same snapshot. It returns "" when specs is empty.
+func FileContextBlock(specs []FileSpec) (string, error) {
 	if len(specs) == 0 {
-		return prompt, nil
+		return "", nil
 	}
 
 	var parts []string
@@ -183,10 +195,8 @@ func InjectFiles(specs []FileSpec, prompt string) (string, error) {
 		parts = append(parts, block)
 	}
 
-	// Add separator and prompt
-	parts = append(parts, "---\n\n"+prompt)
-
-	return strings.Join(parts, "\n\n"), nil
+	// Separator between the file blocks and the prompt that follows them.
+	return strings.Join(parts, "\n\n") + "\n\n---\n\n", nil
 }
 
 // readFileRange reads a file, optionally extracting a specific line range.

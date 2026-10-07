@@ -55,9 +55,26 @@ Built-in variables:
   {{session}}  - Session name (when using with send)
   {{file}}     - File content (when using --file)
 
+Bead variables (ntm send --bead <id>, read with 'br show'):
+  {{bead_id}} {{bead_title}} {{bead_description}} {{bead_priority}}
+  {{bead_status}} {{bead_type}}   (aliases: BEAD_ID, TITLE, DESCRIPTION, PRIORITY)
+
+Per-pane variables (ntm send renders the template once for every target pane):
+  {{agent_num}}     - Agent number N of the pane (cc_N), alias AGENT_NUM
+  {{agent_type}}    - Agent type: claude, codex, ..., alias AGENT_TYPE
+  {{agent_variant}} - Pane variant (model/persona), alias VARIANT
+  {{agent_pane}}    - tmux pane ID (e.g. %12)
+  {{send_num}}      - Position of the pane in this send, 1-indexed
+  {{send_index}}    - Position of the pane in this send, 0-indexed
+  {{send_total}}    - Number of panes in this send
+
+A placeholder that nothing fills is an error; it is never sent as literal
+"{{name}}" text. Wrap optional values in {{#name}}...{{/name}}.
+
 Use with ntm send:
   ntm send myproject --template=code_review --file=src/main.go
-  ntm send myproject -t refactor --var goal="simplify" --file=src/main.go`,
+  ntm send myproject -t refactor --var goal="simplify" --file=src/main.go
+  ntm send myproject --cc -t marching_orders --bead bd-123`,
 	}
 
 	cmd.AddCommand(

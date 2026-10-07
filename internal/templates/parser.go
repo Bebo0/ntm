@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"io"
 	"regexp"
+	"sort"
+	"strconv"
 	"strings"
 
 	"gopkg.in/yaml.v3"
@@ -59,14 +61,87 @@ func Parse(content string) (*Template, error) {
 	return tmpl, nil
 }
 
-// Execute substitutes variables in the template body.
+// paneContextVariables are filled per target pane at send time (WithAgent,
+// WithSendBatch), including their uppercase aliases.
+var paneContextVariables = map[string]struct{}{
+	"agent_num":     {},
+	"AGENT_NUM":     {},
+	"agent_type":    {},
+	"AGENT_TYPE":    {},
+	"agent_variant": {},
+	"VARIANT":       {},
+	"agent_pane":    {},
+	"send_index":    {},
+	"send_total":    {},
+	"send_num":      {},
+}
+
+// contextAliases maps the uppercase convenience spellings templates may use to
+// their canonical variable. The alias always mirrors the canonical value, so a
+// value supplied either way (--var bead_id=..., or bead context) fills both.
+var contextAliases = map[string]string{
+	"BEAD_ID":     "bead_id",
+	"TITLE":       "bead_title",
+	"PRIORITY":    "bead_priority",
+	"DESCRIPTION": "bead_description",
+	"AGENT_NUM":   "agent_num",
+	"AGENT_TYPE":  "agent_type",
+	"VARIANT":     "agent_variant",
+}
+
+// UnresolvedVariablesError reports template placeholders that no variable,
+// default, builtin, or execution context filled. Delivering the literal
+// "{{name}}" text to an agent is never correct, so rendering refuses instead.
+type UnresolvedVariablesError struct {
+	Template string
+	// Names are canonical variable names (aliases folded), sorted.
+	Names []string
+}
+
+func (e *UnresolvedVariablesError) Error() string {
+	return fmt.Sprintf("template %q has unresolved variable(s): %s", e.Template, strings.Join(e.Names, ", "))
+}
+
+// Execute renders the template for one fully known context. A placeholder in
+// the template body that nothing fills is an *UnresolvedVariablesError.
 func (t *Template) Execute(ctx ExecutionContext) (string, error) {
+	return t.execute(ctx, false)
+}
+
+// ExecuteShared renders everything known before send targets are resolved.
+// Per-pane placeholders ({{agent_num}}, {{agent_type}}, {{send_num}}, ...)
+// stay literal for the per-target Execute; any other unresolved placeholder is
+// an *UnresolvedVariablesError, so missing bead context fails before a send
+// touches any pane.
+func (t *Template) ExecuteShared(ctx ExecutionContext) (string, error) {
+	return t.execute(ctx, true)
+}
+
+func (t *Template) execute(ctx ExecutionContext, deferPaneContext bool) (string, error) {
 	// Validate required variables
 	if err := t.Validate(ctx); err != nil {
 		return "", err
 	}
 
-	// Build variable map: defaults < builtins < user vars < special vars
+	vars := t.variables(ctx)
+
+	// First, expand conditionals {{#var}}...{{/var}}
+	body := expandConditionals(t.Body, vars)
+
+	// Refuse placeholders nothing fills. Only the template body is checked:
+	// substituted values (file content, bead descriptions) may legitimately
+	// contain "{{...}}" text and are never re-expanded.
+	if missing := unresolvedVariables(body, vars, deferPaneContext); len(missing) > 0 {
+		return "", &UnresolvedVariablesError{Template: t.Name, Names: missing}
+	}
+
+	// Then, substitute simple variables {{var}}
+	return substituteVariables(body, vars), nil
+}
+
+// variables builds the substitution map:
+// defaults < builtins < user vars < special/context vars, then aliases.
+func (t *Template) variables(ctx ExecutionContext) map[string]string {
 	vars := make(map[string]string)
 
 	// Apply defaults from template definition
@@ -100,19 +175,15 @@ func (t *Template) Execute(ctx ExecutionContext) (string, error) {
 	// Apply bead context variables
 	if ctx.BeadID != "" {
 		vars["bead_id"] = ctx.BeadID
-		vars["BEAD_ID"] = ctx.BeadID // Also support uppercase for convenience
 	}
 	if ctx.BeadTitle != "" {
 		vars["bead_title"] = ctx.BeadTitle
-		vars["TITLE"] = ctx.BeadTitle // Common alias
 	}
 	if ctx.BeadPriority != "" {
 		vars["bead_priority"] = ctx.BeadPriority
-		vars["PRIORITY"] = ctx.BeadPriority
 	}
 	if ctx.BeadDescription != "" {
 		vars["bead_description"] = ctx.BeadDescription
-		vars["DESCRIPTION"] = ctx.BeadDescription
 	}
 	if ctx.BeadStatus != "" {
 		vars["bead_status"] = ctx.BeadStatus
@@ -123,16 +194,13 @@ func (t *Template) Execute(ctx ExecutionContext) (string, error) {
 
 	// Apply agent context variables
 	if ctx.AgentNum > 0 {
-		vars["agent_num"] = fmt.Sprintf("%d", ctx.AgentNum)
-		vars["AGENT_NUM"] = vars["agent_num"]
+		vars["agent_num"] = strconv.Itoa(ctx.AgentNum)
 	}
 	if ctx.AgentType != "" {
 		vars["agent_type"] = ctx.AgentType
-		vars["AGENT_TYPE"] = ctx.AgentType
 	}
 	if ctx.AgentVariant != "" {
 		vars["agent_variant"] = ctx.AgentVariant
-		vars["VARIANT"] = ctx.AgentVariant
 	}
 	if ctx.AgentPane != "" {
 		vars["agent_pane"] = ctx.AgentPane
@@ -140,21 +208,46 @@ func (t *Template) Execute(ctx ExecutionContext) (string, error) {
 
 	// Apply send batch context variables
 	if ctx.SendTotal > 0 {
-		vars["send_index"] = fmt.Sprintf("%d", ctx.SendIndex)
-		vars["send_total"] = fmt.Sprintf("%d", ctx.SendTotal)
-		vars["send_num"] = fmt.Sprintf("%d", ctx.SendIndex+1) // 1-indexed for human readability
+		vars["send_index"] = strconv.Itoa(ctx.SendIndex)
+		vars["send_total"] = strconv.Itoa(ctx.SendTotal)
+		vars["send_num"] = strconv.Itoa(ctx.SendIndex + 1) // 1-indexed for human readability
 	}
 
-	// Perform substitution
-	result := t.Body
+	// Mirror canonical values into their uppercase aliases.
+	for alias, canonical := range contextAliases {
+		if value, ok := vars[canonical]; ok {
+			vars[alias] = value
+		}
+	}
 
-	// First, expand conditionals {{#var}}...{{/var}}
-	result = expandConditionals(result, vars)
+	return vars
+}
 
-	// Then, substitute simple variables {{var}}
-	result = substituteVariables(result, vars)
-
-	return result, nil
+// unresolvedVariables lists the canonical names of {{placeholders}} in body
+// that vars does not fill, sorted and de-duplicated. With deferPaneContext,
+// per-pane variables are left for the per-target render.
+func unresolvedVariables(body string, vars map[string]string, deferPaneContext bool) []string {
+	seen := make(map[string]struct{})
+	var missing []string
+	for _, match := range simpleVarRe.FindAllStringSubmatch(body, -1) {
+		name := match[1]
+		if _, ok := vars[name]; ok {
+			continue
+		}
+		if _, pane := paneContextVariables[name]; pane && deferPaneContext {
+			continue
+		}
+		if canonical, ok := contextAliases[name]; ok {
+			name = canonical
+		}
+		if _, dup := seen[name]; dup {
+			continue
+		}
+		seen[name] = struct{}{}
+		missing = append(missing, name)
+	}
+	sort.Strings(missing)
+	return missing
 }
 
 // substituteVariables replaces {{variable}} placeholders with values.
