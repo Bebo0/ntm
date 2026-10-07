@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -224,6 +225,74 @@ func ConfigOptions(baseURL, token string) []Option {
 	return opts
 }
 
+// amConfigToken reads HTTP_BEARER_TOKEN from Agent Mail's user config file,
+// $XDG_CONFIG_HOME/mcp-agent-mail/config.env (XDG_CONFIG_HOME only when
+// absolute, else ~/.config), where `am setup` stores the token its server
+// requires. ntm sends it only to a loopback server and only when no token is
+// configured ([agent_mail] token, AGENT_MAIL_TOKEN or WithToken), so a machine
+// set up with am works without copying the token into ntm's config.
+func amConfigToken() string {
+	dir := os.Getenv("XDG_CONFIG_HOME")
+	if !filepath.IsAbs(dir) {
+		home, err := os.UserHomeDir()
+		if err != nil || !filepath.IsAbs(home) {
+			return ""
+		}
+		dir = filepath.Join(home, ".config")
+	}
+	data, err := os.ReadFile(filepath.Join(dir, "mcp-agent-mail", "config.env"))
+	if err != nil {
+		return ""
+	}
+	return dotenvValue(string(data), "HTTP_BEARER_TOKEN")
+}
+
+// dotenvValue returns key's value from dotenv text, following am's config.env
+// grammar as far as a token needs: blank and # lines skipped, an `export `
+// prefix allowed, the first '=' splits, a '#' outside quotes that starts the
+// value or follows whitespace begins a comment, one pair of surrounding quotes
+// is removed, and the last assignment wins. am also unescapes backslashes in
+// double quotes and joins adjacent quoted segments; tokens use neither.
+func dotenvValue(contents, key string) string {
+	value := ""
+	for _, line := range strings.Split(contents, "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		line = strings.TrimPrefix(line, "export ")
+		k, v, ok := strings.Cut(line, "=")
+		if !ok || strings.TrimSpace(k) != key {
+			continue
+		}
+		v = stripDotenvComment(strings.TrimSpace(v))
+		if len(v) >= 2 && (v[0] == '"' || v[0] == '\'') && v[len(v)-1] == v[0] {
+			v = v[1 : len(v)-1]
+		}
+		value = v
+	}
+	return value
+}
+
+// stripDotenvComment cuts an inline comment from a dotenv value: a '#' outside
+// quotes at the start of the value or after whitespace.
+func stripDotenvComment(v string) string {
+	var quote byte
+	for i := 0; i < len(v); i++ {
+		switch c := v[i]; {
+		case quote != 0:
+			if c == quote {
+				quote = 0
+			}
+		case c == '"' || c == '\'':
+			quote = c
+		case c == '#' && (i == 0 || v[i-1] == ' ' || v[i-1] == '\t'):
+			return strings.TrimRight(v[:i], " \t")
+		}
+	}
+	return v
+}
+
 // WithToken sets the bearer token for authentication.
 func WithToken(token string) Option {
 	return func(c *Client) {
@@ -276,7 +345,28 @@ func NewClient(opts ...Option) *Client {
 		opt(c)
 	}
 
+	// With no token configured, a local server gets the token `am` set it up
+	// with. Never a remote one: that token is a credential for this machine's
+	// server only.
+	if c.bearerToken == "" && isLoopbackURL(c.baseURL) {
+		c.bearerToken = amConfigToken()
+	}
+
 	return c
+}
+
+// isLoopbackURL reports whether rawURL names localhost or a loopback IP.
+func isLoopbackURL(rawURL string) bool {
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		return false
+	}
+	host := u.Hostname()
+	if strings.EqualFold(host, "localhost") {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
 }
 
 // IsAvailable checks if the Agent Mail server is reachable.
