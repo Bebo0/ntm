@@ -59,6 +59,7 @@ func (c *Checkpoint) verifyWithDir(storage *Storage, dir string) *IntegrityResul
 
 	c.validateSchema(result)
 	c.checkFiles(storage, dir, result)
+	c.checkArtifactChecksums(dir, result)
 	c.validateConsistency(result)
 
 	result.Valid = result.SchemaValid && result.FilesPresent && result.ConsistencyValid

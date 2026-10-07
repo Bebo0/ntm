@@ -39,6 +39,10 @@ type Checkpoint struct {
 	// PaneCount is the number of panes captured
 	PaneCount int `json:"pane_count"`
 
+	// ArtifactIntegrity fingerprints all referenced payloads. Nil means an older
+	// checkpoint with no recorded checksums, not a verified empty manifest.
+	ArtifactIntegrity *ArtifactIntegrity `json:"artifact_integrity,omitempty"`
+
 	// Assignments contains bead-to-agent assignment state at checkpoint time (bd-32ck)
 	// This field is optional for backward compatibility with older checkpoints.
 	Assignments []AssignmentSnapshot `json:"assignments,omitempty"`

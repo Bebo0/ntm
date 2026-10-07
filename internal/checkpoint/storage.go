@@ -316,6 +316,12 @@ func (s *Storage) Save(cp *Checkpoint) error {
 		previousArtifacts = resolveCheckpointArtifactPathSetBestEffort(dir, existing)
 	}
 
+	// Seal new payloads before publishing metadata. Existing fingerprints must
+	// still match so a metadata-only update cannot bless corrupted content.
+	if err := cp.recordArtifactChecksums(dir); err != nil {
+		return fmt.Errorf("recording checkpoint artifact checksums: %w", err)
+	}
+
 	// Save metadata
 	metaPath := filepath.Join(dir, MetadataFile)
 	if err := writeJSON(metaPath, cp); err != nil {
