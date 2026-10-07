@@ -90,6 +90,119 @@ func TestRobotForegroundPipelineHasExternalCancellation(t *testing.T) {
 	}
 }
 
+// A killed executor cannot run its defers: its shell group survives while the
+// kernel releases RunControl. Exercise the robot launcher and real detached
+// resume worker, so an in-memory guard or a lock-only fix cannot pass.
+func TestRobotPipelineCrashRequiresExplicitCommandReplay(t *testing.T) {
+	root := t.TempDir()
+	command := "printf 'attempt\\n' >> attempts; i=0; while [ ! -f release ] && [ \"$i\" -lt 1000 ]; do i=$((i+1)); sleep 0.01; done; printf 'finished\\n' >> finished; printf recovered"
+	raw := fmt.Sprintf("schema_version: \"2.0\"\nname: command-crash\nsteps:\n  - id: command\n    command: %q\n", command)
+	if err := os.WriteFile(filepath.Join(root, "workflow.yaml"), []byte(raw), 0600); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 25*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, os.Args[0], "-test.run=^TestControlledForegroundProcess$", "--", "foreground", root)
+	cmd.Dir = root
+	logFile, err := os.CreateTemp(t.TempDir(), "crash-log-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer logFile.Close()
+	cmd.Stdout, cmd.Stderr = logFile, logFile
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan error, 1)
+	go func() { done <- cmd.Wait() }()
+	t.Cleanup(func() {
+		_ = os.WriteFile(filepath.Join(root, "release"), []byte("release"), 0600)
+		cancel()
+		deadline := time.Now().Add(2 * time.Second)
+		for time.Now().Before(deadline) {
+			if _, err := os.Stat(filepath.Join(root, "finished")); err == nil {
+				break
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+	})
+	var prior *ExecutionState
+	deadline := time.Now().Add(5 * time.Second)
+	for prior == nil && time.Now().Before(deadline) {
+		entries, _ := os.ReadDir(pipelineStateDir(root))
+		for _, entry := range entries {
+			if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".json") {
+				continue
+			}
+			st, err := LoadState(root, strings.TrimSuffix(entry.Name(), ".json"))
+			if err == nil && st.Status == StatusRunning && st.InFlightSteps["command"].Kind == StepKindCommand {
+				if data, err := os.ReadFile(filepath.Join(root, "attempts")); err == nil && string(data) == "attempt\n" {
+					prior = st
+					break
+				}
+			}
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if prior == nil {
+		t.Fatal("robot pipeline never durably launched its command")
+	}
+	if err := cmd.Process.Kill(); err != nil { // Kill only the executor, not its command group.
+		t.Fatal(err)
+	}
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatal("hard-killed robot pipeline exited successfully")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("hard-killed robot process did not exit")
+	}
+	before, err := os.ReadFile(pipelineStatePath(root, prior.RunID))
+	if err != nil {
+		t.Fatal(err)
+	}
+	worker := func(project, id string) (*exec.Cmd, error) {
+		return exec.Command(os.Args[0], "-test.run=^TestBackgroundProcess$", "--", "__pipeline-worker", project, id), nil
+	}
+	if _, err := startDetachedResume(ctx, root, prior.RunID, "", ResumeOptions{}, worker); err == nil || !strings.Contains(err.Error(), "unresolved launch") || !strings.Contains(err.Error(), "may still be running") {
+		t.Fatalf("ordinary resume did not reject the ambiguous command: %v", err)
+	}
+	after, err := os.ReadFile(pipelineStatePath(root, prior.RunID))
+	if err != nil || string(before) != string(after) {
+		t.Fatal("rejected recovery rewrote the command's durable evidence")
+	}
+	if data, err := os.ReadFile(filepath.Join(root, "attempts")); err != nil || string(data) != "attempt\n" {
+		t.Fatalf("ordinary resume repeated the external side effect: %q %v", data, err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "release"), []byte("release"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	deadline = time.Now().Add(3 * time.Second)
+	finished := false
+	for time.Now().Before(deadline) {
+		if data, err := os.ReadFile(filepath.Join(root, "finished")); err == nil && string(data) == "finished\n" {
+			finished = true
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if !finished {
+		t.Fatal("original command did not survive the executor crash and finish its side effects")
+	}
+	// Only after settling the old work do we deliberately authorize repetition.
+	if _, err := startDetachedResume(ctx, root, prior.RunID, "", ResumeOptions{Mode: ResumeModeRestartFailed}, worker); err != nil {
+		t.Fatalf("explicit replay did not start: %v", err)
+	}
+	final := awaitBackgroundState(t, root, prior.RunID, StatusCompleted)
+	if data, err := os.ReadFile(filepath.Join(root, "attempts")); err != nil || string(data) != "attempt\nattempt\n" {
+		t.Fatalf("explicit replay did not run exactly once: %q %v", data, err)
+	}
+	if final.Steps["command"].Output != "recovered" {
+		t.Fatalf("explicit replay lost its durable result: %+v", final)
+	}
+}
+
 func TestControlledRunRejectsOwnedAndExistingIdentities(t *testing.T) {
 	for _, held := range []bool{true, false} {
 		t.Run(fmt.Sprintf("owned=%v", held), func(t *testing.T) {

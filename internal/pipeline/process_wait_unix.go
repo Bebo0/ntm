@@ -4,6 +4,7 @@ package pipeline
 
 import (
 	"context"
+	"errors"
 	"os/exec"
 	"syscall"
 	"time"
@@ -16,14 +17,14 @@ func waitCommandWithProcessGroupCleanup(ctx context.Context, cmd *exec.Cmd) comm
 	go func() { done <- cmd.Wait() }()
 	select {
 	case err := <-done:
-		return commandCleanupResult{Err: err}
+		return commandCleanupResult{Err: err, Settled: errors.Is(syscall.Kill(-cmd.Process.Pid, 0), syscall.ESRCH)}
 	case <-ctx.Done():
 		select {
 		case err := <-done:
 			if err == nil {
 				err = ctx.Err()
 			}
-			return commandCleanupResult{Cancelled: true, Err: err}
+			return commandCleanupResult{Cancelled: true, Err: err, Settled: errors.Is(syscall.Kill(-cmd.Process.Pid, 0), syscall.ESRCH)}
 		default:
 		}
 		result := commandCleanupResult{Cancelled: true, SignalSent: "SIGTERM"}
@@ -44,6 +45,7 @@ func waitCommandWithProcessGroupCleanup(ctx context.Context, cmd *exec.Cmd) comm
 		if result.Err == nil {
 			result.Err = ctx.Err()
 		}
+		result.Settled = errors.Is(syscall.Kill(-cmd.Process.Pid, 0), syscall.ESRCH)
 		return result
 	}
 }

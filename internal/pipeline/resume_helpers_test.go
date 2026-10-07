@@ -215,7 +215,7 @@ func TestResumeAgentDeliveryCannotMoveSessionsWithoutReset(t *testing.T) {
 	}
 }
 
-func TestResumeLegacyAgentLeafRequiresExplicitRestart(t *testing.T) {
+func TestResumeLegacyExternalLeafRequiresExplicitRestart(t *testing.T) {
 	workflow := &Workflow{Name: "legacy", Steps: []Step{
 		{ID: "prompt", Prompt: "review"},
 		{ID: "template", Template: "review"},
@@ -231,11 +231,15 @@ func TestResumeLegacyAgentLeafRequiresExplicitRestart(t *testing.T) {
 					Session: "resume-session", Steps: map[string]StepResult{stepID: {StepID: stepID, Status: StatusRunning}},
 				}
 				err := executor.applyResumeOptions(workflow, ResumeOptions{Mode: mode})
-				wantErr := mode == ResumeModeContinue && stepID != "command"
+				wantErr := mode == ResumeModeContinue
 				if (err != nil) != wantErr {
 					t.Fatalf("mode %s error = %v, want error %t", mode, err, wantErr)
 				}
-				if wantErr && !strings.Contains(err.Error(), "no durable delivery evidence") {
+				diagnosis := "no durable delivery evidence"
+				if stepID == "command" {
+					diagnosis = "unresolved launch"
+				}
+				if wantErr && !strings.Contains(err.Error(), diagnosis) {
 					t.Fatalf("missing recovery diagnosis: %v", err)
 				}
 			}

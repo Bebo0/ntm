@@ -1000,6 +1000,11 @@ func (e *Executor) executeStep(ctx context.Context, step *Step, workflow *Workfl
 			// cannot resolve this uncertainty by submitting the request again.
 			break
 		}
+		if command, ok := e.loadCommandExecution(step.ID); ok && command.Status != commandExecutionSettled {
+			// No retry may start another process while the original command
+			// group has an unresolved outcome.
+			break
+		}
 
 		if attempt < maxAttempts {
 			// Wait before retry
@@ -1212,12 +1217,38 @@ func stepRuntimeError(step *Step, kind, typ, reason, hint, details string) *Step
 }
 
 // executeCommand runs a shell command step via /bin/sh -c.
-func (e *Executor) executeCommand(ctx context.Context, step *Step, workflow *Workflow) StepResult {
-	result := StepResult{
+func (e *Executor) executeCommand(ctx context.Context, step *Step, workflow *Workflow) (result StepResult) {
+	result = StepResult{
 		StepID:    step.ID,
 		Status:    StatusRunning,
 		StartedAt: time.Now(),
 		AgentType: "command",
+	}
+	stepHash, err := commandDefinitionHash(step)
+	if err != nil {
+		result.Status, result.FinishedAt = StatusFailed, time.Now()
+		result.Error = stepRuntimeError(step, StepKindCommand, "recovery", err.Error(), "inspect the command definition", "")
+		return result
+	}
+	if prior, ok := e.loadCommandExecution(step.ID); ok && !e.config.DryRun {
+		if err := validateCommandExecution(step.ID, prior); err != nil {
+			result.Status, result.FinishedAt = StatusFailed, time.Now()
+			result.Error = stepRuntimeError(step, StepKindCommand, "recovery", err.Error(), "inspect the saved command execution", "")
+			return result
+		}
+		if prior.StepHash != stepHash {
+			result.Status, result.FinishedAt = StatusFailed, time.Now()
+			result.Error = stepRuntimeError(step, StepKindCommand, "recovery", "saved command execution belongs to a different step definition", "use an explicit reset before changing a previously dispatched command", "")
+			return result
+		}
+		if prior.Status != commandExecutionSettled {
+			result.Status, result.FinishedAt = StatusFailed, time.Now()
+			result.Error = stepRuntimeError(step, StepKindCommand, "execution_unknown", uncertainCommandExecutionError(step.ID, prior.ProcessID).Error(), "inspect the saved command execution before deliberately replaying it", "")
+			return result
+		}
+		if prior.Result.Status == StatusCompleted && !prior.Result.RerunOnResume {
+			return prior.Result
+		}
 	}
 
 	// bd-2xka8: bind pane metadata before substitution so ${pane.X} in the
@@ -1369,6 +1400,39 @@ func (e *Executor) executeCommand(ctx context.Context, step *Step, workflow *Wor
 	if e.stopBeforeDispatch(cmdCtx, &result) {
 		return result
 	}
+	record := CommandExecutionState{
+		Version: commandExecutionVersion, StepID: step.ID, StepHash: stepHash,
+		Status: commandExecutionStarting, Background: waitCondition == WaitNone,
+		StartedAt: result.StartedAt,
+	}
+	// Explicit bounded on_cancel cleanup is allowed after storage failure
+	// (checkpointCleanupKey). Preserve that existing best-effort release path;
+	// ordinary command dispatch always requires a durable launch intent.
+	cleanupAfterCheckpointFailure, _ := ctx.Value(checkpointCleanupKey{}).(bool)
+	journalCommand := !(cleanupAfterCheckpointFailure && e.checkpointFailure() != nil)
+	if journalCommand {
+		if err := e.saveCommandExecution(record); err != nil {
+			result.Status, result.FinishedAt = StatusFailed, time.Now()
+			result.Error = stepRuntimeError(step, StepKindCommand, "checkpoint", err.Error(), "restore durable storage before retrying", "")
+			return result
+		}
+	}
+	// Before Start there can be no command process. After Start only the
+	// owned process-group waiter can prove settlement. Persist that proof
+	// before executeStep clears scheduler bookkeeping or another worker saves.
+	commandSettled := true
+	defer func() {
+		if !commandSettled || !journalCommand {
+			return
+		}
+		record.Status, record.SettledAt, record.Result = commandExecutionSettled, time.Now(), result
+		// A failed save stops the workflow through its sticky checkpoint error,
+		// while retaining the actual command outcome in the returned state.
+		_ = e.saveCommandExecution(record)
+	}()
+	if e.stopBeforeDispatch(cmdCtx, &result) {
+		return result
+	}
 	if err := cmd.Start(); err != nil {
 		result.Status = StatusFailed
 		result.Error = stepRuntimeError(step, "command", "command",
@@ -1383,15 +1447,41 @@ func (e *Executor) executeCommand(ctx context.Context, step *Step, workflow *Wor
 		)
 		return result
 	}
+	commandSettled = false
+	record.Status, record.ProcessID = commandExecutionRunning, cmd.Process.Pid
+	if journalCommand {
+		if err := e.saveCommandExecution(record); err != nil {
+			cmdCancel()
+			cleanup := waitCommandWithProcessGroupCleanup(cmdCtx, cmd)
+			commandSettled = cleanup.Settled
+			result.Status, result.FinishedAt = StatusFailed, time.Now()
+			result.Error = stepRuntimeError(step, StepKindCommand, "checkpoint", err.Error(), "inspect the command group and restore durable storage before retrying", "")
+			return result
+		}
+	}
 
 	if waitCondition == WaitNone {
 		startedAt := result.StartedAt
 		stepID := step.ID
 		workflowName := workflow.Name
+		backgroundRecord := record
 		e.backgroundCommandWG.Add(1)
 		go func() {
 			defer e.backgroundCommandWG.Done()
 			cleanup := waitCommandWithProcessGroupCleanup(ctx, cmd)
+			if cleanup.Settled && journalCommand {
+				finished := time.Now()
+				backgroundRecord.Status, backgroundRecord.SettledAt = commandExecutionSettled, finished
+				backgroundRecord.Result = StepResult{StepID: stepID, AgentType: "command", Status: StatusCompleted, StartedAt: startedAt, FinishedAt: finished}
+				if cleanup.Cancelled || cleanup.Err != nil {
+					backgroundRecord.Result.Status = StatusFailed
+					if cleanup.Cancelled {
+						backgroundRecord.Result.Status = StatusCancelled
+					}
+					backgroundRecord.Result.RerunOnResume = true
+				}
+				_ = e.saveCommandExecution(backgroundRecord) // Sticky checkpoint failure cancels the run.
+			}
 			if !cleanup.Cancelled {
 				return
 			}
@@ -1453,6 +1543,7 @@ func (e *Executor) executeCommand(ctx context.Context, step *Step, workflow *Wor
 	}()
 
 	cleanup := waitCommandWithProcessGroupCleanup(cmdCtx, cmd)
+	commandSettled = cleanup.Settled
 	close(heartbeatDone)
 	// bd-48ckr: wait for the heartbeat goroutine to fully exit before
 	// returning so test-injected mutations (commandHeartbeatInterval,
@@ -1460,6 +1551,9 @@ func (e *Executor) executeCommand(ctx context.Context, step *Step, workflow *Wor
 	// final select-loop iteration.
 	<-heartbeatExited
 	waitErr := cleanup.Err
+	if !cleanup.Settled {
+		waitErr = errors.Join(waitErr, uncertainCommandExecutionError(step.ID, record.ProcessID))
+	}
 
 	output := strings.TrimSpace(stdoutBuf.String())
 	if cleanup.Cancelled {
@@ -3385,6 +3479,13 @@ func (e *Executor) applyResumeState() {
 	}
 	runID := e.state.RunID
 	workflowID := e.state.WorkflowID
+	for stepID, record := range e.state.CommandExecutions {
+		if record.Status == commandExecutionSettled && record.Background && record.Result.RerunOnResume {
+			result := e.state.Steps[stepID]
+			result.StepID, result.RerunOnResume = stepID, true
+			e.state.Steps[stepID] = result
+		}
+	}
 	for stepID, result := range e.state.Steps {
 		if shouldRerunStep(result) {
 			rerunStepIDs = append(rerunStepIDs, stepID)
@@ -3562,6 +3663,12 @@ func (e *Executor) snapshotState() *ExecutionState {
 	}
 	if e.state.AgentDeliveries != nil {
 		snapshot.AgentDeliveries = maps.Clone(e.state.AgentDeliveries)
+	}
+	if e.state.CommandExecutions != nil {
+		snapshot.CommandExecutions = make(map[string]CommandExecutionState, len(e.state.CommandExecutions))
+		for key, record := range e.state.CommandExecutions {
+			snapshot.CommandExecutions[key] = cloneCommandExecution(record)
+		}
 	}
 	e.stateMu.RUnlock()
 

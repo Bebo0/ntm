@@ -89,7 +89,10 @@ func TestCheckpointFailureCancelsAndJoinsRunningSibling(t *testing.T) {
 		OnError: ErrorActionContinue, Limits: LimitsConfig{MaxParallelSteps: 2},
 	}, Steps: []Step{
 		{ID: "sibling", Command: "trap 'printf stopped > stopped; exit 0' TERM; printf ready > ready; while :; do sleep 0.02; done"},
-		{ID: "break-storage", Command: "while [ ! -f ready ]; do sleep 0.01; done; mv .ntm/pipelines/run-checkpoint.json .ntm/pipelines/previous.json.saved; mkdir .ntm/pipelines/run-checkpoint.json"},
+		// A launch checkpoint can recreate the state file between mv and
+		// mkdir. Keep installing the directory fault until it really exists;
+		// the original assertions still require prompt cancellation and join.
+		{ID: "break-storage", Command: "while [ ! -f ready ]; do sleep 0.01; done; while [ ! -d .ntm/pipelines/run-checkpoint.json ]; do mv .ntm/pipelines/run-checkpoint.json .ntm/pipelines/previous.json.saved; mkdir .ntm/pipelines/run-checkpoint.json 2>/dev/null || :; done"},
 	}}
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()

@@ -21,6 +21,7 @@ type commandCleanupResult struct {
 	Err        error
 	Cancelled  bool
 	SignalSent string
+	Settled    bool // The owned command group no longer has executing members.
 }
 
 func configureCommandProcessGroup(cmd *exec.Cmd) {

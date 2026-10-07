@@ -62,7 +62,7 @@ func waitCommandWithProcessGroupCleanup(ctx context.Context, cmd *exec.Cmd) comm
 				if errors.Is(err, os.ErrProcessDone) {
 					err = nil
 				}
-				return commandCleanupResult{Err: errors.Join(err, cmd.Wait())}
+				return commandCleanupResult{Err: errors.Join(err, cmd.Wait()), Settled: err == nil}
 			}
 		}
 	case <-ctx.Done():
@@ -104,6 +104,7 @@ func waitCommandWithProcessGroupCleanup(ctx context.Context, cmd *exec.Cmd) comm
 		observationErr = nil
 	}
 	result.Err = errors.Join(result.Err, ctx.Err(), observationErr, cmd.Wait())
+	result.Settled = quietErr == nil && observationErr == nil
 	return result
 }
 

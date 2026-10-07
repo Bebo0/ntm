@@ -634,10 +634,13 @@ Pipeline state is persisted to .ntm/pipelines/<run-id>.json after each step.
 Confirmed prompt/template deliveries resume observation of the original physical
 pane and process, without sending again. Saved completed responses are reused.
 Unknown delivery outcomes, replaced panes, and lost output boundaries require
-operator inspection. Command steps retain their existing rerun semantics.
+operator inspection. Commands with durable settled outcomes retain ordinary
+retry behavior. A command interrupted by a worker crash is never automatically
+repeated: its process group may still be running or have performed side effects.
 
-After inspection, --mode=restart-failed deliberately resubmits failed or
-interrupted agent steps; --keep-state=false repeats the entire workflow.
+After inspection and stopping any surviving command processes,
+--mode=restart-failed deliberately repeats failed or interrupted steps;
+--keep-state=false repeats the entire workflow.
 --mode=force-iter deliberately repeats the selected iteration and later ones.
 These explicit restart choices may repeat side effects.
 

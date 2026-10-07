@@ -1375,12 +1375,13 @@ type ExecutionState struct {
 
 	// Phase-B resume metadata. This is ntm's internal persisted execution
 	// format and may change between pipeline schema revisions.
-	LastCheckpointAt time.Time                        `json:"last_checkpoint_at,omitempty"`
-	ForeachState     map[string]ForeachIterationState `json:"foreach_state,omitempty"`
-	ParallelState    map[string]ParallelGroupState    `json:"parallel_state,omitempty"`
-	ScopeStack       []ScopeFrame                     `json:"scope_stack,omitempty"`
-	InFlightSteps    map[string]InFlightStepState     `json:"in_flight_steps,omitempty"`
-	AgentDeliveries  map[string]AgentDeliveryState    `json:"agent_deliveries,omitempty"`
+	LastCheckpointAt  time.Time                        `json:"last_checkpoint_at,omitempty"`
+	ForeachState      map[string]ForeachIterationState `json:"foreach_state,omitempty"`
+	ParallelState     map[string]ParallelGroupState    `json:"parallel_state,omitempty"`
+	ScopeStack        []ScopeFrame                     `json:"scope_stack,omitempty"`
+	InFlightSteps     map[string]InFlightStepState     `json:"in_flight_steps,omitempty"`
+	AgentDeliveries   map[string]AgentDeliveryState    `json:"agent_deliveries,omitempty"`
+	CommandExecutions map[string]CommandExecutionState `json:"command_executions,omitempty"`
 
 	// OutputValidation records the post-run check of Workflow.Outputs (bd-3uqce).
 	// nil when the workflow declared no outputs or validation was skipped (e.g.

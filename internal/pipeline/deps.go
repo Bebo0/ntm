@@ -460,6 +460,18 @@ func (g *DependencyGraph) ResolveScopedRuntimeStep(id string) (*Step, string, bo
 // completed outputs and prevents the legacy agent-delivery guard from knowing
 // that an unfinished prompt could already have reached its pane.
 func resolveScopedRuntimeChildren(parentID, runtimeID string, parent *Step) (*Step, string, bool) {
+	for i := range parent.OnSuccess {
+		child := &parent.OnSuccess[i]
+		childID := onSuccessChildStepID(parentID, child.ID, i+1)
+		if runtimeID == childID {
+			return child, child.ID, true
+		}
+		if strings.HasPrefix(runtimeID, childID+"_") || strings.HasPrefix(runtimeID, childID+".") {
+			if nested, canonical, ok := resolveScopedRuntimeChildren(childID, runtimeID, child); ok {
+				return nested, canonical, true
+			}
+		}
+	}
 	if child, canonicalID, ok := resolveScopedRuntimeStepFromSteps(parentID, runtimeID, parent.Parallel.Steps); ok {
 		return child, canonicalID, true
 	}
