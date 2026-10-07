@@ -4933,7 +4933,7 @@ func init() {
 
 	rootCmd.Flags().StringVar(&robotMetrics, "robot-metrics", "", "Session metrics export. Optional SESSION. Example: ntm --robot-metrics=myproject --period=24h")
 	rootCmd.Flags().Lookup("robot-metrics").NoOptDefVal = "__present__"
-	rootCmd.Flags().StringVar(&robotMetricsPeriod, "metrics-period", "24h", "Period: 1h, 24h, 7d, all. Optional with --robot-metrics. Example: --metrics-period=7d")
+	rootCmd.Flags().StringVar(&robotMetricsPeriod, "metrics-period", "24h", "Period bounding prompt, crash and restart counts: 1h, 24h, 7d, all (any duration). Optional with --robot-metrics. Example: --metrics-period=7d")
 	rootCmd.Flags().BoolVar(&robotDiskAttribution, "disk-attribution", false, "Include per-pane build-dir disk sizes (bounded du). Optional with --robot-metrics. Example: ntm --robot-metrics --disk-attribution")
 
 	rootCmd.Flags().StringVar(&robotReplay, "robot-replay", "", "Replay command from history. Required: SESSION. Use with --id. Example: ntm --robot-replay=myproject --id=1735830245123-a1b2c3d4")
@@ -5109,7 +5109,7 @@ func init() {
 	rootCmd.Flags().BoolVar(&robotInspectCode, "code", false, "Parse code blocks from output")
 
 	// --period for metrics
-	rootCmd.Flags().StringVar(&robotMetricsPeriod, "period", "24h", "Time period: 1h, 24h, 7d, all")
+	rootCmd.Flags().StringVar(&robotMetricsPeriod, "period", "24h", "Period bounding --robot-metrics prompt, crash and restart counts: 1h, 24h, 7d, all (any duration)")
 
 	// --severity, --status, --priority, --assignee for alerts/beads
 	rootCmd.Flags().StringVar(&robotAlertsSeverity, "severity", "", "Filter by severity: info, warning, error, critical")

@@ -11,7 +11,6 @@ import (
 	"time"
 
 	"github.com/Dicklesworthstone/ntm/internal/agent"
-	"github.com/Dicklesworthstone/ntm/internal/process"
 	statuspkg "github.com/Dicklesworthstone/ntm/internal/status"
 	"github.com/Dicklesworthstone/ntm/internal/tmux"
 )
@@ -631,17 +630,13 @@ func paneWorkStatusFromObservation(observation statuspkg.PaneObservation) PaneWo
 		ObservationError:      observation.Current.Error,
 		SafeToDispatch:        observation.SafeToDispatch(),
 	}
-	// Pane age comes from the shell PID's process start time: tmux has no
-	// per-pane creation-time format variable, and the shell PID is replaced
-	// on respawn — exactly the "current incarnation" semantics age-based
-	// replacement policies need (ntm-qvpm). Best-effort: a vanished PID
-	// simply omits the fields.
-	if pid := observation.Metadata.PID; pid > 0 {
-		if startedAt, err := process.StartTime(pid); err == nil {
-			result.PaneStartedAt = FormatTimestamp(startedAt)
-			if uptime := int64(time.Since(startedAt).Seconds()); uptime > 0 {
-				result.AgentUptimeSeconds = uptime
-			}
+	// Pane age is the current shell incarnation's (PaneStartedAt) — exactly
+	// the semantics age-based replacement policies need (ntm-qvpm).
+	// Best-effort: a vanished PID simply omits the fields.
+	if startedAt, ok := PaneStartedAt(observation.Metadata.PID); ok {
+		result.PaneStartedAt = FormatTimestamp(startedAt)
+		if uptime := int64(time.Since(startedAt).Seconds()); uptime > 0 {
+			result.AgentUptimeSeconds = uptime
 		}
 	}
 	if strings.TrimSpace(observation.Metadata.ID) != "" {

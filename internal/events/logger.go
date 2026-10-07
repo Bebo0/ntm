@@ -2,6 +2,7 @@ package events
 
 import (
 	"bufio"
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -480,6 +481,49 @@ func EmitPromptSend(session string, targetCount, promptLength int, template, tar
 // Unlike Replay this never opens the log for writing, so callers that only
 // display events do not create the log file or its directory as a side effect.
 func ReadSince(path string, since time.Time) ([]Event, error) {
+	return readLogSince(path, since, nil)
+}
+
+// ReadTypesSince is ReadSince restricted to the given event types. The log
+// holds a month of prompt traffic, so a reader after a few rare types (the
+// session monitor's agent_crash and agent_restart records) skips every
+// plaintext line naming none of them before decoding it.
+func ReadTypesSince(path string, since time.Time, types ...EventType) ([]Event, error) {
+	if len(types) == 0 {
+		return []Event{}, nil
+	}
+	markers := make([][]byte, 0, len(types))
+	wanted := make(map[EventType]struct{}, len(types))
+	for _, eventType := range types {
+		// json.Marshal writes the type field with no whitespace; Log never
+		// re-indents a line.
+		markers = append(markers, []byte(`"type":"`+string(eventType)+`"`))
+		wanted[eventType] = struct{}{}
+	}
+	matches := func(plain []byte) bool {
+		for _, marker := range markers {
+			if bytes.Contains(plain, marker) {
+				return true
+			}
+		}
+		return false
+	}
+	all, err := readLogSince(path, since, matches)
+	if err != nil {
+		return nil, err
+	}
+	result := make([]Event, 0, len(all))
+	for _, event := range all {
+		// The byte prefilter could match a payload that merely quotes a
+		// type; the decoded type is authoritative.
+		if _, ok := wanted[event.Type]; ok {
+			result = append(result, event)
+		}
+	}
+	return result, nil
+}
+
+func readLogSince(path string, since time.Time, keep func(plain []byte) bool) ([]Event, error) {
 	f, err := os.Open(path)
 	if err != nil {
 		return nil, err
@@ -492,13 +536,14 @@ func ReadSince(path string, since time.Time) ([]Event, error) {
 	if !info.Mode().IsRegular() {
 		return nil, fmt.Errorf("event log must be a regular file")
 	}
-	return readEventSnapshot(f, info.Size(), path, since)
+	return readEventSnapshot(f, info.Size(), path, since, keep)
 }
 
 // Bound each read to the observed file size. An active swarm can append
 // indefinitely; a history query must not chase a moving EOF. Later appends
 // belong to the next query, and replacement leaves this descriptor intact.
-func readEventSnapshot(src io.ReaderAt, size int64, path string, since time.Time) ([]Event, error) {
+// Only the (decrypted) lines keep accepts are decoded; nil keeps every line.
+func readEventSnapshot(src io.ReaderAt, size int64, path string, since time.Time, keep func(plain []byte) bool) ([]Event, error) {
 	scanner := bufio.NewScanner(io.NewSectionReader(src, 0, size))
 	scanner.Buffer(make([]byte, 64*1024), maxEventLineBytes)
 
@@ -512,6 +557,9 @@ func readEventSnapshot(src io.ReaderAt, size int64, path string, since time.Time
 		plain, err := decryptJSONLine(line)
 		if err != nil {
 			slog.Warn("event read: skipping unreadable line", "path", path, "error", err)
+			continue
+		}
+		if keep != nil && !keep(plain) {
 			continue
 		}
 

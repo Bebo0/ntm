@@ -107,14 +107,14 @@ func TestReadEventSnapshotExcludesLaterAppends(t *testing.T) {
 		t.Fatal(err)
 	}
 	appendSharedLogEvent(t, l, "after-snapshot")
-	got, err := readEventSnapshot(src, info.Size(), path, time.Time{})
+	got, err := readEventSnapshot(src, info.Size(), path, time.Time{}, nil)
 	if err != nil || len(got) != 1 || got[0].Session != "at-snapshot" {
 		t.Fatalf("snapshot chased a moving EOF: %v err=%v", got, err)
 	}
 	if err := l.rotateOldEntries(); err != nil {
 		t.Fatal(err)
 	}
-	got, err = readEventSnapshot(src, info.Size(), path, time.Time{})
+	got, err = readEventSnapshot(src, info.Size(), path, time.Time{}, nil)
 	if err != nil || len(got) != 1 || got[0].Session != "at-snapshot" {
 		t.Fatalf("rotation invalidated an open read snapshot: %v err=%v", got, err)
 	}
@@ -139,7 +139,7 @@ func TestReadEventSnapshotLeavesPartialRecordForNextRead(t *testing.T) {
 	defer src.Close()
 	// A reader can observe the size in the middle of another process's write.
 	// Do not read beyond its boundary to guess at the rest of the record.
-	got, err := readEventSnapshot(src, info.Size()+12, path, time.Time{})
+	got, err := readEventSnapshot(src, info.Size()+12, path, time.Time{}, nil)
 	if err != nil || len(got) != 1 || got[0].Session != "before" {
 		t.Fatalf("partial snapshot fabricated a completed record: %v err=%v", got, err)
 	}

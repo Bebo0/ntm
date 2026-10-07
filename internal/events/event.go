@@ -95,6 +95,21 @@ type AgentSpawnData struct {
 	PaneIndex int    `json:"pane_index,omitempty"`
 }
 
+// AgentLifecycleData contains data for agent_crash and agent_restart events:
+// what the session monitor saw happen to one agent pane. PaneID is the tmux
+// pane ID (%N), the identity readers attribute the event by; PaneIndex is
+// informational, since an index can be reused when panes are renumbered.
+type AgentLifecycleData struct {
+	PaneID    string `json:"pane_id"`
+	PaneIndex int    `json:"pane_index"`
+	AgentType string `json:"agent_type,omitempty"`
+	// Reason is why the monitor considered the agent crashed (agent_crash).
+	Reason string `json:"reason,omitempty"`
+	// RestartCount is the monitor's running restart count for the pane after
+	// this restart (agent_restart).
+	RestartCount int `json:"restart_count,omitempty"`
+}
+
 // PromptSendData contains data for prompt_send events.
 type PromptSendData struct {
 	TargetCount     int    `json:"target_count"`
@@ -145,6 +160,19 @@ func ToMap(v interface{}) map[string]interface{} {
 			"variant":    d.Variant,
 			"pane_index": d.PaneIndex,
 		}
+	case AgentLifecycleData:
+		data := map[string]interface{}{
+			"pane_id":    d.PaneID,
+			"pane_index": d.PaneIndex,
+			"agent_type": d.AgentType,
+		}
+		if d.Reason != "" {
+			data["reason"] = d.Reason
+		}
+		if d.RestartCount > 0 {
+			data["restart_count"] = d.RestartCount
+		}
+		return data
 	case PromptSendData:
 		return map[string]interface{}{
 			"target_count":     d.TargetCount,

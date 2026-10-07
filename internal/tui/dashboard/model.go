@@ -45,8 +45,8 @@ type RoutingScore struct {
 type PaneHealthInfo struct {
 	Status       string   // "ok", "warning", "error", "unknown"
 	Issues       []string // Issue messages
-	RestartCount int      // Restarts in last hour
-	Uptime       int      // Seconds of uptime
+	RestartCount int      // Automatic restarts the session monitor recorded in the last hour
+	Uptime       int      // Seconds since the pane's shell incarnation started (0 = unknown)
 }
 
 // PanelID identifies a dashboard panel.
@@ -494,7 +494,7 @@ type PaneStatus struct {
 	HealthStatus  string   // "ok", "warning", "error", "unknown"
 	HealthIssues  []string // List of issue messages (rate limit, crash, etc.)
 	RestartCount  int      // Number of restarts in last hour
-	UptimeSeconds int      // Seconds since agent started (negative = uptime from tracker)
+	UptimeSeconds int      // Seconds since the pane's shell incarnation started (0 = unknown)
 
 	// Rotation tracking
 	IsRotating     bool       // True when agent rotation is in progress

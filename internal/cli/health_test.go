@@ -4,13 +4,19 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/Dicklesworthstone/ntm/internal/config"
+	"github.com/Dicklesworthstone/ntm/internal/events"
 	"github.com/Dicklesworthstone/ntm/internal/health"
 	"github.com/Dicklesworthstone/ntm/internal/robot"
+	"github.com/Dicklesworthstone/ntm/internal/tmux"
+	"github.com/Dicklesworthstone/ntm/tests/testutil"
 )
 
 func TestStatusSeverity(t *testing.T) {
@@ -281,6 +287,98 @@ func TestRunHealthOnceJSONSeverityExitLadder(t *testing.T) {
 				t.Fatalf("error = %v, want severity cause", response["error"])
 			}
 		})
+	}
+}
+
+// ntm health read uptime and restarts from an in-memory tracker nothing ever
+// wrote to, so it never showed either. It now reads the pane shell's start
+// time and the session monitor's restart records — the sources
+// --robot-metrics and the dashboard use.
+func TestHealthJSONReportsUptimeAndRecordedRestarts(t *testing.T) {
+	testutil.RequireTmuxThrottled(t)
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	oldJSONOutput, oldHealthWatch, oldPane, oldStatus := jsonOutput, healthWatch, healthPane, healthStatus
+	jsonOutput, healthWatch, healthPane, healthStatus = true, false, "", ""
+	t.Cleanup(func() {
+		jsonOutput, healthWatch, healthPane, healthStatus = oldJSONOutput, oldHealthWatch, oldPane, oldStatus
+	})
+
+	dir := t.TempDir()
+	session := fmt.Sprintf("ntm-health-uptime-%d", time.Now().UnixNano())
+	if err := tmux.CreateSession(session, dir); err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+	t.Cleanup(func() { _ = tmux.KillSession(session) })
+	paneID, err := tmux.DefaultClient.Run("split-window", "-d", "-t", session, "-c", dir, "-P", "-F", "#{pane_id}", "cat")
+	if err != nil {
+		t.Fatalf("create agent pane: %v", err)
+	}
+	paneID = strings.TrimSpace(paneID)
+	if err := tmux.SetPaneTitle(paneID, session+"__cc_1"); err != nil {
+		t.Fatalf("title agent pane: %v", err)
+	}
+
+	// Let the pane's shell age past a whole second so its uptime is nonzero.
+	time.Sleep(1200 * time.Millisecond)
+
+	// Two restarts in this session's life, one from before it existed (a
+	// previous session of the same name), one for another session.
+	now := time.Now()
+	logPath := filepath.Join(home, ".config", "ntm", "analytics", "events.jsonl")
+	if err := os.MkdirAll(filepath.Dir(logPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	var lines strings.Builder
+	for _, record := range []events.Event{
+		{Timestamp: now.Add(-300 * time.Millisecond), Type: events.EventAgentRestart, Session: session, Data: events.ToMap(events.AgentLifecycleData{PaneID: paneID})},
+		{Timestamp: now.Add(-200 * time.Millisecond), Type: events.EventAgentRestart, Session: session, Data: events.ToMap(events.AgentLifecycleData{PaneID: paneID})},
+		{Timestamp: now.Add(-30 * time.Minute), Type: events.EventAgentRestart, Session: session, Data: events.ToMap(events.AgentLifecycleData{PaneID: paneID})},
+		{Timestamp: now.Add(-100 * time.Millisecond), Type: events.EventAgentRestart, Session: "other", Data: events.ToMap(events.AgentLifecycleData{PaneID: paneID})},
+	} {
+		line, err := json.Marshal(record)
+		if err != nil {
+			t.Fatal(err)
+		}
+		lines.Write(line)
+		lines.WriteByte('\n')
+	}
+	if err := os.WriteFile(logPath, []byte(lines.String()), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	stdout, _ := captureStdout(t, func() error { return runHealthOnce(session) })
+
+	var response struct {
+		Agents []health.AgentHealth `json:"agents"`
+	}
+	if err := json.Unmarshal([]byte(stdout), &response); err != nil {
+		t.Fatalf("decode health JSON: %v\n%s", err, stdout)
+	}
+	var agent *health.AgentHealth
+	for i := range response.Agents {
+		if response.Agents[i].PaneID == paneID {
+			agent = &response.Agents[i]
+		}
+	}
+	if agent == nil {
+		t.Fatalf("no health row for %s: %s", paneID, stdout)
+	}
+	if agent.UptimeSeconds < 1 || agent.UptimeSeconds > 120 {
+		t.Errorf("uptime_seconds = %d, want the cat pane's age (1..120s)", agent.UptimeSeconds)
+	}
+	if agent.IdleSeconds < 0 {
+		t.Errorf("idle_seconds = %d: uptime must no longer be smuggled in as a negative idle time", agent.IdleSeconds)
+	}
+	var restartIssue string
+	for _, issue := range agent.Issues {
+		if issue.Type == "restart_count" {
+			restartIssue = issue.Message
+		}
+	}
+	if restartIssue != "2 restarts in last hour" {
+		t.Errorf("restart issue = %q, want %q (issues %+v)", restartIssue, "2 restarts in last hour", agent.Issues)
 	}
 }
 

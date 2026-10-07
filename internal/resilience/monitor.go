@@ -37,7 +37,22 @@ var (
 	displayMessageFn         = tmux.DisplayMessage
 	isChildAliveFn           = process.IsChildAlive
 	findPaneFn               = findPaneInSession
+	// recordLifecycleEventFn appends agent_crash / agent_restart records to
+	// the analytics event log (30-day retention). It is the durable record
+	// of what this monitor saw: the webhook and attention-feed copies of the
+	// same events reach subscribers or expire within the hour, so restart and
+	// crash counts read later (--robot-metrics, ntm health, the dashboard)
+	// come from here.
+	recordLifecycleEventFn = events.Emit
 )
+
+// recordAgentLifecycle durably records one crash or restart for a pane.
+func (m *Monitor) recordAgentLifecycle(eventType events.EventType, data events.AgentLifecycleData) {
+	hooksMu.RLock()
+	record := recordLifecycleEventFn
+	hooksMu.RUnlock()
+	record(eventType, m.session, data)
+}
 
 // findPaneInSession returns the current pane identity, or nil if it has left.
 // Restart key injection must be gated on this: pane IDs are only unique per
@@ -710,6 +725,12 @@ func (m *Monitor) handleCrash(ctx context.Context, agent *AgentState, reason str
 			"reason":      reason,
 		},
 	))
+	m.recordAgentLifecycle(events.EventAgentCrash, events.AgentLifecycleData{
+		PaneID:    agent.PaneID,
+		PaneIndex: agent.PaneIndex,
+		AgentType: agent.AgentType,
+		Reason:    reason,
+	})
 
 	// Snapshot values for async operations
 	session := m.session
@@ -1064,6 +1085,12 @@ func (m *Monitor) restartAgent(ctx context.Context, agent *AgentState) {
 			"restart_count": fmt.Sprintf("%d", finalRestartCount),
 		},
 	))
+	m.recordAgentLifecycle(events.EventAgentRestart, events.AgentLifecycleData{
+		PaneID:       agent.PaneID,
+		PaneIndex:    latestPane.Index,
+		AgentType:    agent.AgentType,
+		RestartCount: finalRestartCount,
+	})
 
 	// Send restart notification
 	if m.notifier != nil {

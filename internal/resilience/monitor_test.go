@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/Dicklesworthstone/ntm/internal/config"
+	"github.com/Dicklesworthstone/ntm/internal/events"
 	"github.com/Dicklesworthstone/ntm/internal/health"
 	"github.com/Dicklesworthstone/ntm/internal/notify"
 	"github.com/Dicklesworthstone/ntm/internal/tmux"
@@ -38,11 +39,15 @@ func saveHooks() func() {
 	origDisplayMessage := displayMessageFn
 	origIsChildAlive := isChildAliveFn
 	origFindPane := findPaneFn
+	origRecordLifecycle := recordLifecycleEventFn
 	// Default for tests: the pane exists. Tests exercising the stale-binding
 	// guard override this explicitly.
 	findPaneFn = func(_ context.Context, _, paneID string) (*tmux.Pane, error) {
 		return &tmux.Pane{ID: paneID, Index: 1}, nil
 	}
+	// Crash/restart fixtures must never append to the developer's real
+	// analytics event log; tests asserting the record install a recorder.
+	recordLifecycleEventFn = func(events.EventType, string, interface{}) {}
 	// Existing fixtures represent legacy sessions with no durable pane option.
 	// Tests for recorded launches provide a physical pane ID and a saved spec.
 	readPaneLaunchSpecFn = func(context.Context, string) (*tmux.AgentLaunchSpec, error) { return nil, nil }
@@ -61,6 +66,7 @@ func saveHooks() func() {
 		displayMessageFn = origDisplayMessage
 		isChildAliveFn = origIsChildAlive
 		findPaneFn = origFindPane
+		recordLifecycleEventFn = origRecordLifecycle
 		hooksMu.Unlock()
 	}
 }
@@ -321,6 +327,92 @@ func TestHandleCrashSchedulesGrokRestart(t *testing.T) {
 	m.mu.RUnlock()
 	if count != 1 {
 		t.Fatalf("Grok crash restart count = %d, want 1", count)
+	}
+}
+
+// A crash and the restart that follows are recorded durably in the analytics
+// event log, attributed to the tmux pane ID: --robot-metrics, ntm health and
+// the dashboard count restarts and crashes from these records, since the
+// webhook and attention-feed copies do not outlive the hour.
+func TestHandleCrashRecordsCrashAndRestartLifecycleEvents(t *testing.T) {
+	restore := saveHooks()
+	defer restore()
+
+	type recorded struct {
+		eventType events.EventType
+		session   string
+		data      events.AgentLifecycleData
+	}
+	var mu sync.Mutex
+	var got []recorded
+	setHooksLocked(func() {
+		buildPaneCmdFn = func(_, agentCmd string) (string, error) { return agentCmd, nil }
+		sendKeysFn = func(context.Context, string, string, bool) error { return nil }
+		sleepFn = func(time.Duration) {}
+		recordLifecycleEventFn = func(eventType events.EventType, session string, data interface{}) {
+			lifecycle, ok := data.(events.AgentLifecycleData)
+			if !ok {
+				t.Errorf("lifecycle record carried %T, want events.AgentLifecycleData", data)
+				return
+			}
+			mu.Lock()
+			defer mu.Unlock()
+			got = append(got, recorded{eventType: eventType, session: session, data: lifecycle})
+		}
+	})
+
+	cfg := config.Default()
+	cfg.Resilience.AutoRestart = true
+	cfg.Resilience.MaxRestarts = 3
+	cfg.Resilience.RestartDelaySeconds = 0
+	m := NewMonitor("metrics-session", "/tmp/project", cfg, true)
+	m.RegisterAgent("%7", 2, 0, "cc", "opus", "claude")
+
+	m.handleCrash(context.Background(), m.agents["%7"], "process exited")
+	m.wg.Wait()
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(got) != 2 {
+		t.Fatalf("recorded %d lifecycle events (%+v), want a crash then a restart", len(got), got)
+	}
+	crash, restart := got[0], got[1]
+	if crash.eventType != events.EventAgentCrash || crash.session != "metrics-session" ||
+		crash.data.PaneID != "%7" || crash.data.AgentType != "cc" || crash.data.Reason != "process exited" {
+		t.Errorf("crash record = %+v", crash)
+	}
+	if restart.eventType != events.EventAgentRestart || restart.session != "metrics-session" ||
+		restart.data.PaneID != "%7" || restart.data.RestartCount != 1 {
+		t.Errorf("restart record = %+v", restart)
+	}
+}
+
+// A restart that never reached the pane (send failed) is not a restart.
+func TestRestartAgentSendFailureRecordsNoRestart(t *testing.T) {
+	restore := saveHooks()
+	defer restore()
+
+	var recordedTypes []events.EventType
+	setHooksLocked(func() {
+		buildPaneCmdFn = func(_, agentCmd string) (string, error) { return agentCmd, nil }
+		sendKeysFn = func(context.Context, string, string, bool) error { return fmt.Errorf("pane gone") }
+		sleepFn = func(time.Duration) {}
+		recordLifecycleEventFn = func(eventType events.EventType, _ string, _ interface{}) {
+			recordedTypes = append(recordedTypes, eventType)
+		}
+	})
+
+	cfg := config.Default()
+	cfg.Resilience.RestartDelaySeconds = 0
+	m := NewMonitor("metrics-session", "/tmp/project", cfg, true)
+	m.RegisterAgent("%8", 1, 0, "cc", "opus", "claude")
+	m.mu.Lock()
+	m.agents["%8"].Healthy = false
+	m.mu.Unlock()
+
+	m.restartAgent(context.Background(), m.agents["%8"])
+	if len(recordedTypes) != 0 {
+		t.Fatalf("a failed restart recorded %v", recordedTypes)
 	}
 }
 

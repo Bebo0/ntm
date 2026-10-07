@@ -907,6 +907,30 @@ func SessionExistsContext(ctx context.Context, name string) (bool, error) {
 	return DefaultClient.SessionExistsContext(ctx, name)
 }
 
+// SessionCreatedAt returns when tmux created the session (#{session_created},
+// whole seconds).
+func (c *Client) SessionCreatedAt(name string) (time.Time, error) {
+	// Pane-qualified exact target: the bare `=name` form yields empty output
+	// from `display-message -p` on tmux 3.4/3.6a (ntm#310).
+	out, err := c.Run("display-message", "-p", "-t", SessionPaneTarget(name), "#{session_created}")
+	if err != nil {
+		return time.Time{}, err
+	}
+	secs, err := strconv.ParseInt(strings.TrimSpace(out), 10, 64)
+	if err != nil {
+		return time.Time{}, fmt.Errorf("parse session_created %q: %w", strings.TrimSpace(out), err)
+	}
+	if secs <= 0 {
+		return time.Time{}, fmt.Errorf("tmux reported no creation time for session %q", name)
+	}
+	return time.Unix(secs, 0), nil
+}
+
+// SessionCreatedAt returns when tmux created the session (default client).
+func SessionCreatedAt(name string) (time.Time, error) {
+	return DefaultClient.SessionCreatedAt(name)
+}
+
 // ListSessions returns all tmux sessions
 func (c *Client) ListSessions() ([]Session, error) {
 	return c.ListSessionsContext(context.Background())

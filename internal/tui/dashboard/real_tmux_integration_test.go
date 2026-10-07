@@ -4,12 +4,15 @@ package dashboard
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/Dicklesworthstone/ntm/internal/events"
 	"github.com/Dicklesworthstone/ntm/internal/status"
 	"github.com/Dicklesworthstone/ntm/internal/tmux"
 	"github.com/Dicklesworthstone/ntm/internal/tui/layout"
@@ -152,6 +155,76 @@ func TestRealTmuxDashboardE2E(t *testing.T) {
 	grid := status.StripANSI(m.renderPaneGrid())
 	if !strings.Contains(grid, "#0.0") || !strings.Contains(grid, "#1.0") || !strings.Contains(grid, "WORK") || !strings.Contains(grid, "IDLE") {
 		t.Fatalf("real multiwindow dashboard grid lost addresses or independent states:\n%s", grid)
+	}
+}
+
+// The dashboard's uptime and restart badges read the pane shell's start time
+// and the session monitor's restart records — the readers --robot-metrics and
+// ntm health use — instead of an in-memory tracker nothing wrote to.
+func TestRealTmuxDashboardHealthReadsUptimeAndRecordedRestarts(t *testing.T) {
+	testutil.RequireTmuxThrottled(t)
+
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	t.Setenv("TMUX", "")
+	t.Setenv("TMUX_TMPDIR", testutil.ShortTmuxTempDir(t))
+
+	projectDir := t.TempDir()
+	session := fmt.Sprintf("ntm_tui_health_%d", time.Now().UnixNano())
+	t.Cleanup(func() {
+		cleanupCtx, cancelCleanup := context.WithTimeout(context.Background(), 8*time.Second)
+		defer cancelCleanup()
+		if _, err := tmux.NewClient("").RunContext(cleanupCtx, "kill-server"); err != nil &&
+			tmux.ClassifyCommandError(err).Kind != tmux.CommandErrorNoServer {
+			t.Errorf("stop isolated tmux server: %v", err)
+		}
+	})
+	if err := tmux.CreateSession(session, projectDir); err != nil {
+		t.Fatalf("create isolated tmux session: %v", err)
+	}
+	paneID := waitForDashboardPaneCount(t, session, 1)[0].ID
+	if err := tmux.SetPaneTitle(paneID, session+"__cc_1"); err != nil {
+		t.Fatalf("title claude pane: %v", err)
+	}
+
+	time.Sleep(1200 * time.Millisecond) // a whole second of pane age
+	now := time.Now()
+	logPath := filepath.Join(home, ".config", "ntm", "analytics", "events.jsonl")
+	if err := os.MkdirAll(filepath.Dir(logPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	var lines strings.Builder
+	for _, at := range []time.Time{now.Add(-300 * time.Millisecond), now.Add(-100 * time.Millisecond)} {
+		line, err := json.Marshal(events.Event{
+			Timestamp: at,
+			Type:      events.EventAgentRestart,
+			Session:   session,
+			Data:      events.ToMap(events.AgentLifecycleData{PaneID: paneID}),
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		lines.Write(line)
+		lines.WriteByte('\n')
+	}
+	if err := os.WriteFile(logPath, []byte(lines.String()), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	msg, ok := New(session, projectDir).fetchHealthCmd()().(HealthUpdateMsg)
+	if !ok || msg.Err != nil {
+		t.Fatalf("fetchHealthCmd = %+v (ok %v)", msg, ok)
+	}
+	info, ok := msg.Health[paneID]
+	if !ok {
+		t.Fatalf("no health info for %s: %+v", paneID, msg.Health)
+	}
+	if info.RestartCount != 2 {
+		t.Errorf("restart badge count = %d, want 2", info.RestartCount)
+	}
+	if info.Uptime < 1 || info.Uptime > 120 {
+		t.Errorf("uptime = %ds, want the pane's age (1..120s)", info.Uptime)
 	}
 }
 

@@ -320,7 +320,7 @@
       "name": "metrics",
       "flag": "--robot-metrics",
       "category": "state",
-      "summary": "Session metrics export for analysis.",
+      "summary": "Per-agent session metrics: prompts received, crashes and restarts in the period; current context tokens, context percent and uptime.",
       "output_formats": [
         "json"
       ],

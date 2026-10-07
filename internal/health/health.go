@@ -76,19 +76,20 @@ type Progress struct {
 
 // AgentHealth contains health information for a single agent
 type AgentHealth struct {
-	Pane                  int                         `json:"pane"`           // Pane index
-	PaneID                string                      `json:"pane_id"`        // Full pane ID
-	AgentType             string                      `json:"agent_type"`     // claude, codex, gemini, user, unknown
-	Status                Status                      `json:"status"`         // Overall health status
-	ProcessStatus         ProcessStatus               `json:"process_status"` // Process running state
-	Activity              ActivityLevel               `json:"activity"`       // Activity level
-	LastActivity          *time.Time                  `json:"last_activity"`  // Last activity timestamp
-	IdleSeconds           int                         `json:"idle_seconds"`   // Seconds since last activity
-	Issues                []Issue                     `json:"issues"`         // Detected issues
-	RateLimited           bool                        `json:"rate_limited"`   // True if agent hit rate limit
-	WaitSeconds           int                         `json:"wait_seconds"`   // Suggested wait time (if rate limited)
-	Progress              *Progress                   `json:"progress"`       // Detected work progress
-	ShellPID              int                         `json:"shell_pid"`      // Shell PID from tmux pane
+	Pane                  int                         `json:"pane"`                     // Pane index
+	PaneID                string                      `json:"pane_id"`                  // Full pane ID
+	AgentType             string                      `json:"agent_type"`               // claude, codex, gemini, user, unknown
+	Status                Status                      `json:"status"`                   // Overall health status
+	ProcessStatus         ProcessStatus               `json:"process_status"`           // Process running state
+	Activity              ActivityLevel               `json:"activity"`                 // Activity level
+	LastActivity          *time.Time                  `json:"last_activity"`            // Last activity timestamp
+	IdleSeconds           int                         `json:"idle_seconds"`             // Seconds since last activity
+	Issues                []Issue                     `json:"issues"`                   // Detected issues
+	RateLimited           bool                        `json:"rate_limited"`             // True if agent hit rate limit
+	WaitSeconds           int                         `json:"wait_seconds"`             // Suggested wait time (if rate limited)
+	Progress              *Progress                   `json:"progress"`                 // Detected work progress
+	ShellPID              int                         `json:"shell_pid"`                // Shell PID from tmux pane
+	UptimeSeconds         int                         `json:"uptime_seconds,omitempty"` // Age of the pane's shell incarnation (set by ntm health; absent when unreadable)
 	ObservedState         status.AgentState           `json:"observed_state"`
 	LastKnownState        status.AgentState           `json:"last_known_state,omitempty"`
 	ObservationFreshness  status.ObservationFreshness `json:"observation_freshness"`

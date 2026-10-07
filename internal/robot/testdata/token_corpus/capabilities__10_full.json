@@ -1090,8 +1090,8 @@
       "name": "metrics",
       "flag": "--robot-metrics",
       "category": "state",
-      "summary": "Session metrics export for analysis.",
-      "description": "Session metrics export for analysis.",
+      "summary": "Per-agent session metrics: prompts received, crashes and restarts in the period; current context tokens, context percent and uptime.",
+      "description": "Per-agent session metrics: prompts received, crashes and restarts in the period; current context tokens, context percent and uptime. Fields no source measured for the call are listed in unmeasured.",
       "output_formats": [
         "json"
       ],
@@ -1113,7 +1113,7 @@
           "type": "string",
           "required": false,
           "default": "24h",
-          "description": "Period: 1h, 24h, 7d, all",
+          "description": "Period bounding prompt, crash and restart counts: 1h, 24h, 7d, all (any duration such as 30m)",
           "deprecated": true,
           "replaced_by": "--period"
         },

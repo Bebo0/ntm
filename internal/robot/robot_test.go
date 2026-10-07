@@ -193,7 +193,20 @@ func TestMain(m *testing.M) {
 	collectRobotWork = func(context.Context, *state.Store, adapters.WorkCoordinationAdapterConfig, bool) (*adapters.WorkSection, error) {
 		return nil, errNoTestWorkSource
 	}
+	// Robot sends record prompt history (and spawns write manifests) under
+	// XDG_DATA_HOME; never let the package's real-tmux sends append to the
+	// developer's own history. Tests that inspect it set their own.
+	dataHome, err := os.MkdirTemp("", "ntm-robot-test-data-")
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "create robot test data home: %v\n", err)
+		os.Exit(1)
+	}
+	if err := os.Setenv("XDG_DATA_HOME", dataHome); err != nil {
+		fmt.Fprintf(os.Stderr, "isolate robot test data home: %v\n", err)
+		os.Exit(1)
+	}
 	code := m.Run()
+	_ = os.RemoveAll(dataHome)
 	if err := cleanupTmux(); err != nil {
 		fmt.Fprintf(os.Stderr, "clean up isolated robot tmux: %v\n", err)
 		code = 1

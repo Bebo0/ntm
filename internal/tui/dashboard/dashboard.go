@@ -1937,8 +1937,11 @@ func (m Model) fetchHealthCmd() tea.Cmd {
 			return HealthUpdateMsg{Health: nil, Err: err}
 		}
 
-		// Get health tracker for uptime/restart data
-		tracker := robot.GetHealthTracker(session)
+		// Restarts and uptime come from the readers --robot-metrics and
+		// ntm health use: the session monitor's restart records and the
+		// pane shell's start time.
+		now := time.Now()
+		restarts := robot.RecentAgentRestarts(session, time.Hour, now)
 
 		// Build health info map
 		healthMap := make(map[string]PaneHealthInfo)
@@ -1952,9 +1955,10 @@ func (m Model) fetchHealthCmd() tea.Cmd {
 				info.Issues = append(info.Issues, issue.Message)
 			}
 
-			// Get uptime and restart count from tracker
-			info.Uptime = int(tracker.GetUptime(agent.PaneID).Seconds())
-			info.RestartCount = tracker.GetRestartsInWindow(agent.PaneID)
+			if startedAt, ok := robot.PaneStartedAt(agent.ShellPID); ok {
+				info.Uptime = int(now.Sub(startedAt).Seconds())
+			}
+			info.RestartCount = restarts[agent.PaneID]
 
 			healthMap[agent.PaneID] = info
 		}

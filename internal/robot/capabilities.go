@@ -737,10 +737,10 @@ func buildCommandRegistry() []RobotCommandInfo {
 			Name:        "metrics",
 			Flag:        "--robot-metrics",
 			Category:    "state",
-			Description: "Session metrics export for analysis.",
+			Description: "Per-agent session metrics: prompts received, crashes and restarts in the period; current context tokens, context percent and uptime. Fields no source measured for the call are listed in unmeasured.",
 			Parameters: []RobotParameter{
 				{Name: "session", Flag: "--robot-metrics", Type: "string", Required: false, Description: "Optional session filter"},
-				{Name: "metrics-period", Flag: "--metrics-period", Type: "string", Required: false, Default: "24h", Description: "Period: 1h, 24h, 7d, all"},
+				{Name: "metrics-period", Flag: "--metrics-period", Type: "string", Required: false, Default: "24h", Description: "Period bounding prompt, crash and restart counts: 1h, 24h, 7d, all (any duration such as 30m)"},
 				{Name: "disk-attribution", Flag: "--disk-attribution", Type: "bool", Required: false, Default: "false", Description: "Include per-pane build-dir disk sizes (bounded du of target/, node_modules/, .venv/, dist/ under each agent pane's cwd)"},
 			},
 			Examples: []string{"ntm --robot-metrics=myproject --metrics-period=7d", "ntm --robot-metrics --disk-attribution"},

@@ -23,7 +23,6 @@ import (
 	"fmt"
 	"log/slog"
 	"sort"
-	"strconv"
 	"strings"
 	"time"
 
@@ -126,17 +125,8 @@ func newRotationChecker(session, workDir string, coordCfg CoordinatorConfig, ntm
 		ctxMonitor:         ctxMonitor,
 		getPanes:           tmux.GetPanes,
 		sessionCreated: func(session string) (time.Time, bool) {
-			// Pane-qualified exact target: the bare `=name` form yields empty
-			// output from `display-message -p` on tmux 3.4/3.6a (ntm#310).
-			out, err := tmux.DefaultClient.Run("display-message", "-p", "-t", tmux.SessionPaneTarget(session), "#{session_created}")
-			if err != nil {
-				return time.Time{}, false
-			}
-			secs, convErr := strconv.ParseInt(strings.TrimSpace(out), 10, 64)
-			if convErr != nil || secs <= 0 {
-				return time.Time{}, false
-			}
-			return time.Unix(secs, 0), true
+			created, err := tmux.SessionCreatedAt(session)
+			return created, err == nil
 		},
 		paneCwd: func(paneID string) (string, bool) {
 			cwd, err := tmux.DefaultClient.Run("display-message", "-p", "-t", tmux.ExactTarget(paneID), "#{pane_current_path}")

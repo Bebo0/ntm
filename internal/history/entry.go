@@ -18,9 +18,13 @@ const (
 	SourceCLI     Source = "cli"
 	SourcePalette Source = "palette"
 	SourceReplay  Source = "replay"
+	// SourceRobot marks a prompt dispatched through the robot send surface
+	// (--robot-send, its --track form, and the REST send endpoints).
+	SourceRobot Source = "robot"
 )
 
-// HistoryEntry represents a single prompt sent via ntm send.
+// HistoryEntry represents a single prompt sent via ntm send, the robot send
+// surface, the palette or a replay.
 type HistoryEntry struct {
 	ID         string    `json:"id"`                    // Unique ID (timestamp-random)
 	Timestamp  time.Time `json:"ts"`                    // When sent

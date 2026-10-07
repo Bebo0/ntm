@@ -143,6 +143,52 @@ func TestReadSince_DecryptsEncryptedLog(t *testing.T) {
 	}
 }
 
+// ReadTypesSince returns only the requested types — from plaintext and
+// encrypted lines alike — and never a line that merely quotes a type name.
+func TestReadTypesSince_FiltersByDecodedType(t *testing.T) {
+	logPath := filepath.Join(t.TempDir(), "events.jsonl")
+	logger, err := NewLogger(LoggerOptions{Path: logPath, RetentionDays: 30, Enabled: true})
+	if err != nil {
+		t.Fatalf("NewLogger: %v", err)
+	}
+	crash := AgentLifecycleData{PaneID: "%3", PaneIndex: 1, AgentType: "cc", Reason: "process exited"}
+	if err := logger.LogEvent(EventAgentCrash, "proj", crash); err != nil {
+		t.Fatalf("Log crash: %v", err)
+	}
+	// A prompt whose payload quotes the marker must not pass as a crash.
+	if err := logger.LogEvent(EventPromptSend, "proj", map[string]interface{}{"template": `"type":"agent_crash"`}); err != nil {
+		t.Fatalf("Log prompt: %v", err)
+	}
+
+	key := evtTestKey(t)
+	SetEncryptionConfig(&EncryptionConfig{Enabled: true, EncryptKey: key, DecryptKeys: [][]byte{key}})
+	defer SetEncryptionConfig(nil)
+	if err := logger.LogEvent(EventAgentRestart, "proj", AgentLifecycleData{PaneID: "%3", RestartCount: 1}); err != nil {
+		t.Fatalf("Log restart: %v", err)
+	}
+	if err := closeLogger(logger); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	got, err := ReadTypesSince(logPath, time.Time{}, EventAgentCrash, EventAgentRestart)
+	if err != nil {
+		t.Fatalf("ReadTypesSince: %v", err)
+	}
+	if len(got) != 2 || got[0].Type != EventAgentCrash || got[1].Type != EventAgentRestart {
+		t.Fatalf("got %+v, want the crash then the (encrypted) restart", got)
+	}
+	if got[0].Data["pane_id"] != "%3" || got[0].Data["reason"] != "process exited" || got[1].Data["restart_count"] != float64(1) {
+		t.Fatalf("lifecycle payloads = %v / %v", got[0].Data, got[1].Data)
+	}
+
+	if later, err := ReadTypesSince(logPath, time.Now().Add(time.Hour), EventAgentCrash); err != nil || len(later) != 0 {
+		t.Fatalf("since bound: %+v, %v", later, err)
+	}
+	if none, err := ReadTypesSince(logPath, time.Time{}); err != nil || len(none) != 0 {
+		t.Fatalf("no types requested: %+v, %v", none, err)
+	}
+}
+
 func TestReadSince_MissingFile(t *testing.T) {
 	if _, err := ReadSince(filepath.Join(t.TempDir(), "absent.jsonl"), time.Time{}); err == nil {
 		t.Fatal("expected an error for a missing log file")

@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -30,6 +31,7 @@ import (
 	ntmevents "github.com/Dicklesworthstone/ntm/internal/events"
 	"github.com/Dicklesworthstone/ntm/internal/git"
 	"github.com/Dicklesworthstone/ntm/internal/health"
+	"github.com/Dicklesworthstone/ntm/internal/history"
 	"github.com/Dicklesworthstone/ntm/internal/models"
 	"github.com/Dicklesworthstone/ntm/internal/pressure"
 	"github.com/Dicklesworthstone/ntm/internal/recipe"
@@ -6372,6 +6374,59 @@ type SendOptions struct {
 	// carries config-derived defaults (nil means compiled-in defaults).
 	WithMemory   bool
 	MemoryInject *CMInjectConfig
+
+	// HistorySource is the prompt-history source a dispatched send is
+	// recorded under; empty records history.SourceRobot. --robot-replay sets
+	// history.SourceReplay.
+	HistorySource history.Source
+}
+
+// recordRobotSendHistory appends a dispatched robot send to the prompt
+// history that ntm send, the palette and replay already write. Without it,
+// orchestrator sends — most sends in a swarm — were absent from
+// --robot-history and --robot-replay, and --robot-metrics could not count the
+// prompts an agent received. Targets are the canonical pane keys the send
+// resolved; Success follows ntm send's rule (every target delivered), so a
+// partially failed send is kept with its error and is not attributed to any
+// pane as a received prompt.
+//
+// The caller's message is stored, not the CASS/CM-augmented payload: the
+// injected context is derived per send, and replay re-sends what the caller
+// asked for. When this send runs under a redaction mode, the stored prompt is
+// redacted under it (warn and block included, as for every persisted prompt);
+// history.Append then applies the configured history redaction on top.
+func recordRobotSendHistory(opts SendOptions, redactCfg redaction.Config, targetPanes []tmux.Pane, targetKeys []string, output SendOutput, startedAt time.Time) {
+	if len(targetKeys) == 0 {
+		return
+	}
+	prompt := opts.Message
+	if redactCfg.Mode != "" && redactCfg.Mode != redaction.ModeOff {
+		persistCfg := redactCfg
+		persistCfg.Mode = redaction.ModeRedact
+		prompt = redaction.ScanAndRedact(prompt, persistCfg).Output
+	}
+	source := opts.HistorySource
+	if source == "" {
+		source = history.SourceRobot
+	}
+	entry := history.NewEntry(opts.Session, append([]string(nil), targetKeys...), prompt, source)
+	agentTypes := make([]string, 0, len(targetPanes))
+	for _, pane := range targetPanes {
+		agentTypes = append(agentTypes, pane.Type.String())
+	}
+	entry.SetAgentTypes(agentTypes)
+	entry.DurationMs = int(time.Since(startedAt) / time.Millisecond)
+	switch {
+	case len(output.Failed) == 0 && len(output.Successful) == len(targetKeys):
+		entry.SetSuccess()
+	case len(output.Failed) > 0:
+		entry.SetError(fmt.Errorf("%d of %d target(s) failed: %s", len(output.Failed), len(targetKeys), output.Failed[0].Error))
+	default:
+		entry.SetError(fmt.Errorf("%d of %d target(s) delivered", len(output.Successful), len(targetKeys)))
+	}
+	if err := history.Append(entry); err != nil {
+		slog.Debug("robot send: prompt history not recorded", "session", opts.Session, "error", err)
+	}
 }
 
 type actuationTrace struct {
@@ -7533,8 +7588,10 @@ func GetSend(opts SendOptions) (*SendOutput, error) {
 
 	publishSendActuationRequest(trace, opts, output.Targets, output.MessagePreview)
 	dispatchAttempted = true
+	dispatchStarted := time.Now()
 	result, _ := service.Dispatch(ctx, prepared)
 	applyRobotDispatchResult(&output, result)
+	recordRobotSendHistory(opts, redactCfg, targetPanes, targetKeys, output, dispatchStarted)
 	if opts.VerifyRender {
 		output.RenderEvidence = verifySendRenderEvidence(targetPanes, targetKeys, output.Successful, renderBaselines)
 	}
@@ -10728,6 +10785,20 @@ func transcriptUsagePercent(tu *ntmctx.TranscriptUsage, fallbackModel string) (p
 	return pct, limit, false
 }
 
+// transcriptContextReading measures a pane's transcript reading against its
+// context window: the transcript's own model when it names one, else
+// paneModel (the pane's launch or title model, contextPaneModel).
+// --robot-context and --robot-metrics both read a pane through it, so the two
+// never disagree about the same pane.
+func transcriptContextReading(paneModel string, usage *ntmctx.TranscriptUsage) (model string, pct float64, limit int, capped bool) {
+	model = paneModel
+	if usage.Model != "" {
+		model = usage.Model
+	}
+	pct, limit, capped = transcriptUsagePercent(usage, model)
+	return model, pct, limit, capped
+}
+
 // paneContextUsagePercents is the alert generator's context-usage source
 // (alerts.Config.PaneContextUsage): each agent pane's transcript-attributed
 // usage percent, keyed by pane ID. Panes with no attributable transcript or
@@ -10870,10 +10941,8 @@ func GetContext(session string, lines int) (*ContextOutput, error) {
 			agentInfo.TranscriptUpdatedAt = usage.UpdatedAt.UTC().Format(time.RFC3339)
 			agentInfo.EstimatedTokens = usage.Tokens
 			agentInfo.WithOverhead = usage.Tokens // transcript totals need no overhead multiplier
-			if usage.Model != "" {
-				agentInfo.Model = usage.Model
-			}
-			pct, limit, capped := transcriptUsagePercent(usage, agentInfo.Model)
+			readingModel, pct, limit, capped := transcriptContextReading(agentInfo.Model, usage)
+			agentInfo.Model = readingModel
 			agentInfo.ContextLimit = limit
 			agentInfo.UsagePercent = 100.0
 			agentInfo.Confidence = ntmctx.TranscriptConfidence(usage.UpdatedAt, time.Now())

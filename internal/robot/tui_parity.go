@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"os"
 	"strings"
 	"time"
@@ -17,11 +18,13 @@ import (
 	"github.com/Dicklesworthstone/ntm/internal/config"
 	"github.com/Dicklesworthstone/ntm/internal/history"
 	"github.com/Dicklesworthstone/ntm/internal/kernel"
+	"github.com/Dicklesworthstone/ntm/internal/privacy"
 	"github.com/Dicklesworthstone/ntm/internal/resilience"
 	"github.com/Dicklesworthstone/ntm/internal/robot/adapters"
 	"github.com/Dicklesworthstone/ntm/internal/state"
 	"github.com/Dicklesworthstone/ntm/internal/tmux"
 	"github.com/Dicklesworthstone/ntm/internal/tracker"
+	"github.com/Dicklesworthstone/ntm/internal/util"
 )
 
 // =============================================================================
@@ -2566,61 +2569,119 @@ type MetricsOutput struct {
 	// DiskAttribution lists per-pane build-dir sizes; populated only when
 	// --disk-attribution is set (bounded du cost is real).
 	DiskAttribution []DiskAttributionEntry `json:"disk_attribution,omitempty"`
-	// Unmeasured names the fields in this payload that nothing populates, so a
-	// consumer can tell "no activity" from "never measured". token_usage and
-	// every numeric in agent_stats serialize as 0 on the busiest session in the
-	// world: nothing records prompts, tokens, response times, restarts or
-	// uptime, and token accounting needs provider APIs that are not wired.
-	// Emitting those zeros unqualified told every reader the session was idle.
+	// Unmeasured names the fields in this payload that no source measured for
+	// this call, so a consumer can tell "no activity" from "never measured".
+	// These used to serialize as 0 on the busiest session in the world, which
+	// every reader took for an idle session. Fields measured for some agents
+	// but not others are named in that agent's own agent_stats[].unmeasured.
 	Unmeasured []string    `json:"unmeasured,omitempty"`
 	AgentHints *AgentHints `json:"_agent_hints,omitempty"`
 }
 
-// unmeasuredMetricsFields lists the MetricsOutput fields that no code path
-// populates. Delete an entry here the moment its field gets a real writer.
-func unmeasuredMetricsFields() []string {
-	return []string{
-		"token_usage.total_tokens",
-		"token_usage.total_cost_usd",
-		"token_usage.by_agent",
-		"token_usage.by_model",
-		"token_usage.context_current_percent",
-		"agent_stats[].prompts_received",
-		"agent_stats[].tokens_used",
-		"agent_stats[].avg_response_time_sec",
-		"agent_stats[].error_count",
-		"agent_stats[].restart_count",
-		"agent_stats[].uptime",
-		"session_stats.total_prompts",
-		"session_stats.session_duration",
-	}
+// alwaysUnmeasuredMetricsFields have no source at all:
+//   - total_cost_usd: the only price table (internal/cost) dates from May
+//     2025 and has no cache-read/cache-write rates, while transcript usage is
+//     dominated by cache reads; any figure would be invented.
+//   - avg_response_time_sec: nothing persists a send→response interval;
+//     --robot-ack and --track return their latencies to the caller only.
+var alwaysUnmeasuredMetricsFields = []string{
+	"token_usage.total_cost_usd",
+	"agent_stats[].avg_response_time_sec",
 }
 
-// MetricsTokenUsage contains token consumption data
+// metricsCoverage records which sources could measure this call.
+type metricsCoverage struct {
+	// promptHistory: the prompt history is persisted for the session, so
+	// prompt counts reflect what was sent (privacy mode can switch it off).
+	promptHistory bool
+	// lifecycle: a session monitor (the only recorder of crashes and
+	// restarts) has run for the session and the event log is persisted.
+	lifecycle bool
+	// transcripts: at least one agent pane has a transcript reading.
+	transcripts bool
+	// sessionCreated: tmux reported the session's creation time.
+	sessionCreated bool
+}
+
+// unmeasuredMetricsFields lists the MetricsOutput fields no source measured
+// under cov. A field leaves this list only when its source is live for the
+// call; when it is not, the field's zero is declared, never presented.
+func unmeasuredMetricsFields(cov metricsCoverage) []string {
+	fields := append([]string(nil), alwaysUnmeasuredMetricsFields...)
+	if !cov.promptHistory {
+		fields = append(fields, "agent_stats[].prompts_received", "session_stats.total_prompts")
+	}
+	if !cov.lifecycle {
+		fields = append(fields, "agent_stats[].error_count", "agent_stats[].restart_count")
+	}
+	if !cov.transcripts {
+		fields = append(fields,
+			"token_usage.total_tokens",
+			"token_usage.by_agent",
+			"token_usage.by_model",
+			"token_usage.context_current_percent",
+		)
+	}
+	if !cov.sessionCreated {
+		fields = append(fields, "session_stats.session_duration")
+	}
+	return fields
+}
+
+// MetricsTokenUsage contains token consumption data. Every figure is a
+// current reading from the agents' own session transcripts (the source
+// --robot-context reports as "transcript"), not a period total: tokens are
+// what occupies each context window after its last turn.
 type MetricsTokenUsage struct {
-	TotalTokens    int64            `json:"total_tokens"`
-	TotalCost      float64          `json:"total_cost_usd"`
+	// TotalTokens sums ByAgent, so it covers only the agents listed there.
+	TotalTokens int64   `json:"total_tokens"`
+	TotalCost   float64 `json:"total_cost_usd"`
+	// ByAgent and ContextCurrent are keyed like agent_stats; an agent with no
+	// attributable transcript is absent rather than 0.
 	ByAgent        map[string]int64 `json:"by_agent"`
 	ByModel        map[string]int64 `json:"by_model"`
-	ContextCurrent map[string]int   `json:"context_current_percent"` // Current context usage per agent
+	ContextCurrent map[string]int   `json:"context_current_percent"` // Current context usage per agent, percent of its window
 }
 
-// AgentMetrics contains per-agent statistics
+// AgentMetrics contains per-agent statistics. PromptsReceived, ErrorCount
+// and RestartCount count events inside the period; TokensUsed and Uptime are
+// current readings.
 type AgentMetrics struct {
-	Type            string  `json:"type"`
-	PromptsReceived int     `json:"prompts_received"`
+	Type string `json:"type"`
+	// Pane is the agent's canonical pane address (N, or W.P on multi-window
+	// sessions), accepted by --robot-send --panes.
+	Pane string `json:"pane"`
+	// PromptsReceived counts delivered sends recorded in the prompt history
+	// (ntm send, --robot-send, the palette and replays) that targeted this
+	// pane. A partially failed send records no per-pane delivery and is not
+	// counted.
+	PromptsReceived int `json:"prompts_received"`
+	// TokensUsed is the tokens occupying the agent's context window after
+	// its last turn, read from its own session transcript.
 	TokensUsed      int64   `json:"tokens_used"`
 	AvgResponseTime float64 `json:"avg_response_time_sec"`
-	ErrorCount      int     `json:"error_count"`
-	RestartCount    int     `json:"restart_count"`
-	Uptime          string  `json:"uptime"`
+	// ErrorCount counts crashes the session monitor recorded for the pane
+	// (agent process gone); RestartCount the automatic restarts it delivered.
+	ErrorCount   int `json:"error_count"`
+	RestartCount int `json:"restart_count"`
+	// Uptime is the age of the pane's current shell incarnation, the same
+	// reading as --robot-is-working agent_uptime_seconds.
+	Uptime string `json:"uptime"`
+	// Unmeasured names this agent's fields no source measured: tokens_used
+	// when no transcript is attributable to the pane, uptime when its shell
+	// PID could not be read.
+	Unmeasured []string `json:"unmeasured,omitempty"`
 }
 
 // MetricsSessionStats contains session-level statistics
 type MetricsSessionStats struct {
-	TotalPrompts    int    `json:"total_prompts"`
-	TotalAgents     int    `json:"total_agents"`
-	ActiveAgents    int    `json:"active_agents"`
+	// TotalPrompts counts delivered sends recorded in the period (a send to
+	// three agents is one prompt here and one in each agent's
+	// prompts_received).
+	TotalPrompts int `json:"total_prompts"`
+	TotalAgents  int `json:"total_agents"`
+	ActiveAgents int `json:"active_agents"`
+	// SessionDuration is the time since tmux created the session.
 	SessionDuration string `json:"session_duration"`
 	FilesChanged    int    `json:"files_changed"`
 	Commits         int    `json:"commits,omitempty"`
@@ -2629,11 +2690,97 @@ type MetricsSessionStats struct {
 // MetricsOptions configures the metrics export
 type MetricsOptions struct {
 	Session string // Filter to specific session
-	Period  string // "1h", "24h", "7d", "all" (default: "24h")
-	Format  string // "json", "csv" (default: "json")
+	// Period bounds the event counts — prompts_received, total_prompts,
+	// error_count and restart_count count events timestamped within it.
+	// "all" (or empty for the 24h default) or any ntm duration (1h, 24h, 7d,
+	// 30m, 2w). Counts never reach back before the session was created, so a
+	// previous session of the same name contributes nothing. Readings
+	// (tokens, context percent, uptime, session duration) are current values
+	// and are not period-filtered.
+	Period string
+	Format string // "json", "csv" (default: "json")
 	// DiskAttribution enables per-pane build-dir sizing (--disk-attribution).
 	// Off by default: it walks build dirs under each agent pane's cwd.
 	DiskAttribution bool
+}
+
+// metricsNow is the clock --robot-metrics measures against. Overridable for
+// tests.
+var metricsNow = time.Now
+
+// metricsPeriodCutoff resolves --metrics-period to the earliest event time it
+// admits; "all" admits everything (zero time).
+func metricsPeriodCutoff(period string, now time.Time) (time.Time, error) {
+	if strings.EqualFold(strings.TrimSpace(period), "all") {
+		return time.Time{}, nil
+	}
+	window, err := util.ParseDuration(strings.TrimSpace(period))
+	if err != nil {
+		return time.Time{}, fmt.Errorf("invalid metrics period %q: %w", period, err)
+	}
+	if window <= 0 {
+		return time.Time{}, fmt.Errorf("invalid metrics period %q: must be positive", period)
+	}
+	return now.Add(-window), nil
+}
+
+// formatMetricsDuration renders a reading as a Go duration string at
+// one-second resolution ("3h12m5s").
+func formatMetricsDuration(d time.Duration) string {
+	if d < 0 {
+		d = 0
+	}
+	return d.Truncate(time.Second).String()
+}
+
+// countRecordedPrompts counts the delivered sends the prompt history recorded
+// for session (every session when empty) after since: total is the number of
+// sends, perPane the sends that reached each pane, keyed by pane ID. History
+// targets are canonical pane keys or pane IDs; they resolve against the
+// session's current panes with the alias rule --robot-history filters by.
+func countRecordedPrompts(session string, panes []tmux.Pane, since time.Time) (int, map[string]int, error) {
+	var entries []history.HistoryEntry
+	var err error
+	if session == "" {
+		entries, err = history.ReadAll()
+	} else {
+		entries, err = history.ReadForSession(session)
+	}
+	if err != nil {
+		return 0, nil, err
+	}
+
+	multiWindow := tmux.PanesSpanMultipleWindows(panes)
+	paneByAlias := make(map[string]string, len(panes)*3)
+	for _, pane := range panes {
+		aliases := make(map[string]struct{}, 3)
+		addCanonicalHistoryTargetAliases(aliases, pane, multiWindow)
+		for alias := range aliases {
+			paneByAlias[alias] = pane.ID
+		}
+	}
+
+	total := 0
+	perPane := make(map[string]int, len(panes))
+	for _, entry := range entries {
+		if !entry.Success || entry.Timestamp.Before(since) {
+			continue
+		}
+		total++
+		reached := make(map[string]struct{}, len(entry.Targets))
+		for _, target := range entry.Targets {
+			paneID, ok := paneByAlias[strings.TrimSpace(target)]
+			if !ok {
+				continue
+			}
+			if _, dup := reached[paneID]; dup {
+				continue
+			}
+			reached[paneID] = struct{}{}
+			perPane[paneID]++
+		}
+	}
+	return total, perPane, nil
 }
 
 // GetMetrics returns session metrics data.
@@ -2642,57 +2789,74 @@ func GetMetrics(opts MetricsOptions) (*MetricsOutput, error) {
 	if opts.Period == "" {
 		opts.Period = "24h"
 	}
-
-	output := &MetricsOutput{
-		RobotResponse: NewRobotResponse(true),
-		Session:       opts.Session,
-		Period:        opts.Period,
-		TokenUsage: MetricsTokenUsage{
-			ByAgent:        make(map[string]int64),
-			ByModel:        make(map[string]int64),
-			ContextCurrent: make(map[string]int),
-		},
-		AgentStats: make(map[string]AgentMetrics),
+	emptyOutput := func(resp RobotResponse) *MetricsOutput {
+		return &MetricsOutput{
+			RobotResponse: resp,
+			Session:       opts.Session,
+			Period:        opts.Period,
+			TokenUsage: MetricsTokenUsage{
+				ByAgent:        make(map[string]int64),
+				ByModel:        make(map[string]int64),
+				ContextCurrent: make(map[string]int),
+			},
+			AgentStats: make(map[string]AgentMetrics),
+		}
 	}
+
+	now := metricsNow()
+	cutoff, err := metricsPeriodCutoff(opts.Period, now)
+	if err != nil {
+		return emptyOutput(NewErrorResponse(err, ErrCodeInvalidFlag,
+			"Use --metrics-period=1h, 24h, 7d or all (any duration such as 30m or 2w works)")), nil
+	}
+
+	output := emptyOutput(NewRobotResponse(true))
+	cov := metricsCoverage{}
+	var notes []string
 
 	// Get session info if specified
 	if opts.Session != "" {
 		if !tmux.SessionExists(opts.Session) {
-			return &MetricsOutput{
-				RobotResponse: NewErrorResponse(
-					fmt.Errorf("session '%s' not found", opts.Session),
-					ErrCodeSessionNotFound,
-					"Use 'ntm list' to see available sessions",
-				),
-				Session: opts.Session,
-				Period:  opts.Period,
-				TokenUsage: MetricsTokenUsage{
-					ByAgent:        make(map[string]int64),
-					ByModel:        make(map[string]int64),
-					ContextCurrent: make(map[string]int),
-				},
-				AgentStats: make(map[string]AgentMetrics),
-			}, nil
+			return emptyOutput(NewErrorResponse(
+				fmt.Errorf("session '%s' not found", opts.Session),
+				ErrCodeSessionNotFound,
+				"Use 'ntm list' to see available sessions",
+			)), nil
+		}
+
+		// Event counts start at the later of the period cutoff and the
+		// session's creation: pane IDs and indexes are reused, so records of
+		// a previous same-named session must not be attributed to this one.
+		since := cutoff
+		if created, err := tmux.SessionCreatedAt(opts.Session); err == nil {
+			cov.sessionCreated = true
+			output.SessionStats.SessionDuration = formatMetricsDuration(now.Sub(created))
+			if created.After(since) {
+				since = created
+			}
 		}
 
 		panes, err := tmux.GetPanes(opts.Session)
-		if err == nil {
+		if err != nil {
+			notes = append(notes, fmt.Sprintf("Could not list panes (%v); per-agent stats are missing.", err))
+		} else {
 			output.SessionStats.TotalAgents = len(panes)
-
-			for _, pane := range panes {
-				agentType := paneAgentType(pane)
-				if agentType == "" || agentType == "unknown" || agentType == "user" {
-					continue
-				}
-
-				if _, exists := output.AgentStats[pane.Title]; !exists {
-					output.AgentStats[pane.Title] = AgentMetrics{
-						Type: agentType,
-					}
-				}
-				output.SessionStats.ActiveAgents++
+			notes = append(notes, collectAgentMetrics(output, &cov, opts.Session, panes, since, now)...)
+		}
+	} else {
+		// Without a session only the prompt total spans every session; the
+		// per-agent and token readings need a session's panes.
+		cov.promptHistory = privacy.GetDefaultManager().CanPersist("", privacy.OpPromptHistory) == nil
+		if cov.promptHistory {
+			total, _, err := countRecordedPrompts("", nil, cutoff)
+			if err != nil {
+				cov.promptHistory = false
+				notes = append(notes, fmt.Sprintf("Prompt history unreadable (%v); prompt counts are unmeasured.", err))
+			} else {
+				output.SessionStats.TotalPrompts = total
 			}
 		}
+		notes = append(notes, "Name a session (--robot-metrics=SESSION) for per-agent stats, token and context readings, and session duration.")
 	}
 
 	// Get file change count from the durable cross-process ledger: the session
@@ -2734,16 +2898,122 @@ func GetMetrics(opts MetricsOptions) (*MetricsOutput, error) {
 	if sessionDesc == "" {
 		sessionDesc = "all sessions"
 	}
-	output.Unmeasured = unmeasuredMetricsFields()
+	output.Unmeasured = unmeasuredMetricsFields(cov)
 	output.AgentHints = &AgentHints{
 		Summary: fmt.Sprintf("Metrics for %s over %s", sessionDesc, opts.Period),
-		Notes: []string{
-			"Token usage requires integration with provider APIs for accurate data",
-			"Fields listed in `unmeasured` are always zero: nothing records them yet. Do not read them as activity.",
-		},
+		Notes: append([]string{
+			fmt.Sprintf("Period %s bounds prompts_received, total_prompts, error_count and restart_count (never earlier than the session's creation). Tokens, context percent, uptime and session_duration are current readings.", opts.Period),
+			"Fields listed in `unmeasured` (and in an agent's own `unmeasured`) had no source for this call; their zeros are not activity.",
+		}, notes...),
 	}
 
 	return output, nil
+}
+
+// collectAgentMetrics fills the per-agent stats and token readings for a
+// session's panes, recording which sources measured them in cov. Event
+// counts admit events after since; readings are taken at now. It returns
+// notes explaining any source that could not be read.
+func collectAgentMetrics(output *MetricsOutput, cov *metricsCoverage, session string, panes []tmux.Pane, since, now time.Time) []string {
+	var notes []string
+	multiWindow := tmux.PanesSpanMultipleWindows(panes)
+
+	agentPanes := make([]tmux.Pane, 0, len(panes))
+	for _, pane := range panes {
+		if pane.IsServicePane() {
+			continue
+		}
+		agentType := paneAgentType(pane)
+		if agentType == "" || agentType == "unknown" || agentType == "user" {
+			continue
+		}
+		agentPanes = append(agentPanes, pane)
+	}
+
+	// Prompts: the prompt history every send surface writes.
+	var promptsByPane map[string]int
+	cov.promptHistory = privacy.GetDefaultManager().CanPersist(session, privacy.OpPromptHistory) == nil
+	if cov.promptHistory {
+		total, perPane, err := countRecordedPrompts(session, panes, since)
+		if err != nil {
+			cov.promptHistory = false
+			notes = append(notes, fmt.Sprintf("Prompt history unreadable (%v); prompt counts are unmeasured.", err))
+		} else {
+			output.SessionStats.TotalPrompts = total
+			promptsByPane = perPane
+		}
+	} else {
+		notes = append(notes, "Privacy mode keeps this session's prompts out of the prompt history; prompt counts are unmeasured.")
+	}
+
+	// Crashes and restarts: recorded only by the session monitor.
+	var lifecycle map[string]AgentLifecycleCounts
+	switch {
+	case !SessionMonitorRecords(session):
+		notes = append(notes, "No session monitor has run for this session, and only it records crashes and restarts; error_count and restart_count are unmeasured.")
+	case privacy.GetDefaultManager().CanPersist(session, privacy.OpEventLog) != nil:
+		notes = append(notes, "Privacy mode keeps this session out of the event log the session monitor records crashes and restarts in; error_count and restart_count are unmeasured.")
+	default:
+		counts, err := RecordedAgentLifecycle(session, since)
+		if err != nil {
+			notes = append(notes, fmt.Sprintf("Event log unreadable (%v); error_count and restart_count are unmeasured.", err))
+		} else {
+			cov.lifecycle = true
+			lifecycle = counts
+		}
+	}
+
+	// Tokens and context: the transcript readings --robot-context uses.
+	transcripts := ResolvePaneTranscripts(agentPanes)
+
+	for _, pane := range agentPanes {
+		output.SessionStats.ActiveAgents++
+		agentType := paneAgentType(pane)
+		if _, exists := output.AgentStats[pane.Title]; exists {
+			continue
+		}
+		stats := AgentMetrics{
+			Type:            agentType,
+			Pane:            paneTargetKey(pane, multiWindow),
+			PromptsReceived: promptsByPane[pane.ID],
+			ErrorCount:      lifecycle[pane.ID].Crashes,
+			RestartCount:    lifecycle[pane.ID].Restarts,
+		}
+
+		if startedAt, ok := PaneStartedAt(pane.PID); ok {
+			stats.Uptime = formatMetricsDuration(now.Sub(startedAt))
+		} else {
+			stats.Unmeasured = append(stats.Unmeasured, "uptime")
+		}
+
+		if usage, ok := transcripts[pane.ID]; ok {
+			paneModel := usage.Model
+			if paneModel == "" {
+				paneModel = contextPaneModel(pane, agentType)
+			}
+			model, pct, limit, _ := transcriptContextReading(paneModel, usage)
+			tokens := int64(usage.Tokens)
+			stats.TokensUsed = tokens
+			output.TokenUsage.ByAgent[pane.Title] = tokens
+			output.TokenUsage.TotalTokens += tokens
+			if model == "" {
+				model = "unknown"
+			}
+			output.TokenUsage.ByModel[model] += tokens
+			if limit > 0 {
+				output.TokenUsage.ContextCurrent[pane.Title] = int(math.Round(pct))
+			}
+			cov.transcripts = true
+		} else {
+			stats.Unmeasured = append(stats.Unmeasured, "tokens_used")
+		}
+
+		output.AgentStats[pane.Title] = stats
+	}
+	if len(agentPanes) > 0 && len(output.TokenUsage.ByAgent) < len(agentPanes) {
+		notes = append(notes, "Token and context readings cover only agents whose own session transcript is attributable to their pane (see --robot-context source); the rest list tokens_used in their unmeasured.")
+	}
+	return notes
 }
 
 // PrintMetrics outputs session metrics.
@@ -2855,9 +3125,10 @@ func GetReplay(opts ReplayOptions) (*ReplayOutput, error) {
 	paneFilter := append([]string{}, target.Targets...)
 
 	sendOpts := SendOptions{
-		Session: targetSession,
-		Message: target.Prompt,
-		Panes:   paneFilter,
+		Session:       targetSession,
+		Message:       target.Prompt,
+		Panes:         paneFilter,
+		HistorySource: history.SourceReplay,
 	}
 
 	// Execute the send - GetSend handles the actual operation

@@ -751,8 +751,10 @@ func GetSendAndAck(opts SendAndAckOptions) (*SendAndAckOutput, error) {
 				}
 			} else {
 				publishSendActuationRequest(trace, opts.SendOptions, targetKeys, sendOutput.MessagePreview)
+				dispatchStarted := time.Now()
 				result, _ := service.Dispatch(ctx, prepared)
 				applyRobotDispatchResult(&sendOutput, result)
+				recordRobotSendHistory(opts.SendOptions, redactCfg, targetPanes, targetKeys, sendOutput, dispatchStarted)
 			}
 		}
 	}
