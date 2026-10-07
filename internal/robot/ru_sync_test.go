@@ -40,6 +40,23 @@ func TestParseRUSyncPayload(t *testing.T) {
 	}
 }
 
+// TestParseRUSyncPayloadListsRepeatedRepoOnce: installed ru (1.5.0) sometimes
+// writes a repo's mismatch result twice; ntm lists it once per bucket.
+func TestParseRUSyncPayloadListsRepeatedRepoOnce(t *testing.T) {
+	payload := `{"command":"sync","data":{"repos":[
+ {"name":"o/demo","status":"mismatch"},{"name":"o/absent","status":"dry_run"},{"name":"o/demo","status":"mismatch"},
+ {"name":"o/fresh","status":"ok"},{"name":"o/fresh","status":"current"}]}}`
+
+	got, err := parseRUSyncPayload([]byte(payload))
+	if err != nil {
+		t.Fatalf("parseRUSyncPayload error: %v", err)
+	}
+	if !reflect.DeepEqual(got.conflicts, []string{"o/demo"}) || !reflect.DeepEqual(got.repos.Skipped, []string{"o/absent"}) ||
+		!reflect.DeepEqual(got.repos.Synced, []string{"o/fresh"}) {
+		t.Errorf("conflicts=%v skipped=%v synced=%v, want each repo once", got.conflicts, got.repos.Skipped, got.repos.Synced)
+	}
+}
+
 func TestParseRUSyncPayloadRejectsNonEnvelopes(t *testing.T) {
 	for _, payload := range []string{"", "not-json", `{"synced":["repo-a"]}`, `[{"name":"a","status":"ok"}]`} {
 		if _, err := parseRUSyncPayload([]byte(payload)); err == nil {

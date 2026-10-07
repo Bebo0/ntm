@@ -176,16 +176,25 @@ func parseRUSyncPayload(data []byte) (ruSyncResult, error) {
 	if envelope.Data == nil {
 		return result, fmt.Errorf("ru sync output has no data object")
 	}
+	// ru can record one repo's result twice (seen with a remote mismatch), so
+	// each bucket lists a repo once.
+	listed := make(map[string]bool)
+	add := func(bucket *[]string, kind, name string) {
+		if key := kind + "\x00" + name; !listed[key] {
+			listed[key] = true
+			*bucket = append(*bucket, name)
+		}
+	}
 	for _, repo := range envelope.Data.Repos {
 		switch repo.Status {
 		case "ok", "updated", "current": // ok = cloned
-			result.repos.Synced = append(result.repos.Synced, repo.Name)
+			add(&result.repos.Synced, "synced", repo.Name)
 		case "failed", "timeout", "dep_error", "auth_error":
-			result.failed = append(result.failed, repo.Name)
+			add(&result.failed, "failed", repo.Name)
 		case "diverged", "dirty", "conflict", "mismatch", "not_git", "branch_error", "no_remote", "no_upstream", "invalid":
-			result.conflicts = append(result.conflicts, repo.Name)
+			add(&result.conflicts, "conflict", repo.Name)
 		default: // skipped, dry_run, and anything newer, as ru counts them
-			result.repos.Skipped = append(result.repos.Skipped, repo.Name)
+			add(&result.repos.Skipped, "skipped", repo.Name)
 		}
 	}
 	return result, nil
