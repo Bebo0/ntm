@@ -130,6 +130,13 @@ func (s *Storage) Export(sessionName, checkpointID string, destPath string, opts
 		return nil, err
 	}
 
+	// Do not repackage damaged source bytes with fresh archive checksums.
+	integrity := newIntegrityResult()
+	cp.checkArtifactChecksums(cpDir, integrity)
+	if err := artifactIntegrityError(integrity); err != nil {
+		return nil, err
+	}
+
 	// Determine output path
 	if destPath == "" {
 		ext := ".tar.gz"
@@ -184,6 +191,10 @@ func (s *Storage) Export(sessionName, checkpointID string, destPath string, opts
 	}
 	redactedScrollbackFiles, err := prepareRedactedScrollbackArtifacts(cpDir, cpData, opts)
 	if err != nil {
+		return nil, err
+	}
+
+	if err := prepareExportArtifactIntegrity(cpDir, cpData, redactedScrollbackFiles); err != nil {
 		return nil, err
 	}
 
@@ -277,6 +288,10 @@ func (s *Storage) exportTarGz(w io.Writer, cpDir string, cp *Checkpoint, files [
 			}
 		}
 
+		if err := verifyExportArtifactBytes(cp, file, data); err != nil {
+			return err
+		}
+
 		checksum := sha256sum(data)
 		manifest.Checksums[file] = checksum
 		manifest.Files = append(manifest.Files, ManifestEntry{
@@ -361,6 +376,10 @@ func (s *Storage) exportZip(w io.Writer, cpDir string, cp *Checkpoint, files []s
 			if err != nil {
 				return fmt.Errorf("failed to read checkpoint file %s: %w", file, err)
 			}
+		}
+
+		if err := verifyExportArtifactBytes(cp, file, data); err != nil {
+			return err
 		}
 
 		checksum := sha256sum(data)
@@ -570,6 +589,12 @@ func (s *Storage) finishCheckpointImport(cp *Checkpoint, manifest *ExportManifes
 		return nil, err
 	}
 
+	// Embedded payload integrity is mandatory when present, independently
+	// of the optional outer archive manifest check, and before any overwrite.
+	if err := verifyImportedArtifactIntegrity(cp, fileContents); err != nil {
+		return nil, err
+	}
+
 	sessionName := cp.SessionName
 
 	// Apply overrides
@@ -769,6 +794,9 @@ func prepareRedactedScrollbackArtifacts(cpDir string, cp *Checkpoint, opts Expor
 		data, err := os.ReadFile(srcPath)
 		if err != nil {
 			return nil, fmt.Errorf("failed to read checkpoint file %s: %w", pane.ScrollbackFile, err)
+		}
+		if err := verifyExportArtifactBytes(cp, pane.ScrollbackFile, data); err != nil {
+			return nil, err
 		}
 		artifact, err := redactScrollbackArtifact(pane.ScrollbackFile, data)
 		if err != nil {

@@ -261,6 +261,14 @@ func (r *Restorer) restoreFromCheckpoint(cp *Checkpoint, opts RestoreOptions) (r
 		}
 	}()
 
+	// Validate saved payloads before any replacement, launch, or context
+	// injection. --force authorizes replacement, never ignoring corruption.
+	warnings, err := preflightCheckpointArtifacts(ctx, r.storage, cp, r.sourceSession)
+	result.Warnings = append(result.Warnings, warnings...)
+	if err != nil {
+		return result, err
+	}
+
 	// Surface assignment and BV summary from checkpoint (bd-32ck)
 	if len(cp.Assignments) > 0 {
 		slog.Info("checkpoint contains assignments",

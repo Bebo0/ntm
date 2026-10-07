@@ -1,6 +1,7 @@
 package checkpoint
 
 import (
+	"context"
 	"fmt"
 	"sort"
 	"strconv"
@@ -66,8 +67,33 @@ func (cp *Checkpoint) recordArtifactChecksums(dir string) error {
 }
 
 func (cp *Checkpoint) checkArtifactChecksums(dir string, result *IntegrityResult) {
+	cp.checkArtifactChecksumsContext(context.Background(), dir, result)
+}
+
+func (cp *Checkpoint) checkArtifactChecksumsContext(ctx context.Context, dir string, result *IntegrityResult) {
+	cp.checkArtifactChecksumsUsing(result, func(rel string, expected ArtifactChecksum) error {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		path, err := resolveExistingCheckpointArtifactPath(dir, rel)
+		if err != nil {
+			return err
+		}
+		return verifyArtifactFileContext(ctx, path, expected)
+	})
+}
+
+// Keep manifest membership rules identical for on-disk checkpoints and
+// archive entries, which must be validated before publication.
+func (cp *Checkpoint) checkArtifactChecksumsUsing(result *IntegrityResult, verify func(string, ArtifactChecksum) error) {
 	paths := checkpointPayloadFiles(cp)
 	result.Details["checksums_checked"] = "0"
+	if err := validateCheckpointArtifactReferences(cp); err != nil {
+		result.ConsistencyValid = false
+		result.Details["checksum_status"] = "failed"
+		result.Errors = append(result.Errors, err.Error())
+		return
+	}
 	if cp.ArtifactIntegrity == nil {
 		result.Details["checksum_status"] = "unavailable"
 		if len(paths) > 0 {
@@ -115,12 +141,7 @@ func (cp *Checkpoint) checkArtifactChecksums(dir string, result *IntegrityResult
 			fail(fmt.Sprintf("missing checksum for artifact %q", rel))
 			continue
 		}
-		path, err := resolveExistingCheckpointArtifactPath(dir, rel)
-		if err != nil {
-			fail(fmt.Sprintf("verifying artifact %q: %v", rel, err))
-			continue
-		}
-		if err := verifyArtifactFile(path, expected); err != nil {
+		if err := verify(rel, expected); err != nil {
 			fail(fmt.Sprintf("artifact %q: %v", rel, err))
 			continue
 		}
