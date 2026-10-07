@@ -319,11 +319,16 @@ func TestGuardsCheckCommandHonorsConfiguredAgentMailEndpoint(t *testing.T) {
 	if err := os.WriteFile(configPath, []byte(configBody), 0o644); err != nil {
 		t.Fatalf("write config: %v", err)
 	}
-	t.Setenv("NTM_CONFIG", configPath)
 	t.Setenv("AGENT_MAIL_URL", "")
-	t.Cleanup(func() { agentmail.UseConfiguredEndpoint("", "") })
+	// --config is explicit because the global flag value outlives a
+	// command (resetFlags leaves it); restore whatever an earlier test left.
+	oldCfgFile := cfgFile
+	t.Cleanup(func() {
+		cfgFile = oldCfgFile
+		agentmail.UseConfiguredEndpoint("", "")
+	})
 
-	out, err := execCommand(t, "guards", "check", "--staged")
+	out, err := execCommand(t, "--config", configPath, "guards", "check", "--staged")
 	if err == nil {
 		t.Fatalf("reserved file must block the commit; output=%q", out)
 	}
