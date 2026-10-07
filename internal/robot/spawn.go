@@ -493,14 +493,19 @@ type SpawnPromptDelivery struct {
 
 // SpawnedAgent represents an agent created during spawn.
 type SpawnedAgent struct {
-	Pane      string `json:"pane"`
-	Name      string `json:"name,omitempty"`
-	Type      string `json:"type"`
-	Variant   string `json:"variant,omitempty"`
-	Title     string `json:"title"`
-	Ready     bool   `json:"ready"`
-	StartupMs int64  `json:"startup_ms"`
-	Error     string `json:"error,omitempty"`
+	Pane string `json:"pane"`
+	// PaneID is the stable tmux pane id (%N), the key of agent_mail.agent_map.
+	PaneID string `json:"pane_id,omitempty"`
+	// AgentMailName is the canonical Agent Mail identity published for the
+	// pane before launch; absent when registration is disabled or failed.
+	AgentMailName string `json:"agent_mail_name,omitempty"`
+	Name          string `json:"name,omitempty"`
+	Type          string `json:"type"`
+	Variant       string `json:"variant,omitempty"`
+	Title         string `json:"title"`
+	Ready         bool   `json:"ready"`
+	StartupMs     int64  `json:"startup_ms"`
+	Error         string `json:"error,omitempty"`
 }
 
 func collectSpawnAdmissionInputWithPanes(
@@ -1267,6 +1272,7 @@ func GetSpawn(ctx context.Context, opts SpawnOptions, cfg *config.Config) (*Spaw
 			userName := nameMap.AssignNew("user", userPaneRef)
 			output.Agents = append(output.Agents, SpawnedAgent{
 				Pane:      userPaneRef,
+				PaneID:    panes[0].ID,
 				Name:      userName,
 				Type:      "user",
 				Title:     panes[0].Title,
@@ -1363,6 +1369,10 @@ func GetSpawn(ctx context.Context, opts SpawnOptions, cfg *config.Config) (*Spaw
 		agent.Name = nameMap.AssignNew(request.agentType, agent.Pane)
 		if pane.ID != "" {
 			monitorPaneIDs[agent.Pane] = pane.ID
+			agent.PaneID = pane.ID
+			if output.AgentMail != nil {
+				agent.AgentMailName = output.AgentMail.AgentMap[pane.ID]
+			}
 		}
 		if launchErr != nil && agent.Error == "" {
 			agent.Error = launchErr.Error()

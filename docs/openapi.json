@@ -17155,6 +17155,10 @@
       "SpawnedAgent": {
         "type": "object",
         "properties": {
+          "agent_mail_name": {
+            "type": "string",
+            "description": "Agent mail name"
+          },
           "error": {
             "type": "string",
             "description": "Error"
@@ -17166,6 +17170,10 @@
           "pane": {
             "type": "string",
             "description": "Pane"
+          },
+          "pane_id": {
+            "type": "string",
+            "description": "Pane i d"
           },
           "ready": {
             "type": "boolean",

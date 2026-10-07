@@ -201,6 +201,21 @@ func TestGetSpawnPublishesAgentMailIdentityBeforeEachLaunch(t *testing.T) {
 			t.Errorf("agent_map[%s] = %q, want %q", paneID, status.AgentMap[paneID], name)
 		}
 	}
+	// Each agents[] entry carries its stable pane id and identity, so a
+	// caller can join agents[] with agent_map without re-listing panes.
+	joined := map[string]string{}
+	for _, agent := range out.Agents {
+		if agent.Type == "user" {
+			if agent.PaneID != "%0" || agent.AgentMailName != "" {
+				t.Errorf("user agents[] entry = %+v, want pane_id %%0 and no identity", agent)
+			}
+			continue
+		}
+		joined[agent.PaneID] = agent.AgentMailName
+	}
+	if len(joined) != len(want) || joined["%1"] != want["%1"] || joined["%2"] != want["%2"] {
+		t.Errorf("agents[] pane_id -> agent_mail_name = %v, want %v", joined, want)
+	}
 
 	tools, programs := mail.calls()
 	if strings.Join(programs, ",") != "claude-code,codex-cli" {
