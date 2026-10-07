@@ -3506,14 +3506,19 @@ func robotPersistenceRefreshesProjection(cmd *cobra.Command) bool {
 	return surfaces == 0 || exempt < surfaces
 }
 
-// robotSurfacesWithoutProjection are robot surfaces that answer from static
-// metadata or another tool (cass, jfp, ms, xf, slb, rch, caut, ru, dcg, rano,
-// giil, Agent Mail) and never read the normalized projection: an RTA call
-// graph from each Print function, over static calls and interface invokes,
-// does not reach currentProjectionStore. They skip the refresh, which on a
-// busy host cost 2.5-10s and ~60 subprocesses per call. An invocation that
-// also names any other robot surface still refreshes.
+// robotSurfacesWithoutProjection are robot surfaces that never read the
+// normalized projection, so they skip its refresh, which on a busy host cost
+// 2.5-10s and ~60 subprocesses per call. Evidence, from an RTA call graph over
+// static calls and interface invokes starting at each Print function: the
+// static-metadata and tool-bridge surfaces (cass, jfp, ms, xf, slb, rch, caut,
+// ru, dcg, rano, giil, Agent Mail) never reach currentProjectionStore; send,
+// interrupt, ack, tail, is-working and send-receipt reach the store only for
+// send-operation records and attention-event appends (the send guard hook
+// included). An invocation that also names any other robot surface still
+// refreshes.
 var robotSurfacesWithoutProjection = map[string]bool{
+	"robot-send": true, "robot-interrupt": true, "robot-ack": true, "robot-tail": true,
+	"robot-is-working": true, "robot-send-receipt": true,
 	"robot-capabilities": true, "robot-help": true, "robot-docs": true, "robot-schema": true,
 	"robot-palette": true, "robot-recipes": true, "robot-ensemble-modes": true, "robot-ensemble-presets": true,
 	"robot-default-prompts": true, "robot-profile-list": true, "robot-profile-show": true,
