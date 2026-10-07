@@ -153,6 +153,21 @@ func (e *Executor) stopBeforeDispatch(ctx context.Context, result *StepResult) b
 // notification. Otherwise a WaitNone cleanup save (or the final save itself)
 // can fail after consumers have already been told the workflow succeeded.
 func (e *Executor) finishExecution(ctx context.Context, workflow *Workflow, err error) (*ExecutionState, error) {
+	// Both new and resumed attempts must finish their authored handoff and
+	// output checks before publishing the terminal state. Ordinary main-step
+	// failures still run post hooks; cancellation uses on_cancel instead.
+	e.stateMu.Lock()
+	e.state.OutputValidation = nil
+	e.stateMu.Unlock()
+	if ctx.Err() == nil && e.checkpointFailure() == nil {
+		tailErr := e.runPostPipelineSteps(ctx, workflow)
+		err = errors.Join(err, tailErr)
+		if tailErr == nil && ctx.Err() == nil && e.checkpointFailure() == nil {
+			// Hooks may create the artifacts declared by Workflow.Outputs.
+			e.validateDeclaredOutputs(workflow)
+		}
+	}
+
 	err = joinCheckpointError(err, e.checkpointFailure())
 	// Observe cancellation before stopping normal fire-and-forget commands.
 	// Cancelling their lifetime on successful completion is not a cancelled run.

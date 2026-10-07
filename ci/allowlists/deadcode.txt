@@ -183,7 +183,6 @@ internal/integrations/caut/cache.go:UsageCache.UpdateUsage	bd-ld4j2	reachable on
 internal/metrics/collector.go:MetricsReport.ExportCSV	bd-ld4j2	reachable only through RTA's reflection rule at the 2026-10-05 baseline; wire it (surface + behavioral test) or delete it
 internal/metrics/collector.go:MetricsReport.ExportJSON	bd-ld4j2	reachable only through RTA's reflection rule at the 2026-10-05 baseline; wire it (surface + behavioral test) or delete it
 internal/output/errors.go:CLIError.WithCause	bd-ld4j2	reachable only through RTA's reflection rule at the 2026-10-05 baseline; wire it (surface + behavioral test) or delete it
-internal/pipeline/deps.go:DependencyGraph.IsExecuted	bd-ld4j2	reachable only through RTA's reflection rule at the 2026-10-05 baseline; wire it (surface + behavioral test) or delete it
 internal/pipeline/deps.go:DependencyGraph.IsFailed	bd-ld4j2	reachable only through RTA's reflection rule at the 2026-10-05 baseline; wire it (surface + behavioral test) or delete it
 internal/pipeline/deps.go:DependencyGraph.Resolve	bd-ld4j2	reachable only through RTA's reflection rule at the 2026-10-05 baseline; wire it (surface + behavioral test) or delete it
 internal/pipeline/executor.go:Executor.SetDetector	bd-ld4j2	reachable only through RTA's reflection rule at the 2026-10-05 baseline; wire it (surface + behavioral test) or delete it

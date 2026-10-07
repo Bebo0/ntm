@@ -48,8 +48,9 @@ type Workflow struct {
 	// Step definitions
 	Steps []Step `yaml:"steps" toml:"steps" json:"steps"`
 
-	// PostPipelineSteps run after the main step graph completes successfully.
-	// Failures here are reported but don't retroactively fail the pipeline.
+	// PostPipelineSteps run after the main graph succeeds or fails, unless
+	// cancelled. Resume adopts completed hooks when continuing a partial tail,
+	// and runs a fresh tail if main work reopens. Hook failures are advisory.
 	PostPipelineSteps []Step `yaml:"post_pipeline_steps,omitempty" toml:"post_pipeline_steps,omitempty" json:"post_pipeline_steps,omitempty"`
 }
 
