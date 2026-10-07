@@ -193,7 +193,12 @@ const MinPollInterval = 100 * time.Millisecond
 // MinDigestInterval is the minimum allowed digest interval.
 const MinDigestInterval = 10 * time.Second
 
-// DefaultCoordinatorConfig returns sensible defaults.
+// DefaultCoordinatorConfig returns sensible defaults. Every action that
+// messages agents or admits work is opt-in: each session monitor hosts a
+// coordinator, so a default-on action would run in every spawned session.
+// ConflictNotify in particular mails every holder of overlapping reservations
+// project-wide (other sessions' agents included) at high importance, again
+// per persisting pair after each cooldown.
 func DefaultCoordinatorConfig() CoordinatorConfig {
 	return CoordinatorConfig{
 		PollInterval:      5 * time.Second,
@@ -201,7 +206,7 @@ func DefaultCoordinatorConfig() CoordinatorConfig {
 		AutoAssign:        false, // Disabled by default - opt-in
 		IdleThreshold:     30.0,
 		AssignOnlyIdle:    true,
-		ConflictNotify:    true,
+		ConflictNotify:    false, // Disabled by default - opt-in
 		ConflictNegotiate: false, // Manual resolution by default
 		SendDigests:       false, // Disabled by default
 		HumanAgent:        "Human",

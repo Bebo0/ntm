@@ -35,6 +35,7 @@ import (
 	"github.com/Dicklesworthstone/ntm/internal/persona"
 	"github.com/Dicklesworthstone/ntm/internal/pressure"
 	"github.com/Dicklesworthstone/ntm/internal/redaction"
+	"github.com/Dicklesworthstone/ntm/internal/resilience"
 	"github.com/Dicklesworthstone/ntm/internal/robot"
 	statuspkg "github.com/Dicklesworthstone/ntm/internal/status"
 	"github.com/Dicklesworthstone/ntm/internal/tmux"
@@ -467,14 +468,9 @@ func resolveAssignProjectDir(ctx context.Context, session string) (string, error
 // continue after an invalid project overlay silently drops safety policy.
 func configureAuthoritativeAssignmentPolicy(projectDir string) error {
 	projectDir = strings.TrimSpace(projectDir)
-	if projectDir == "" {
-		return markCLIInvalidInput(errors.New("assignment safety policy requires an authoritative project directory"))
-	}
-	globalPath := selectedConfigPath()
-	requireGlobal := cfgFile != "" || os.Getenv("NTM_CONFIG") != ""
-	effective, err := config.LoadAssignmentPolicyStrict(projectDir, globalPath, requireGlobal)
+	effective, err := loadAuthoritativeAssignmentPolicy(projectDir)
 	if err != nil {
-		return markCLIInvalidInput(fmt.Errorf("load assignment safety policy for %s using %s: %w", projectDir, globalPath, err))
+		return markCLIInvalidInput(err)
 	}
 	bv.ConfigureOperatorGatedLabels(effective.Assign.OperatorGatedLabels)
 	if err := bv.ConfigureProjectOperatorGatedLabels(projectDir, effective.Assign.OperatorGatedLabels); err != nil {
@@ -484,6 +480,21 @@ func configureAuthoritativeAssignmentPolicy(projectDir string) error {
 		return markCLIInvalidInput(fmt.Errorf("register work-source policy for %s: %w", projectDir, err))
 	}
 	return nil
+}
+
+// loadAuthoritativeAssignmentPolicy strictly loads the effective assignment
+// policy for projectDir without installing it.
+func loadAuthoritativeAssignmentPolicy(projectDir string) (*config.Config, error) {
+	if strings.TrimSpace(projectDir) == "" {
+		return nil, errors.New("assignment safety policy requires an authoritative project directory")
+	}
+	globalPath := selectedConfigPath()
+	requireGlobal := cfgFile != "" || os.Getenv("NTM_CONFIG") != ""
+	effective, err := config.LoadAssignmentPolicyStrict(projectDir, globalPath, requireGlobal)
+	if err != nil {
+		return nil, fmt.Errorf("load assignment safety policy for %s using %s: %w", projectDir, globalPath, err)
+	}
+	return effective, nil
 }
 
 // ensureAuthoritativeAssignmentPolicy installs assignment policy once for the
@@ -6603,6 +6614,18 @@ func (w *WatchLoop) Run(ctx context.Context) error {
 
 	var maintainer assignWatchMaintainer
 	if w.opts != nil && w.opts.ReserveFiles && !w.opts.DryRun {
+		// Watch maintenance publishes completion events that this loop
+		// consumes. The session monitor's coordinator maintains the same
+		// ledger without them and could retire a finished assignment first,
+		// so it pauses until watch mode exits.
+		claim, claimErr := resilience.ClaimSessionCoordinator(ctx, w.session)
+		if claimErr != nil {
+			return fmt.Errorf("claim session coordination for assignment maintenance: %w", claimErr)
+		}
+		defer claim.Release()
+		if claim.Preempted {
+			w.logf("Paused the session monitor's coordinator while watch mode maintains assignments")
+		}
 		factory := w.newMaintainer
 		if factory == nil {
 			factory = newAssignWatchMaintainer

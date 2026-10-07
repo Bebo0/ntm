@@ -18,6 +18,7 @@ import (
 	"github.com/Dicklesworthstone/ntm/internal/agentmail"
 	"github.com/Dicklesworthstone/ntm/internal/config"
 	"github.com/Dicklesworthstone/ntm/internal/coordinator"
+	"github.com/Dicklesworthstone/ntm/internal/resilience"
 	"github.com/Dicklesworthstone/ntm/internal/robot"
 	"github.com/Dicklesworthstone/ntm/internal/tmux"
 	"github.com/Dicklesworthstone/ntm/internal/tui/theme"
@@ -73,6 +74,11 @@ func newCoordinatorCmd() *cobra.Command {
 The coordinator monitors agents, detects file conflicts, sends periodic
 digests, and can automatically assign work to idle agents based on bv
 triage recommendations.
+
+Every session started by 'ntm spawn' runs the coordinator inside its session
+monitor. It always renews the file reservations of in-progress assignments and
+releases them when the assigned bead closes; the optional features below act
+only once enabled.
 
 Examples:
   ntm coordinator status myproject        # Show coordinator status
@@ -163,21 +169,82 @@ func runCoordinatorStatus(cmd *cobra.Command, args []string) error {
 
 	agents := coord.GetAgents()
 	idleAgents := coord.GetIdleAgents()
+	runtime := readCoordinatorRuntime(session)
 
 	if jsonOutput {
-		return outputCoordinatorStatusJSON(session, agents, idleAgents, coordConfig)
+		return outputCoordinatorStatusJSON(session, agents, idleAgents, coordConfig, runtime)
 	}
 
-	return renderCoordinatorStatus(session, agents, idleAgents, coordConfig)
+	return renderCoordinatorStatus(session, agents, idleAgents, coordConfig, runtime)
 }
 
-func outputCoordinatorStatusJSON(session string, agents map[string]*coordinator.AgentState, idleAgents []*coordinator.AgentState, coordCfg coordinator.CoordinatorConfig) error {
+// coordinatorRuntimeView reports where, if anywhere, the session's
+// coordinator is running. Only a live session monitor publishes one.
+type coordinatorRuntimeView struct {
+	Host              string     `json:"host"`
+	State             string     `json:"state"`
+	Summary           string     `json:"summary"`
+	PID               int        `json:"pid,omitempty"`
+	Mode              string     `json:"mode,omitempty"`
+	Features          []string   `json:"features"`
+	ConfigPath        string     `json:"config_path,omitempty"`
+	Healthy           bool       `json:"healthy"`
+	StateSince        *time.Time `json:"state_since,omitempty"`
+	HeartbeatAt       *time.Time `json:"heartbeat_at,omitempty"`
+	LastMaintenanceAt *time.Time `json:"last_maintenance_at,omitempty"`
+	MaintenanceError  string     `json:"maintenance_error,omitempty"`
+	Error             string     `json:"error,omitempty"`
+}
+
+const (
+	coordinatorRuntimeHostNone   = "none"
+	coordinatorRuntimeNotRunning = "not_running"
+)
+
+func readCoordinatorRuntime(session string) coordinatorRuntimeView {
+	status, err := resilience.ReadSessionCoordinatorStatus(session)
+	if err != nil || !status.Alive {
+		return coordinatorRuntimeView{
+			Host: coordinatorRuntimeHostNone, State: coordinatorRuntimeNotRunning, Features: []string{},
+			Summary: fmt.Sprintf("not running: no live session monitor hosts it; 'ntm coordinator run %s' coordinates it in the foreground", session),
+		}
+	}
+	features := status.Features
+	if features == nil {
+		features = []string{}
+	}
+	stateSince, heartbeatAt := status.StateSince, status.HeartbeatAt
+	view := coordinatorRuntimeView{
+		Host: status.Host, State: status.State, PID: status.PID, Mode: status.Mode, Features: features,
+		ConfigPath: status.ConfigPath, Healthy: status.Healthy, StateSince: &stateSince, HeartbeatAt: &heartbeatAt,
+		LastMaintenanceAt: status.LastMaintenanceAt, MaintenanceError: status.MaintenanceError, Error: status.Error,
+	}
+	switch status.State {
+	case resilience.SessionCoordinatorRunning:
+		if status.Mode == monitorCoordinatorModeMaintenance {
+			view.Summary = fmt.Sprintf("running inside the session monitor (pid %d): maintaining assignment leases; no optional features enabled", status.PID)
+		} else {
+			view.Summary = fmt.Sprintf("running inside the session monitor (pid %d) with %s", status.PID, strings.Join(features, ", "))
+		}
+	case resilience.SessionCoordinatorYielded:
+		view.Summary = fmt.Sprintf("paused inside the session monitor (pid %d) while a foreground 'ntm coordinator run' or 'ntm assign --watch' coordinates the session", status.PID)
+	default:
+		view.Summary = fmt.Sprintf("%s inside the session monitor (pid %d)", status.State, status.PID)
+	}
+	if !status.Healthy {
+		view.Summary += " (status heartbeat is stale)"
+	}
+	return view
+}
+
+func outputCoordinatorStatusJSON(session string, agents map[string]*coordinator.AgentState, idleAgents []*coordinator.AgentState, coordCfg coordinator.CoordinatorConfig, runtime coordinatorRuntimeView) error {
 	result := map[string]interface{}{
 		"session":     session,
 		"timestamp":   time.Now().Format(time.RFC3339),
 		"agent_count": len(agents),
 		"idle_count":  len(idleAgents),
 		"agents":      agents,
+		"runtime":     runtime,
 		// Mirror every CoordinatorConfig field the user can set in
 		// ~/.config/ntm/config.toml so `coordinator status --json` can be
 		// used to confirm whether a TOML override actually took effect at
@@ -199,7 +266,7 @@ func outputCoordinatorStatusJSON(session string, agents map[string]*coordinator.
 	return json.NewEncoder(os.Stdout).Encode(result)
 }
 
-func renderCoordinatorStatus(session string, agents map[string]*coordinator.AgentState, idleAgents []*coordinator.AgentState, coordCfg coordinator.CoordinatorConfig) error {
+func renderCoordinatorStatus(session string, agents map[string]*coordinator.AgentState, idleAgents []*coordinator.AgentState, coordCfg coordinator.CoordinatorConfig, runtime coordinatorRuntimeView) error {
 	t := theme.Current()
 
 	fmt.Printf("\n%s Coordinator Status: %s%s\n\n",
@@ -262,6 +329,23 @@ func renderCoordinatorStatus(session string, agents map[string]*coordinator.Agen
 	fmt.Printf("  Digest interval:     %s\n", coordCfg.DigestInterval)
 	fmt.Printf("  Idle threshold:      %.0fs\n", coordCfg.IdleThreshold)
 	fmt.Printf("  Human agent:         %s\n", coordCfg.HumanAgent)
+	fmt.Println()
+
+	fmt.Printf("  %sRuntime%s\n", "\033[1m", "\033[0m")
+	fmt.Printf("  %s%s%s\n", "\033[2m", strings.Repeat("─", 60), "\033[0m")
+	fmt.Printf("  Coordinator:         %s\n", runtime.Summary)
+	if runtime.ConfigPath != "" {
+		fmt.Printf("  Monitor config:      %s\n", runtime.ConfigPath)
+	}
+	if runtime.LastMaintenanceAt != nil {
+		fmt.Printf("  Last maintenance:    %s\n", runtime.LastMaintenanceAt.Local().Format(time.RFC3339))
+	}
+	if runtime.MaintenanceError != "" {
+		fmt.Printf("  Maintenance:         \033[31m%s\033[0m\n", runtime.MaintenanceError)
+	}
+	if runtime.Error != "" {
+		fmt.Printf("  Error:               \033[31m%s\033[0m\n", runtime.Error)
+	}
 	fmt.Println()
 
 	return nil
@@ -385,19 +469,28 @@ type coordinatorRunOutput struct {
 	Once        bool                           `json:"once"`
 	AutoAssign  bool                           `json:"auto_assign"`
 	Assignments []coordinator.AssignmentResult `json:"assignments"`
-	ErrorCode   string                         `json:"error_code,omitempty"`
-	Error       string                         `json:"error,omitempty"`
+	// MonitorYielded reports that the session monitor was running the
+	// coordinator and paused it for this command.
+	MonitorYielded bool   `json:"monitor_yielded,omitempty"`
+	ErrorCode      string `json:"error_code,omitempty"`
+	Error          string `json:"error,omitempty"`
 }
 
 func newCoordinatorRunCmd() *cobra.Command {
 	var once bool
 	cmd := &cobra.Command{
 		Use:   "run [session]",
-		Short: "Run the session coordinator until interrupted",
+		Short: "Run the session coordinator in the foreground until interrupted",
 		Long: `Run continuous session observation, assignment cleanup and lease renewal,
 configured digest delivery, and opt-in automatic assignment. Disabling new
 automatic assignments still releases finished work and maintains active leases.
 The command exits cleanly on SIGINT or SIGTERM.
+
+Sessions started by 'ntm spawn' already run this coordinator inside their
+session monitor (see 'ntm coordinator status'). This command takes precedence:
+the monitor pauses its coordinator while this command runs and resumes when it
+exits, so the session is never coordinated twice. Use it to coordinate a
+session without a monitor, or with a different --config.
 
 Use --once to execute exactly one fresh observation and maintenance cycle,
 including new assignments when enabled.`,
@@ -437,6 +530,16 @@ func runCoordinatorRun(cmd *cobra.Command, args []string, once bool) error {
 	if err := configureAuthoritativeAssignmentPolicy(projectKey); err != nil {
 		return err
 	}
+	// A session monitor hosting the coordinator stops it before this command
+	// coordinates, and cannot restart it until the claim is released.
+	claim, err := resilience.ClaimSessionCoordinator(cmd.Context(), session)
+	if err != nil {
+		return fmt.Errorf("claim session coordination: %w", err)
+	}
+	defer claim.Release()
+	if claim.Preempted && !jsonOutput {
+		fmt.Fprintf(cmd.ErrOrStderr(), "Paused the session monitor's coordinator for %s; it resumes when this command exits.\n", session)
+	}
 
 	runtimeConfig, ntmConfig := loadCoordinatorRuntimeConfigWithNTM()
 	mailClient := newAgentMailClient(projectKey)
@@ -457,7 +560,7 @@ func runCoordinatorRun(cmd *cobra.Command, args []string, once bool) error {
 		runErr := coordinatorRunFailure(assignments, cycleErr)
 		output := coordinatorRunOutput{
 			Success: runErr == nil, Session: session, Timestamp: time.Now().UTC().Format(time.RFC3339Nano),
-			Once: true, AutoAssign: runtimeConfig.AutoAssign, Assignments: assignments,
+			Once: true, AutoAssign: runtimeConfig.AutoAssign, Assignments: assignments, MonitorYielded: claim.Preempted,
 		}
 		if runErr != nil {
 			output.ErrorCode = "ASSIGNMENT_FAILED"
@@ -493,6 +596,7 @@ func runCoordinatorRun(cmd *cobra.Command, args []string, once bool) error {
 		output := coordinatorRunOutput{
 			Success: true, Session: session, Timestamp: time.Now().UTC().Format(time.RFC3339Nano),
 			Once: false, AutoAssign: runtimeConfig.AutoAssign, Assignments: []coordinator.AssignmentResult{},
+			MonitorYielded: claim.Preempted,
 		}
 		if err := json.NewEncoder(cmd.OutOrStdout()).Encode(output); err != nil {
 			return err
@@ -570,22 +674,32 @@ func loadCoordinatorRuntimeConfig() coordinator.CoordinatorConfig {
 // runtime config here; with no [rotation] section both stay at their zero
 // values and the trigger remains fully off.
 func loadCoordinatorRuntimeConfigWithNTM() (coordinator.CoordinatorConfig, *config.Config) {
-	coordConfig := coordinator.DefaultCoordinatorConfig()
-	var ntmConfig *config.Config
-	loaded, err := config.Load(selectedConfigPath())
-	switch {
-	case err != nil:
+	coordConfig, ntmConfig, err := loadCoordinatorRuntimeConfigFrom(selectedConfigPath())
+	if err != nil {
 		// Falling back to defaults silently would also silently drop
 		// persisted flags like [coordinator] conflict_negotiate — say so.
 		fmt.Fprintf(os.Stderr,
 			"Warning: could not load config (%v); coordinator running with DEFAULTS — persisted [coordinator] settings (e.g. conflict_negotiate) are NOT in effect\n", err)
-	case loaded != nil:
-		ntmConfig = loaded
-		coordConfig = coordinatorConfigFromTOML(loaded.Coordinator, coordConfig)
-		coordConfig.RotationUsageThreshold = loaded.Rotation.UsagePercentThreshold
-		coordConfig.RotationAutoConfirm = loaded.Rotation.AutoConfirm
 	}
 	return coordConfig, ntmConfig
+}
+
+// loadCoordinatorRuntimeConfigFrom loads path and maps it onto the runtime
+// coordinator configuration. On error it returns the built-in defaults with
+// the error, so a resident caller can keep its last good settings instead.
+func loadCoordinatorRuntimeConfigFrom(path string) (coordinator.CoordinatorConfig, *config.Config, error) {
+	coordConfig := coordinator.DefaultCoordinatorConfig()
+	loaded, err := config.Load(path)
+	if err != nil {
+		return coordConfig, nil, err
+	}
+	if loaded == nil {
+		return coordConfig, nil, nil
+	}
+	coordConfig = coordinatorConfigFromTOML(loaded.Coordinator, coordConfig)
+	coordConfig.RotationUsageThreshold = loaded.Rotation.UsagePercentThreshold
+	coordConfig.RotationAutoConfirm = loaded.Rotation.AutoConfirm
+	return coordConfig, loaded, nil
 }
 
 func renderDigest(digest coordinator.DigestSummary) error {
@@ -899,8 +1013,10 @@ Available features:
   mail-nudge          - Prompt idle panes when they have unread Agent Mail
 
 The flag is written to the [coordinator] section of the selected config file
-(--config, or the global ~/.config/ntm/config.toml). A running
-'ntm coordinator run' daemon reads config at startup; restart it to apply.
+(--config, or the global ~/.config/ntm/config.toml). Session monitors started
+by 'ntm spawn' host the coordinator and apply the change within 15 seconds; a
+foreground 'ntm coordinator run' reads config at startup, so restart it to
+apply.
 
 Examples:
   ntm coordinator enable auto-assign
@@ -933,8 +1049,10 @@ Available features:
   mail-nudge          - Unread Agent Mail prompts for idle panes
 
 The flag is written to the [coordinator] section of the selected config file
-(--config, or the global ~/.config/ntm/config.toml). A running
-'ntm coordinator run' daemon reads config at startup; restart it to apply.
+(--config, or the global ~/.config/ntm/config.toml). Session monitors started
+by 'ntm spawn' host the coordinator and apply the change within 15 seconds; a
+foreground 'ntm coordinator run' reads config at startup, so restart it to
+apply. Disabling a feature never stops assignment lease maintenance.
 
 Examples:
   ntm coordinator disable auto-assign
@@ -1050,7 +1168,7 @@ func runCoordinatorToggle(cmd *cobra.Command, args []string, enable bool, interv
 		fmt.Printf("  %s = %s\n", kv[0], kv[1])
 	}
 	fmt.Println()
-	fmt.Println("A running `ntm coordinator run` daemon reads config at startup; restart it to apply.")
+	fmt.Println("Session monitors apply this within 15 seconds; restart a foreground `ntm coordinator run` to apply it there.")
 
 	return nil
 }

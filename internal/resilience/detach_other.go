@@ -14,6 +14,8 @@ func monitorPlatformSupported() error {
 
 func tryMonitorLock(string) (*os.File, error) { return nil, monitorPlatformSupported() }
 
+func tryControlLock(string, bool) (*os.File, error) { return nil, monitorPlatformSupported() }
+
 // setDetachedProcess is a no-op on non-Unix platforms.
 // Process detachment requires platform-specific implementation on Windows.
 func setDetachedProcess(cmd *exec.Cmd) {

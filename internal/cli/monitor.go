@@ -247,6 +247,23 @@ func runMonitorContext(parent context.Context, session string) (runErr error) {
 		}()
 	}
 
+	// The session coordinator lives here for the same reason the timeline
+	// does: this process outlives every command that touches the session.
+	// It always maintains existing assignments' leases and runs whatever
+	// persisted [coordinator] toggles enable; a foreground `ntm coordinator
+	// run` or reservation-maintaining `ntm assign --watch` takes precedence.
+	// It stops (joined) before the attention feed and the lease close.
+	coordinatorCtx, stopCoordinator := context.WithCancel(ctx)
+	coordinatorDone := make(chan struct{})
+	go func() {
+		defer close(coordinatorDone)
+		newMonitorCoordinatorHost(session, manifest.ProjectDir).run(coordinatorCtx)
+	}()
+	defer func() {
+		stopCoordinator()
+		<-coordinatorDone
+	}()
+
 	// Poll for session existence periodically to exit if session is killed.
 	// Use consecutive-miss counting to tolerate transient tmux failures.
 	const maxMisses = 5 // ~25 seconds at 5s interval before giving up

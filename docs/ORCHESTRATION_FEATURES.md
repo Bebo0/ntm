@@ -11,12 +11,13 @@
 > **Shipped**, **Partial**, or **Planned** — for the semantics the parse gate
 > cannot check.
 
-**Document Version**: 2.2 (2026-08-17)
+**Document Version**: 2.3 (2026-10-07)
 
 ## Revision History
 
 | Version | Date | Changes |
 |---------|------|---------|
+| 2.3 | 2026-10-07 | Documented the session coordinator runtime: the session monitor hosts the coordinator, always maintains assignment leases, applies persisted toggles live, yields to foreground coordinators, and `conflict_notify` is now opt-in |
 | 2.2 | 2026-08-17 | Reality sweep: corrected every stale API example to shipped syntax (activity/wait/route/send/diff/CASS/spawn), fixed `[alerts]`/`[cass]` config keys and the session-health JSON shape to match the code, added per-section status markers, and put the file under the G3 docs-conformance gate with zero skip waivers |
 | 2.1 | 2026-07-18 | Documented atomic assignment, fail-closed operator-label enrichment, persistent coordinator toggles, and the canonical resilience configuration |
 | 2.0 | 2025-12-30 | Major revision: Added state transition hysteresis, enhanced wait command with error handling, Agent Mail integration for alerts, configurable scoring weights, sticky routing, parallel step execution, conditional logic, loop constructs, output parsing, pipeline notifications |
@@ -1222,14 +1223,68 @@ ntm coordinator disable conflict-negotiate
 
 The writer preserves unrelated keys, comments, file modes, and symlink targets;
 serializes concurrent writers; and validates the complete strict NTM schema
-before atomic replacement. A running coordinator daemon reads configuration at
-startup and must be restarted to apply a toggle.
+before atomic replacement. The coordinator each session monitor hosts (see
+below) re-reads the selected config every 15 seconds and applies a toggle
+without a restart. A foreground `ntm coordinator run` reads configuration at
+startup and must be restarted to apply one.
 
 Persistence supports both a `[coordinator]` table and root dotted assignments
 such as `coordinator.auto_assign = false`. It deliberately refuses a
 whole-section inline assignment such as
 `coordinator = { auto_assign = false }` without mutating the file, because that
 form cannot be updated surgically while preserving the operator's source.
+
+### Session Coordinator Runtime
+
+**Status: Shipped** — the session monitor `ntm spawn` starts hosts the
+coordinator; `ntm coordinator status` reports it.
+
+Every session monitor runs the session coordinator, so a toggle persisted with
+`ntm coordinator enable` acts on spawned sessions without a separate
+`ntm coordinator run`:
+
+```bash
+ntm coordinator enable auto-assign
+ntm coordinator status myproject
+ntm coordinator status myproject --json
+```
+
+- **Assignment maintenance always runs.** It renews the exact file
+  reservations of delivered, still-owned assignments before their one-hour
+  leases lapse, and releases an assignment's reservations and Beads claim once
+  its bead is closed (or its pane is gone). Reservations taken by a one-shot
+  `ntm assign` are therefore kept alive and cleaned up without
+  `ntm assign --watch`. With no feature enabled the monitor runs only this
+  maintenance, every 30 seconds, and does nothing while the session's
+  assignment ledger has no active assignments. Maintenance reads the saved
+  coordinator identity; it never registers one, sends mail, or admits work.
+- **Every other action is opt-in.** `auto-assign`, `digest`,
+  `conflict-notify`, `conflict-negotiate`, `mail-nudge`, the
+  `[rotation] usage_percent_threshold` trigger and
+  `[integrations.caam] auto_failover` all default off. Enabling any of them
+  switches the monitor to the full coordinator loop that
+  `ntm coordinator run` runs. `conflict_notify` is off by default because
+  notification mails every holder of overlapping reservations in the project,
+  including other sessions' agents, at high importance and again for each
+  persisting pair after its cooldown. Enabled auto-assignment whose assignment
+  safety policy does not load stays disabled, and the status reports why.
+- **No double coordination.** A foreground `ntm coordinator run` (including
+  `--once`) or an `ntm assign --watch` that maintains reservations claims the
+  session: the monitor stops its coordinator within about a second, stays paused
+  while any claim is held, and resumes after the last one ends. The claim waits
+  at most one minute for the monitor to stop. `coordinator run --json` reports
+  `monitor_yielded: true` when it paused the monitor. Ownership uses `flock`
+  locks next to the monitor's control files, so a crashed process never wedges
+  the other side.
+- **Status.** `ntm coordinator status` shows a Runtime section, and its JSON
+  carries `runtime`: `host` (`session-monitor` or `none`), `state`
+  (`running`, `yielded`, or `not_running`), `mode` (`maintenance` or `full`),
+  the enabled `features`, the monitor's `config_path`,
+  `last_maintenance_at`, `maintenance_error`, and `error`. Stopping the session
+  (`ntm kill`) stops the coordinator before the monitor releases its lease.
+
+Account-rotation monitors (`ntm swarm` CAAM rotation) run only their CAAM
+checker and do not host the coordinator.
 
 ### API Design
 

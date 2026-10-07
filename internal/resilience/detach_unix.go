@@ -16,6 +16,16 @@ func monitorPlatformSupported() error { return nil }
 // released by the kernel on process exit; its path is never unlinked. This
 // primitive also protects short manifest mutations, on a separate lock path.
 func tryMonitorLock(path string) (*os.File, error) {
+	file, err := tryControlLock(path, false)
+	if errors.Is(err, errControlLockBusy) {
+		return nil, ErrSessionMonitorOwned
+	}
+	return file, err
+}
+
+// tryControlLock takes a non-blocking exclusive or shared flock on a private
+// session control file. Contention is reported as errControlLockBusy.
+func tryControlLock(path string, shared bool) (*os.File, error) {
 	fd, err := syscall.Open(path, syscall.O_CREAT|syscall.O_RDWR|syscall.O_CLOEXEC|syscall.O_NOFOLLOW|syscall.O_NONBLOCK, 0600)
 	if err != nil {
 		return nil, err
@@ -31,10 +41,14 @@ func tryMonitorLock(path string) (*os.File, error) {
 		_ = file.Close()
 		return nil, errors.New("monitor/manifest lock must be a private, owned regular file with one link")
 	}
-	if err := syscall.Flock(fd, syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+	how := syscall.LOCK_EX
+	if shared {
+		how = syscall.LOCK_SH
+	}
+	if err := syscall.Flock(fd, how|syscall.LOCK_NB); err != nil {
 		_ = file.Close()
 		if errors.Is(err, syscall.EWOULDBLOCK) || errors.Is(err, syscall.EAGAIN) || errors.Is(err, syscall.EINTR) {
-			return nil, ErrSessionMonitorOwned
+			return nil, errControlLockBusy
 		}
 		return nil, fmt.Errorf("lock session monitor: %w", err)
 	}

@@ -305,13 +305,15 @@ func TestRunCycle_ConflictFlagsOff_EngineNeverInvoked(t *testing.T) {
 }
 
 // TestRunCycle_ConflictNotifyOnly_NotificationWithoutMutation covers the
-// notify-only mode (the persisted default): both holders are informed of the
-// named conflict, but no release is requested and nothing is mutated.
+// notify-only mode (`ntm coordinator enable conflict-notify`): both holders
+// are informed of the named conflict, but no release is requested and nothing
+// is mutated.
 func TestRunCycle_ConflictNotifyOnly_NotificationWithoutMutation(t *testing.T) {
 	const pattern = "internal/coordinator/monitor.go"
 	client, recorder := newConflictWireMailServer(t, conflictingPairReservationsJSON(pattern))
 
-	cfg := DefaultCoordinatorConfig() // ConflictNotify=true, ConflictNegotiate=false
+	cfg := DefaultCoordinatorConfig() // ConflictNegotiate=false
+	cfg.ConflictNotify = true
 	c := newConflictWireCoordinator(t, client, cfg)
 
 	if _, err := c.RunCycle(context.Background()); err != nil {
@@ -369,7 +371,8 @@ func TestRunCycle_ConflictCooldown_BoundsRepeatedTicks(t *testing.T) {
 // TestRunConflictCycle_BoundedPerTick pins the per-tick work bound with many
 // simultaneous conflicts.
 func TestRunConflictCycle_BoundedPerTick(t *testing.T) {
-	cfg := DefaultCoordinatorConfig() // notify-only
+	cfg := DefaultCoordinatorConfig()
+	cfg.ConflictNotify = true // notify-only
 	c := newConflictWireCoordinator(t, nil, cfg)
 
 	now := time.Now()

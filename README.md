@@ -539,9 +539,21 @@ inheritance). Opt a single session out with
 you wrote yourself that references `@ntm_agent_mail_*` is left untouched, and windows
 linked into several sessions are skipped with a diagnostic.
 
+Every session started by `ntm spawn` runs the coordinator inside its session
+monitor; `ntm coordinator status` shows it under Runtime (`runtime` in
+`--json`). The monitor always maintains assignment leases: it renews the file
+reservations of in-progress assignments, including those taken by a one-shot
+`ntm assign`, before their one-hour leases lapse, and releases them when the
+assigned bead closes. Every other coordinator action (`auto-assign`, `digest`,
+`conflict-notify`, `conflict-negotiate`, `mail-nudge`) is off until enabled.
+A foreground `ntm coordinator run` or a reservation-maintaining
+`ntm assign --watch` pauses the monitor's coordinator while it runs, so a
+session is never coordinated twice.
+
 `coordinator enable` and `disable` persist the selected `--config` file, or the
 global config by default, without replacing unrelated settings or comments.
-Restart an already running `ntm coordinator run` daemon to apply a toggle.
+Session monitors apply a toggle within 15 seconds; restart an already running
+foreground `ntm coordinator run` to apply it there.
 The selected file may use a `[coordinator]` table or root dotted assignments
 such as `coordinator.auto_assign = false`. A whole-section inline assignment
 such as `coordinator = { auto_assign = false }` is rejected without changing
@@ -555,7 +567,8 @@ verifying the current task claim and pane owner, and releases recorded leases
 when the task is confirmed terminal. It does not recreate expired or missing
 leases; failures remain visible, including under `--quiet`, and are retried.
 
-`ntm coordinator run` uses the same maintenance path before admitting new work.
+The monitor-hosted coordinator and `ntm coordinator run` use the same
+maintenance path before admitting new work.
 If one pane cannot be observed, independently verified healthy assignments can
 still renew and confirmed terminal work can still be cleaned up. Unverified
 assignments remain in the ledger, and a degraded coordinator cycle reports an

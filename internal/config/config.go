@@ -170,7 +170,7 @@ func DefaultCoordinatorConfig() CoordinatorConfig {
 		AutoAssign:           false,
 		IdleThreshold:        30.0,
 		AssignOnlyIdle:       true,
-		ConflictNotify:       true,
+		ConflictNotify:       false,
 		ConflictNegotiate:    false,
 		SendDigests:          false,
 		HumanAgent:           "Human",

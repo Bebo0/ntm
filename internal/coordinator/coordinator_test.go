@@ -76,8 +76,8 @@ func TestDefaultCoordinatorConfig(t *testing.T) {
 	if cfg.IdleThreshold != 30.0 {
 		t.Errorf("expected IdleThreshold 30.0, got %f", cfg.IdleThreshold)
 	}
-	if !cfg.ConflictNotify {
-		t.Error("expected ConflictNotify to be true by default")
+	if cfg.ConflictNotify {
+		t.Error("expected ConflictNotify to be false by default: every session monitor hosts a coordinator")
 	}
 	if cfg.ConflictNegotiate {
 		t.Error("expected ConflictNegotiate to be false by default")

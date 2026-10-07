@@ -84,8 +84,9 @@ func TestCoordinatorDefaultsWithoutTOML(t *testing.T) {
 //
 // This test does NOT import internal/coordinator (which would create a cycle);
 // it pins the expected values from coordinator.DefaultCoordinatorConfig as of
-// 2026-05-02. If you change defaults in either place, update both AND this
-// test.
+// 2026-10-07 (conflict_notify became opt-in when every session monitor began
+// hosting a coordinator). If you change defaults in either place, update both
+// AND this test.
 func TestCoordinatorDefaultMatchesRuntime(t *testing.T) {
 	got := DefaultCoordinatorConfig()
 	want := CoordinatorConfig{
@@ -94,7 +95,7 @@ func TestCoordinatorDefaultMatchesRuntime(t *testing.T) {
 		AutoAssign:        false,
 		IdleThreshold:     30.0,
 		AssignOnlyIdle:    true,
-		ConflictNotify:    true,
+		ConflictNotify:    false,
 		ConflictNegotiate: false,
 		SendDigests:       false,
 		HumanAgent:        "Human",
