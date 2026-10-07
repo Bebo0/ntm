@@ -332,6 +332,13 @@ and give operators an auditable ownership record; worktrees provide the separate
 checkout boundary. Merge reviewed agent branches into `main`, then clean the
 session's worktrees when that session is finished.
 
+Reservations are enforced at commit time: the pre-commit hook `ntm init`
+installs runs `ntm guards check --staged`, which refuses a commit touching files
+another agent holds an exclusive reservation on and names the holder (when Agent
+Mail is unreachable it warns and records a degraded run for `ntm doctor`; set
+`NTM_GUARD_STRICT=1` to fail closed). `ntm guards install` adds the check to a
+repository without that hook, or updates an older `ntm init` hook in place.
+
 ### 2. Dispatch, Monitoring, and Recovery
 
 Humans can broadcast prompts, interrupt panes, stream output, inspect health, compare

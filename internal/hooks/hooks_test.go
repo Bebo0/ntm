@@ -1,6 +1,9 @@
 package hooks
 
 import (
+	"os"
+	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -18,6 +21,77 @@ func TestGeneratePreCommitScriptIncludesBeadsSync(t *testing.T) {
 	}
 	if !strings.Contains(script, "REPO_ROOT="+quoteShell(repoRoot)) {
 		t.Errorf("expected quoted REPO_ROOT assignment, got: %q", script)
+	}
+}
+
+// ntm's managed pre-commit hook (written by `ntm init`) runs the reservation
+// check and refuses the commit when it fails. Before, the only hook that
+// checked reservations was the standalone guard, which `ntm guards install`
+// refused to install over this hook, so reservations stayed advisory.
+func TestPreCommitScriptRunsReservationGuard(t *testing.T) {
+	if _, err := exec.LookPath("bash"); err != nil {
+		t.Skip("bash not available")
+	}
+	dir := t.TempDir()
+	fakeNTM := filepath.Join(dir, "ntm")
+	// The fake ntm fails `guards check` when GUARD_FAIL is set and records
+	// every invocation.
+	if err := os.WriteFile(fakeNTM, []byte(`#!/bin/sh
+echo "$*" >> "$CALLS"
+if [ "$1 $2" = "guards check" ] && [ -n "$GUARD_FAIL" ]; then
+  echo "[ntm-guard] BLOCKED: src/a.go is reserved by GreenLake" >&2
+  exit 1
+fi
+exit 0
+`), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	script := generatePreCommitScript(fakeNTM, dir)
+	if !PreCommitRunsReservationGuard(script) {
+		t.Fatal("managed pre-commit hook does not report running the reservation guard")
+	}
+	hookPath := filepath.Join(dir, "pre-commit")
+	if err := os.WriteFile(hookPath, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	run := func(guardFail bool) (int, string) {
+		calls := filepath.Join(dir, "calls")
+		_ = os.Remove(calls)
+		cmd := exec.Command("bash", hookPath)
+		cmd.Env = append(os.Environ(), "CALLS="+calls, "PATH=/usr/bin:/bin")
+		if guardFail {
+			cmd.Env = append(cmd.Env, "GUARD_FAIL=1")
+		}
+		out, err := cmd.CombinedOutput()
+		recorded, _ := os.ReadFile(calls)
+		if exitErr, ok := err.(*exec.ExitError); ok {
+			return exitErr.ExitCode(), string(out) + string(recorded)
+		}
+		if err != nil {
+			t.Fatalf("running hook: %v", err)
+		}
+		return 0, string(out) + string(recorded)
+	}
+
+	if code, out := run(false); code != 0 || !strings.Contains(out, "guards check --staged") || !strings.Contains(out, "hooks run pre-commit") {
+		t.Fatalf("clean commit: exit %d, output %q; want 0 with the guard and UBS both run", code, out)
+	}
+	if code, out := run(true); code == 0 || !strings.Contains(out, "reserved by GreenLake") {
+		t.Fatalf("reserved file: exit %d, output %q; want the commit refused with the holder named", code, out)
+	}
+}
+
+func TestPreCommitRunsReservationGuard(t *testing.T) {
+	for content, want := range map[string]bool{
+		"#!/bin/bash\n# ntm-precommit-guard\nexec ntm guards check --staged\n": true,
+		generatePreCommitScript("ntm", "/repo"):                                true,
+		"#!/bin/bash\n# NTM_MANAGED_HOOK\nntm hooks run pre-commit\n":          false, // managed hook from before the guard
+		"#!/bin/sh\nmake lint\n":                                               false,
+	} {
+		if got := PreCommitRunsReservationGuard(content); got != want {
+			t.Errorf("PreCommitRunsReservationGuard(%.40q) = %v, want %v", content, got, want)
+		}
 	}
 }
 

@@ -802,6 +802,11 @@ func newSendCmd() *cobra.Command {
 				if err := validateSendRouteStrategy(routeStrategy); err != nil {
 					return earlyError(err)
 				}
+				// The explicit strategy routes to a named pane; without one the
+				// router silently fell back to least-loaded.
+				if routeStrategy == string(robot.StrategyExplicit) && paneSelector == "" && !panesSpecified {
+					return earlyError(fmt.Errorf("--route=explicit needs --pane to name the target pane"))
+				}
 				smartRoute = true
 			}
 			if skipFirst && smartRoute {

@@ -52,6 +52,72 @@ func TestGuardsInstallCmd(t *testing.T) {
 	}
 }
 
+// In a repo `ntm init` set up, the pre-commit hook is ntm's managed hook (beads
+// sync, UBS). `ntm guards install` used to refuse it ("hook already exists")
+// or, with --force, overwrite those steps with the standalone guard. It now
+// regenerates the managed hook, which runs the reservation check, and the
+// doctor check recognizes it.
+func TestGuardsInstallUpgradesManagedPreCommitHook(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+	repo := t.TempDir()
+	if out, err := exec.Command("git", "init", "-q", repo).CombinedOutput(); err != nil {
+		t.Fatalf("git init: %v %s", err, out)
+	}
+	hookPath := filepath.Join(repo, ".git", "hooks", "pre-commit")
+	legacy := "#!/bin/bash\n# NTM_MANAGED_HOOK - Do not edit manually\n# Installed by: ntm hooks install pre-commit\nntm hooks run pre-commit \"$@\"\n"
+	if err := os.MkdirAll(filepath.Dir(hookPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(hookPath, []byte(legacy), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(repo)
+	// The managed hook names the ntm binary it runs.
+	binDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(binDir, "ntm"), []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	oldJSON := jsonOutput
+	jsonOutput = true
+	t.Cleanup(func() { jsonOutput = oldJSON })
+
+	out, err := captureStdout(t, func() error { return runGuardsInstall("", false) })
+	if err != nil {
+		t.Fatalf("guards install over the managed hook: %v (%s)", err, out)
+	}
+	if !strings.Contains(out, "Updated ntm's managed pre-commit hook") {
+		t.Fatalf("install output = %s, want the managed hook updated", out)
+	}
+	content, err := os.ReadFile(hookPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"NTM_MANAGED_HOOK", "guards check --staged", "br sync --flush-only", "hooks run pre-commit"} {
+		if !strings.Contains(string(content), want) {
+			t.Fatalf("updated hook lacks %q:\n%s", want, content)
+		}
+	}
+	if check := guardHookPathCheck(); !strings.Contains(check.Message, "guard hook installed") && !strings.Contains(check.Message, "not on PATH") {
+		t.Fatalf("doctor guard check on the managed hook = %q, want it recognized as the guard", check.Message)
+	}
+
+	out, err = captureStdout(t, func() error { return runGuardsInstall("", false) })
+	if err != nil || !strings.Contains(out, "runs in ntm's managed pre-commit hook") {
+		t.Fatalf("second install = %s, %v; want it reported as already in place", out, err)
+	}
+
+	err = runGuardsUninstall(nil, nil)
+	if err == nil || !strings.Contains(err.Error(), "ntm hooks uninstall pre-commit") {
+		t.Fatalf("guards uninstall on the managed hook = %v, want a pointer to 'ntm hooks uninstall pre-commit'", err)
+	}
+	if after, _ := os.ReadFile(hookPath); string(after) != string(content) {
+		t.Fatal("guards uninstall modified the managed hook")
+	}
+}
+
 func TestGuardsUninstallCmd(t *testing.T) {
 	cmd := newGuardsUninstallCmd()
 	if cmd.Use != "uninstall" {

@@ -1842,6 +1842,8 @@ func TestSendCommandRejectsConflictingSmartRouteFlags(t *testing.T) {
 		{name: "unknown route strategy", args: []string{"session", "prompt", "--route=bogus"}, wantErr: "invalid routing strategy: bogus"},
 		{name: "unknown route lists affinity", args: []string{"session", "prompt", "--route=bogus"}, wantErr: "explicit, affinity)"},
 		{name: "empty route strategy", args: []string{"session", "prompt", "--route="}, wantErr: "--route requires a strategy"},
+		// Without a pane the explicit strategy used to fall back to least-loaded.
+		{name: "explicit route without pane", args: []string{"session", "prompt", "--route=explicit"}, wantErr: "--route=explicit needs --pane"},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {

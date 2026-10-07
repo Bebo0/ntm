@@ -392,25 +392,44 @@ else
     echo "[ntm] br not installed - skipping beads sync" >&2
 fi
 
+# Refuse commits touching files another agent holds an exclusive Agent Mail
+# reservation on ('ntm guards check'; when Agent Mail is unreachable it warns,
+# records a degraded run for 'ntm doctor' and allows the commit, unless
+# NTM_GUARD_STRICT=1).
+GUARD_EXIT=0
+%[3]s guards check --staged || GUARD_EXIT=$?
+
 # Run UBS scan on staged files
 UBS_EXIT=0
-%s hooks run pre-commit "$@" || UBS_EXIT=$?
+%[3]s hooks run pre-commit "$@" || UBS_EXIT=$?
 
 # Chain to backup hook if it exists
+BACKUP_EXIT=0
 BACKUP_HOOK="$(dirname "$0")/pre-commit.backup"
 if [ -x "$BACKUP_HOOK" ]; then
-    "$BACKUP_HOOK" "$@"
-    BACKUP_EXIT=$?
-    # If either failed, fail the hook
-    if [ $UBS_EXIT -ne 0 ] || [ $BACKUP_EXIT -ne 0 ]; then
-        exit 1
-    fi
-elif [ $UBS_EXIT -ne 0 ]; then
-    exit $UBS_EXIT
+    "$BACKUP_HOOK" "$@" || BACKUP_EXIT=$?
+fi
+
+if [ $GUARD_EXIT -ne 0 ] || [ $UBS_EXIT -ne 0 ] || [ $BACKUP_EXIT -ne 0 ]; then
+    exit 1
 fi
 
 exit 0
 `, safeRepoRoot, repoRootQuoted, quoteShell(ntmPath))
+}
+
+// PreCommitRunsReservationGuard reports whether a pre-commit hook runs ntm's
+// file-reservation check: the standalone guard `ntm guards install` writes,
+// or ntm's managed pre-commit hook, which includes the check.
+func PreCommitRunsReservationGuard(content string) bool {
+	return strings.Contains(content, "ntm-precommit-guard") ||
+		(isNTMHook(content) && strings.Contains(content, "guards check --staged"))
+}
+
+// IsManagedHook reports whether a hook script is ntm's managed hook
+// (`ntm init` / `ntm hooks install`), which `Install` regenerates in place.
+func IsManagedHook(content string) bool {
+	return isNTMHook(content)
 }
 
 // quoteShell quotes a string for safe use in a shell script.

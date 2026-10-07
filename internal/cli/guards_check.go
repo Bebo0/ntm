@@ -30,6 +30,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/Dicklesworthstone/ntm/internal/agentmail"
+	"github.com/Dicklesworthstone/ntm/internal/hooks"
 	"github.com/Dicklesworthstone/ntm/internal/state"
 )
 
@@ -312,7 +313,7 @@ func guardHookPathCheck() ConfigCheck {
 		return check
 	}
 	content, err := os.ReadFile(hookPath)
-	if err != nil || !strings.Contains(string(content), "ntm-precommit-guard") {
+	if err != nil || !hooks.PreCommitRunsReservationGuard(string(content)) {
 		check.Message = "pre-commit hook is not an NTM guard"
 		return check
 	}

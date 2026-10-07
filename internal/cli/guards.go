@@ -13,6 +13,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/Dicklesworthstone/ntm/internal/agentmail"
+	"github.com/Dicklesworthstone/ntm/internal/hooks"
 	"github.com/Dicklesworthstone/ntm/internal/output"
 	"github.com/Dicklesworthstone/ntm/internal/state"
 )
@@ -102,6 +103,14 @@ func runGuardsInstall(projectKey string, force bool) error {
 		return err
 	}
 
+	// ntm's managed pre-commit hook (`ntm init`) carries the reservation
+	// check itself; regenerate it in place so an older managed hook gains it,
+	// instead of refusing to touch it (or overwriting its beads sync and UBS
+	// steps with --force).
+	if content, err := os.ReadFile(hookPath); err == nil && hooks.IsManagedHook(string(content)) {
+		return installGuardInManagedHook(repoPath, projectKey, hookPath, string(content))
+	}
+
 	// Check if hook already exists
 	if !force && fileExists(hookPath) {
 		// Check if it's our hook
@@ -186,6 +195,38 @@ func runGuardsInstall(projectKey string, force bool) error {
 	fmt.Printf("  %s Agent Mail MCP not available - using fallback\n", warnStyle.Render("⚠"))
 	fmt.Println()
 
+	return nil
+}
+
+// installGuardInManagedHook makes ntm's managed pre-commit hook run the
+// reservation check, regenerating it when it predates the check.
+func installGuardInManagedHook(repoPath, projectKey, hookPath, content string) error {
+	message := "Reservation check runs in ntm's managed pre-commit hook"
+	if !hooks.PreCommitRunsReservationGuard(content) {
+		mgr, err := hooks.NewManager(repoPath)
+		if err != nil {
+			return fmt.Errorf("updating ntm's managed pre-commit hook: %w", err)
+		}
+		if err := mgr.Install(hooks.HookPreCommit, false); err != nil {
+			return fmt.Errorf("updating ntm's managed pre-commit hook: %w", err)
+		}
+		message = "Updated ntm's managed pre-commit hook to run the reservation check"
+	}
+	if IsJSONOutput() {
+		return output.PrintJSON(GuardsInstallResponse{
+			TimestampedResponse: output.NewTimestamped(),
+			Success:             true,
+			RepoPath:            repoPath,
+			ProjectKey:          projectKey,
+			HookPath:            hookPath,
+			Message:             message,
+		})
+	}
+	okStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("42"))
+	fmt.Println()
+	fmt.Printf("  %s %s\n", okStyle.Render("✓"), message)
+	fmt.Printf("    Hook: %s\n", hookPath)
+	fmt.Println()
 	return nil
 }
 
@@ -295,6 +336,9 @@ func runGuardsUninstall(cmd *cobra.Command, args []string) error {
 	}
 
 	if !strings.Contains(string(content), "ntm-precommit-guard") {
+		if hooks.IsManagedHook(string(content)) {
+			return fmt.Errorf("the reservation check at %s is part of ntm's managed pre-commit hook (beads sync, UBS); remove that hook with 'ntm hooks uninstall pre-commit'", hookPath)
+		}
 		return fmt.Errorf("pre-commit hook at %s is not an NTM guard - refusing to remove", hookPath)
 	}
 
@@ -409,7 +453,7 @@ func runGuardsStatus(cmd *cobra.Command, args []string) error {
 		content, err := os.ReadFile(hookPath)
 		if err == nil {
 			contentStr := string(content)
-			if strings.Contains(contentStr, "ntm-precommit-guard") {
+			if hooks.PreCommitRunsReservationGuard(contentStr) {
 				isNTMGuard = true
 				// Try to extract project key
 				for _, line := range strings.Split(contentStr, "\n") {
