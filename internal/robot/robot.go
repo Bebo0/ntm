@@ -7890,17 +7890,27 @@ func RefreshNormalizedProjection(ctx context.Context, store *state.Store, projec
 		adapters.DefaultWorkCoordinationAdapterConfig(resolvedProjectDir),
 	))
 
+	// The work (bv/br) and tmux (capture, process) collections are
+	// independent and each takes seconds on a busy host; run them together.
+	var (
+		tmuxSnapshot *NormalizedSnapshot
+		tmuxErr      error
+		tmuxDone     = make(chan struct{})
+	)
+	go func() {
+		defer close(tmuxDone)
+		tmuxSnapshot, tmuxErr = collectNormalizedTmuxProjectionContext(ctx, resolvedProjectDir, normalizedProjectionStaleAfter)
+	}()
 	signals, err := aggregator.Collect(ctx)
+	<-tmuxDone
 	if err != nil {
 		return fmt.Errorf("collect normalized projection: %w", err)
 	}
 	if signals == nil {
 		return nil
 	}
-
-	tmuxSnapshot, err := collectNormalizedTmuxProjectionContext(ctx, resolvedProjectDir, normalizedProjectionStaleAfter)
-	if err != nil {
-		return fmt.Errorf("collect tmux projection: %w", err)
+	if tmuxErr != nil {
+		return fmt.Errorf("collect tmux projection: %w", tmuxErr)
 	}
 
 	if err := persistNormalizedProjection(store, signals, tmuxSnapshot, normalizedProjectionStaleAfter); err != nil {
