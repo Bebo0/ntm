@@ -153,7 +153,7 @@ func TestPublishDurableWorkStoresUnavailableWorkAsAMarker(t *testing.T) {
 	if c.collections != 2 {
 		t.Fatalf("collections = %d, want the marker to force a fresh collection", c.collections)
 	}
-	if err := PublishDurableWork(nil, store, DefaultWorkCoordinationAdapterConfig(project), nil); err == nil { //nolint:staticcheck // nil context is the case under test
+	if err := PublishDurableWork(nil, store, DefaultWorkCoordinationAdapterConfig(project), nil); err == nil {
 		t.Fatal("PublishDurableWork accepted a nil context")
 	}
 }

@@ -1337,7 +1337,7 @@ func GetSpawn(ctx context.Context, opts SpawnOptions, cfg *config.Config) (*Spaw
 		}
 		pane := panes[startIdx+i]
 		command, model := agentCommands[request.agentType], launchModels[request.agentType]
-		if spec, ok := recipeLaunches[spawnRecipeKey{agentType: request.agentType, number: request.number}]; ok {
+		if spec, ok := recipeLaunches[spawnRecipeKey(request)]; ok {
 			command, model = spec.command, spec.model
 		}
 		title := fmt.Sprintf("%s__%s_%d", opts.Session, agentTypeShort(request.agentType), request.number)

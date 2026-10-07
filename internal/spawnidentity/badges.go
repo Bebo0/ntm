@@ -325,7 +325,7 @@ func ReconcileSessionBadges(ctx context.Context, opts BadgeReconcileOptions) (*B
 					report.Published++
 				}
 			}
-			if rec.PublishError != "" && !(ok && window.Linked) {
+			if rec.PublishError != "" && (!ok || !window.Linked) {
 				// (Linked windows were warned about once above.)
 				report.warnf("pane %s (%s): badge not published: %s", pane.ID, rec.AssignedName, rec.PublishError)
 			}

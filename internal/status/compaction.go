@@ -122,9 +122,10 @@ func compactionLineEvents(lines []string, agentType string) []compactionLineEven
 		trimmed := strings.TrimSpace(text)
 		if strings.HasPrefix(trimmed, "```") || strings.HasPrefix(trimmed, "~~~") {
 			marker := trimmed[:3]
-			if fence == "" {
+			switch fence {
+			case "":
 				fence = marker
-			} else if fence == marker {
+			case marker:
 				fence = ""
 			}
 			continue

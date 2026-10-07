@@ -102,7 +102,6 @@ func TestDisabledCoordinatorIsInert(t *testing.T) {
 // batch contract: a missing context fails every agent without side effects.
 func TestRegisterBatchWithoutContextCountsEveryAgentFailed(t *testing.T) {
 	agents := []Agent{{PaneID: "%1"}, {PaneID: "%2"}}
-	//nolint:staticcheck // a nil context is the degenerate input under test
 	status := RegisterBatch(nil, t.TempDir(), "batch", agents, Options{Enabled: true})
 	if status == nil || status.AgentsFailed != 2 || status.AgentsRegistered != 0 {
 		t.Fatalf("status = %+v, want both agents failed", status)
