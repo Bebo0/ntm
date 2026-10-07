@@ -7,27 +7,59 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/Dicklesworthstone/ntm/internal/config"
 )
 
 // RanoAdapter provides integration with the rano network observer tool.
-// rano observes socket connections, enabling per-agent connection attribution.
+// rano's monitor records socket connect/close events per process into an
+// SQLite database; ntm reads that history through `rano export`, enabling
+// per-agent connection attribution. ntm never starts the monitor itself.
 type RanoAdapter struct {
 	*BaseAdapter
+	database string // observer database passed to `rano export --sqlite`; empty = RanoDefaultDatabase
 }
+
+// RanoDefaultDatabase is rano's own default observer database. rano's monitor,
+// export, report and status commands all resolve it against their working
+// directory unless --sqlite (or the monitor's sqlite= config key) overrides it.
+const RanoDefaultDatabase = "observer.sqlite"
+
+// ErrRanoNoDatabase reports that no rano observer database exists at the
+// selected path, so there are no recorded connection observations to read.
+var ErrRanoNoDatabase = errors.New("rano observer database not found")
 
 // NewRanoAdapter creates a new rano adapter
 func NewRanoAdapter() *RanoAdapter {
 	return &RanoAdapter{
 		BaseAdapter: NewBaseAdapter(ToolRano, "rano"),
 	}
+}
+
+// SetDatabase selects the observer database the adapter reads (a leading ~ is
+// expanded). Empty selects rano's default, observer.sqlite in the working
+// directory. Configure it with [integrations.rano] sqlite_path.
+func (a *RanoAdapter) SetDatabase(path string) {
+	a.database = config.ExpandHome(strings.TrimSpace(path))
+}
+
+// Database returns the absolute path of the observer database the adapter reads.
+func (a *RanoAdapter) Database() (string, error) {
+	path := a.database
+	if path == "" {
+		path = RanoDefaultDatabase
+	}
+	return filepath.Abs(path)
 }
 
 // Detect checks if rano is installed
@@ -132,37 +164,22 @@ func (a *RanoAdapter) Info(ctx context.Context) (*ToolInfo, error) {
 
 // RanoAvailability represents the availability and compatibility of rano on PATH.
 type RanoAvailability struct {
-	Available     bool      `json:"available"`
-	Compatible    bool      `json:"compatible"`
-	HasCapability bool      `json:"has_capability"` // Operational status probe, not a kernel capability
-	CanReadProc   bool      `json:"can_read_proc"`  // Can read /proc for PID mapping
-	Version       Version   `json:"version,omitempty"`
-	Path          string    `json:"path,omitempty"`
-	LastChecked   time.Time `json:"last_checked"`
-	Error         string    `json:"error,omitempty"`
+	Available   bool      `json:"available"`
+	Compatible  bool      `json:"compatible"`
+	Operational bool      `json:"operational"`   // `rano status` succeeded; no kernel capability is required
+	CanReadProc bool      `json:"can_read_proc"` // Can read /proc for PID mapping
+	Version     Version   `json:"version,omitempty"`
+	Path        string    `json:"path,omitempty"`
+	LastChecked time.Time `json:"last_checked"`
+	Error       string    `json:"error,omitempty"`
 }
 
-// RanoStatus represents the current rano status
-type RanoStatus struct {
-	Running      bool   `json:"running"`
-	Monitoring   bool   `json:"monitoring"`
-	ProcessCount int    `json:"process_count"` // Number of processes being tracked
-	RequestCount int    `json:"request_count"` // Total API requests observed
-	BytesIn      int64  `json:"bytes_in"`      // Total bytes received
-	BytesOut     int64  `json:"bytes_out"`     // Total bytes sent
-	Error        string `json:"error,omitempty"`
-}
-
-// RanoProcessStats represents network stats for a single process/agent
+// RanoProcessStats aggregates one process's recorded connection events. rano
+// records socket connect/close events, not HTTP requests or transferred bytes,
+// so neither is measured here.
 type RanoProcessStats struct {
-	PID         int    `json:"pid"`
-	ProcessName string `json:"process_name,omitempty"`
-	// Exported socket observations do not measure HTTP requests or byte
-	// transfer. Never populate these unavailable measurements from connections.
-	RequestCount    int            `json:"request_count,omitempty"`
-	BytesIn         int64          `json:"bytes_in,omitempty"`
-	BytesOut        int64          `json:"bytes_out,omitempty"`
-	LastRequest     string         `json:"last_request,omitempty"` // ISO timestamp
+	PID             int            `json:"pid"`
+	ProcessName     string         `json:"process_name,omitempty"`
 	ConnectionCount int            `json:"connection_count"`
 	LastConnection  string         `json:"last_connection,omitempty"`
 	Providers       map[string]int `json:"providers,omitempty"`
@@ -213,22 +230,13 @@ func (a *RanoAdapter) InvalidateAvailabilityCache() {
 	ranoAvailabilityMutex.Unlock()
 }
 
-// IsAvailable returns true if rano is installed, compatible, and has required permissions.
+// IsAvailable returns true if rano is installed, compatible, and operational.
 func (a *RanoAdapter) IsAvailable(ctx context.Context) bool {
 	availability, err := a.GetAvailability(ctx)
 	if err != nil || availability == nil {
 		return false
 	}
-	return availability.Available && availability.Compatible && availability.HasCapability
-}
-
-// HasRequiredPermissions returns true if rano has the required capabilities.
-func (a *RanoAdapter) HasRequiredPermissions(ctx context.Context) bool {
-	availability, err := a.GetAvailability(ctx)
-	if err != nil || availability == nil {
-		return false
-	}
-	return availability.HasCapability
+	return availability.Available && availability.Compatible && availability.Operational
 }
 
 func (a *RanoAdapter) fetchAvailability(ctx context.Context) *RanoAvailability {
@@ -264,12 +272,11 @@ func (a *RanoAdapter) fetchAvailability(ctx context.Context) *RanoAvailability {
 	// Confirm rano is operational. rano's default observation mode enumerates
 	// sockets via /proc and needs no elevated capabilities for same-user
 	// processes, so a successful `rano status` is the correct availability
-	// signal. (HasCapability is retained for API compatibility and now means
-	// "rano is operational".)
-	availability.HasCapability = a.checkOperational(ctx)
+	// signal.
+	availability.Operational = a.checkOperational(ctx)
 	availability.CanReadProc = a.checkProcAccess()
 
-	if !availability.HasCapability {
+	if !availability.Operational {
 		ranoLogger().Warn("rano status check failed", "path", path)
 	}
 
@@ -325,47 +332,6 @@ func (a *RanoAdapter) checkProcAccess() bool {
 	return err == nil && info.IsDir()
 }
 
-// GetStatus returns the current rano status
-func (a *RanoAdapter) GetStatus(ctx context.Context) (*RanoStatus, error) {
-	ctx, cancel := context.WithTimeout(ctx, a.Timeout())
-	defer cancel()
-
-	cmd := exec.CommandContext(ctx, a.BinaryName(), "status", "--json")
-	cmd.WaitDelay = time.Second
-	stdout := NewLimitedBuffer(10 * 1024 * 1024)
-	var stderr bytes.Buffer
-	cmd.Stdout = stdout
-	cmd.Stderr = &stderr
-
-	if err := cmd.Run(); err != nil {
-		if ctx.Err() == context.DeadlineExceeded {
-			return nil, ErrTimeout
-		}
-		errStr := stderr.String()
-		// Check if it's a permission error
-		if strings.Contains(errStr, "permission") || strings.Contains(errStr, "CAP_NET") {
-			return &RanoStatus{
-				Running:    false,
-				Monitoring: false,
-				Error:      "missing required capabilities (CAP_NET_ADMIN)",
-			}, nil
-		}
-		return nil, fmt.Errorf("rano status failed: %w: %s", err, errStr)
-	}
-
-	output := stdout.Bytes()
-	if !json.Valid(output) {
-		return &RanoStatus{Running: true, Monitoring: false}, nil
-	}
-
-	var status RanoStatus
-	if err := json.Unmarshal(output, &status); err != nil {
-		return nil, fmt.Errorf("failed to parse rano status: %w", err)
-	}
-
-	return &status, nil
-}
-
 // GetProcessStats returns network stats for a specific PID.
 // Window is optional; empty means default window.
 func (a *RanoAdapter) GetProcessStats(ctx context.Context, pid int) (*RanoProcessStats, error) {
@@ -398,11 +364,12 @@ func (a *RanoAdapter) GetAllProcessStats(ctx context.Context) ([]RanoProcessStat
 
 // GetAllProcessStatsWithWindow aggregates persisted connection observations,
 // not HTTP traffic. Rano has no stats subcommand; its supported JSONL export
-// supplies PID, timestamp, event kind and provider. One bounded export serves
-// the whole fleet, and the time range is rechecked after decoding.
-// The CLI selects its usual observer.sqlite in the current directory. This
-// never starts an observer or enables packet capture. Export itself may migrate
-// optional columns in an older database; it is not a read-only SQLite API.
+// (`rano export --format jsonl --sqlite DB`) supplies PID, timestamp, event
+// kind and provider. One bounded export serves the whole fleet, and the time
+// range is rechecked after decoding. A missing observer database is reported
+// as ErrRanoNoDatabase rather than as zero traffic. This never starts an
+// observer or enables packet capture. Export itself may migrate optional
+// columns in an older database; it is not a read-only SQLite API.
 func (a *RanoAdapter) GetAllProcessStatsWithWindow(ctx context.Context, window string) ([]RanoProcessStats, error) {
 	if ctx == nil {
 		return nil, errors.New("rano export requires a context")
@@ -410,6 +377,14 @@ func (a *RanoAdapter) GetAllProcessStatsWithWindow(ctx context.Context, window s
 	duration, err := RanoWindowDuration(window)
 	if err != nil {
 		return nil, err
+	}
+	database, err := a.Database()
+	if err != nil {
+		return nil, fmt.Errorf("resolve rano observer database: %w", err)
+	}
+	if info, statErr := os.Stat(database); statErr != nil || info.IsDir() {
+		return nil, fmt.Errorf("%w at %s: start rano's monitor with --sqlite %s, or point [integrations.rano] sqlite_path at its database",
+			ErrRanoNoDatabase, database, database)
 	}
 	ctx, cancel := context.WithTimeout(ctx, a.Timeout())
 	defer cancel()
@@ -421,15 +396,17 @@ func (a *RanoAdapter) GetAllProcessStatsWithWindow(ctx context.Context, window s
 	// Rano filters text timestamps in SQLite. Widen the SQL interval by one
 	// second so mixed whole/fractional-second encodings cannot lose a boundary
 	// row; the reducer applies the exact [since, until) instants below.
-	args := []string{"export", "--format", "jsonl", "--fields", "ts,event,pid,comm,provider",
+	args := []string{"export", "--format", "jsonl", "--sqlite", database, "--fields", "ts,event,pid,comm,provider",
 		"--since", since.Add(-time.Second).Format(time.RFC3339),
 		"--until", until.Add(time.Second).Format(time.RFC3339)}
 	cmd := exec.CommandContext(ctx, a.BinaryName(), args...)
 	cmd.WaitDelay = time.Second
 	stdout := NewLimitedBuffer(10 * 1024 * 1024)
 	stderr := NewLimitedBuffer(64 * 1024)
-	cmd.Stdout = stdout
-	cmd.Stderr = stderr
+	// Writer-only wrappers hide bytes.Buffer's promoted ReadFrom, which io.Copy
+	// would otherwise use to bypass LimitedBuffer.Write's cap.
+	cmd.Stdout = struct{ io.Writer }{stdout}
+	cmd.Stderr = struct{ io.Writer }{stderr}
 
 	if err := cmd.Run(); err != nil {
 		if ctx.Err() != nil {
@@ -442,7 +419,7 @@ func (a *RanoAdapter) GetAllProcessStatsWithWindow(ctx context.Context, window s
 			return nil, fmt.Errorf("rano export exceeded capture limit: %w", errors.Join(ErrOutputLimitExceeded, err))
 		}
 		// Do not echo arbitrary tool output (which can include command lines).
-		return nil, fmt.Errorf("rano export failed (check observer.sqlite and export support): %w", err)
+		return nil, fmt.Errorf("rano export --sqlite %s failed (run it by hand to see rano's error): %w", database, err)
 	}
 	if err := ctx.Err(); err != nil {
 		return nil, err

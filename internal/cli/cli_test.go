@@ -5911,6 +5911,198 @@ func TestRobotProcessContractHelper(t *testing.T) {
 	os.Exit(0)
 }
 
+// startClaudePaneFixture creates a tmux session (on the package's isolated
+// server) holding one pane titled as an ntm Claude agent and running a long
+// sleep, and returns the session name and that pane, PID included.
+func startClaudePaneFixture(t *testing.T, prefix string) (string, tmux.Pane) {
+	t.Helper()
+	dir := t.TempDir()
+	session := fmt.Sprintf("%s%d", prefix, time.Now().UnixNano())
+	if err := tmux.CreateSession(session, dir); err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+	t.Cleanup(func() { _ = tmux.KillSession(session) })
+	paneID, err := tmux.DefaultClient.Run("new-window", "-d", "-t", session, "-c", dir, "-P", "-F", "#{pane_id}", "sleep 300")
+	if err != nil {
+		t.Fatalf("create agent window: %v", err)
+	}
+	paneID = strings.TrimSpace(paneID)
+	if err := tmux.SetPaneTitle(paneID, session+"__cc_1"); err != nil {
+		t.Fatalf("set pane title: %v", err)
+	}
+	panes, err := tmux.GetPanes(session)
+	if err != nil {
+		t.Fatalf("list panes: %v", err)
+	}
+	for _, pane := range panes {
+		if pane.ID == paneID {
+			if pane.PID <= 0 || pane.Type != tmux.AgentClaude {
+				t.Fatalf("agent pane fixture not attributable: %+v", pane)
+			}
+			return session, pane
+		}
+	}
+	t.Fatalf("agent pane %s absent from session topology: %+v", paneID, panes)
+	return "", tmux.Pane{}
+}
+
+// --robot-rano-stats end to end: the real CLI dispatch, config loading, tmux
+// topology, /proc PID attribution and rano adapter. Only the rano binary is a
+// fake, and it speaks upstream's real contract (rano 0.2.1,
+// github.com/Dicklesworthstone/rano@7f342a3d195dea97f083602274fd2758ff46c88e
+// src/main.rs): `--version` prints "rano 0.2.1", `status` exits 0, there is no
+// `stats` subcommand, and `export --format jsonl --sqlite DB --fields ...`
+// prints rows ordered by ts with alphabetical keys, NULL columns omitted and
+// whole-second UTC timestamps.
+func TestRobotRanoStatsReadsUpstreamExportThroughCLI(t *testing.T) {
+	testutil.RequireTmuxThrottled(t)
+	session, pane := startClaudePaneFixture(t, "ntmranostats")
+
+	root := t.TempDir()
+	home := filepath.Join(root, "home")
+	project := filepath.Join(root, "project")
+	bin := filepath.Join(root, "bin")
+	for _, dir := range []string{home, project, bin, filepath.Join(root, "rano")} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	database := filepath.Join(root, "rano", "observer.sqlite")
+	if err := os.WriteFile(database, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	now := time.Now().UTC().Truncate(time.Second)
+	ts := func(ago time.Duration) string { return now.Add(-ago).Format(time.RFC3339) }
+	fixture := strings.Join([]string{
+		// Outside the 5m window: ntm applies the exact window itself.
+		fmt.Sprintf(`{"comm":"claude","event":"connect","pid":%d,"provider":"anthropic","ts":%q}`, pane.PID, ts(10*time.Minute)),
+		fmt.Sprintf(`{"comm":"claude","event":"connect","pid":%d,"provider":"anthropic","ts":%q}`, pane.PID, ts(90*time.Second)),
+		fmt.Sprintf(`{"comm":"claude","event":"connect","pid":%d,"provider":"unknown","ts":%q}`, pane.PID, ts(30*time.Second)),
+		// A close is not a second connection; a threshold alert has no pid.
+		fmt.Sprintf(`{"comm":"claude","event":"close","pid":%d,"provider":"anthropic","ts":%q}`, pane.PID, ts(20*time.Second)),
+		fmt.Sprintf(`{"comm":"","event":"alert","provider":"anthropic","ts":%q}`, ts(15*time.Second)),
+		// A process outside every agent pane is not attributed.
+		fmt.Sprintf(`{"comm":"curl","event":"connect","pid":%d,"provider":"unknown","ts":%q}`, os.Getpid(), ts(10*time.Second)),
+	}, "\n") + "\n"
+	fixturePath := filepath.Join(root, "export.jsonl")
+	if err := os.WriteFile(fixturePath, []byte(fixture), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	fakeRano := `#!/bin/sh
+case "$1" in
+--version) echo "rano 0.2.1" ;;
+status) echo "0 active | anthropic:0 openai:0" ;;
+export)
+	printf '%s\n' "$@" > "$FAKE_RANO_ARGS"
+	if [ "$4" != "--sqlite" ] || [ ! -f "$5" ]; then echo "SQLite file not found: observer.sqlite" >&2; exit 1; fi
+	cat "$FAKE_RANO_EXPORT" ;;
+*) echo "Unexpected argument: $1" >&2; exit 1 ;;
+esac
+`
+	if err := os.WriteFile(filepath.Join(bin, "rano"), []byte(fakeRano), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	run := func(t *testing.T, sqlitePath, argsLog string) (map[string]any, robot.RanoStatsOutput, int) {
+		t.Helper()
+		configPath := filepath.Join(t.TempDir(), "config.toml")
+		if err := os.WriteFile(configPath, []byte(fmt.Sprintf("[integrations.rano]\nsqlite_path = %q\n", sqlitePath)), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		rawArgs, err := json.Marshal([]string{"--config", configPath, "--robot-rano-stats", "--rano-window=5m"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		cmd := exec.Command(os.Args[0], "-test.run=^TestRobotProcessContractHelper$")
+		cmd.Dir = project
+		cmd.Env = envWithOverrides(os.Environ(),
+			"HOME="+home,
+			"XDG_CONFIG_HOME="+filepath.Join(home, ".config"),
+			"PATH="+bin+string(os.PathListSeparator)+os.Getenv("PATH"),
+			"FAKE_RANO_ARGS="+argsLog,
+			"FAKE_RANO_EXPORT="+fixturePath,
+			"NTM_TEST_TMUX_ENV_OWNED=1",
+			"NTM_NO_COLOR=1",
+			"NTM_CONFIG=",
+			"NTM_ROBOT_FORMAT=",
+			"NTM_OUTPUT_FORMAT=",
+			"TOON_DEFAULT_FORMAT=",
+			"NTM_ROBOT_VERBOSITY=",
+			"NTM_ROBOT_CONTRACT_ARGS="+string(rawArgs),
+		)
+		var stdout, stderr bytes.Buffer
+		cmd.Stdout, cmd.Stderr = &stdout, &stderr
+		exitCode := 0
+		if err := cmd.Run(); err != nil {
+			var exitErr *exec.ExitError
+			if !errors.As(err, &exitErr) {
+				t.Fatalf("run ntm --robot-rano-stats: %v", err)
+			}
+			exitCode = exitErr.ExitCode()
+		}
+		var raw map[string]any
+		var out robot.RanoStatsOutput
+		if err := json.Unmarshal(stdout.Bytes(), &raw); err != nil {
+			t.Fatalf("stdout is not one JSON document: %v\nstdout=%s\nstderr=%s", err, stdout.String(), stderr.String())
+		}
+		if err := json.Unmarshal(stdout.Bytes(), &out); err != nil {
+			t.Fatalf("decode rano stats: %v", err)
+		}
+		return raw, out, exitCode
+	}
+
+	t.Run("recorded connections reach the agent pane", func(t *testing.T) {
+		argsLog := filepath.Join(t.TempDir(), "args")
+		raw, out, exitCode := run(t, database, argsLog)
+		if exitCode != 0 || !out.Success {
+			t.Fatalf("exit=%d output=%v", exitCode, raw)
+		}
+		got, ok := out.Panes[pane.ID]
+		if !ok {
+			t.Fatalf("agent pane %s (pid %d) missing from %v", pane.ID, pane.PID, raw)
+		}
+		if got.Session != session || got.ConnectionCount != 2 || got.LastConnection != ts(30*time.Second) ||
+			!reflect.DeepEqual(got.PIDs, []int{pane.PID}) ||
+			got.Providers["anthropic"].Connections != 1 || got.Providers["unknown"].Connections != 1 || len(got.Providers) != 2 {
+			t.Fatalf("pane stats = %+v", got)
+		}
+		if out.Total.ConnectionCount != 2 || out.Database != database || out.Measurement != "connection_events" {
+			t.Fatalf("totals/source = %+v database=%q measurement=%q", out.Total, out.Database, out.Measurement)
+		}
+		encoded, _ := json.Marshal(raw)
+		for _, unmeasured := range []string{`"request_count":`, `"bytes_in":`, `"bytes_out":`, `"last_request":`, `"bytes_sent":`} {
+			if strings.Contains(string(encoded), unmeasured) {
+				t.Fatalf("surface reports an unmeasured metric %s: %s", unmeasured, encoded)
+			}
+		}
+		logged, err := os.ReadFile(argsLog)
+		if err != nil {
+			t.Fatalf("rano export was never invoked: %v", err)
+		}
+		args := strings.Split(strings.TrimSpace(string(logged)), "\n")
+		if len(args) != 11 || !reflect.DeepEqual(args[:7], []string{"export", "--format", "jsonl", "--sqlite", database, "--fields", "ts,event,pid,comm,provider"}) ||
+			args[7] != "--since" || args[9] != "--until" {
+			t.Fatalf("rano export argv = %q", args)
+		}
+	})
+
+	t.Run("missing observer database is a missing dependency", func(t *testing.T) {
+		argsLog := filepath.Join(t.TempDir(), "args")
+		missing := filepath.Join(root, "rano", "never-recorded.sqlite")
+		raw, out, exitCode := run(t, missing, argsLog)
+		if exitCode != 1 || out.Success || out.ErrorCode != robot.ErrCodeDependencyMissing {
+			t.Fatalf("exit=%d output=%v; want exit 1 DEPENDENCY_MISSING", exitCode, raw)
+		}
+		if !strings.Contains(out.Error, missing) || out.Database != missing || len(out.Panes) != 0 || out.Measurement != "" {
+			t.Fatalf("missing database not reported honestly: %v", raw)
+		}
+		if _, err := os.Stat(argsLog); !os.IsNotExist(err) {
+			t.Fatalf("rano export ran without a database (stat err %v)", err)
+		}
+	})
+}
+
 func TestRobotProcessErrorContract(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping process-level robot contract integration in short mode")

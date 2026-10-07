@@ -1001,6 +1001,24 @@ for a pane that hit a rate limit; `seat_selection` only chooses which account a
 Requires caam >= v0.1.19 (the release that added the
 `earliest-reset-headroom` rank mode).
 
+### Rano Network Activity
+
+[rano](https://github.com/Dicklesworthstone/rano)'s monitor records each agent
+process's connect/close events into an SQLite database. ntm reads that history
+(`rano export`) for `--robot-rano-stats`, the dashboard's Network Activity panel
+and the process-triage monitor's network signal; it never starts the monitor.
+Point ntm at the database the monitor writes (rano's default is
+`observer.sqlite` in the monitor's working directory):
+
+```toml
+[integrations.rano]
+sqlite_path = "/path/to/observer.sqlite"   # what you pass as `rano --sqlite`
+```
+
+The counts are connections, not requests or bytes. With no database at that
+path, `--robot-rano-stats` fails with `DEPENDENCY_MISSING` and the panel shows
+why, instead of reporting zero traffic. Details: `docs/rano-stats.md`.
+
 ### Agent Plugins
 
 Custom agent types load from the `agents/` directory that sits next to the

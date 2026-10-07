@@ -169,6 +169,18 @@ func WithAlertCallback(cb AlertCallback) HealthMonitorOption {
 	}
 }
 
+// WithRanoDatabase selects the rano observer database whose recent connection
+// events can downgrade a suspected-stuck agent to waiting ([integrations.rano]
+// sqlite_path). Empty keeps rano's default, observer.sqlite in the working
+// directory.
+func WithRanoDatabase(path string) HealthMonitorOption {
+	return func(m *HealthMonitor) {
+		adapter := tools.NewRanoAdapter()
+		adapter.SetDatabase(path)
+		m.ranoAdapter = adapter
+	}
+}
+
 // NewHealthMonitor creates a new health monitor with the given configuration.
 func NewHealthMonitor(cfg *config.ProcessTriageConfig, opts ...HealthMonitorOption) *HealthMonitor {
 	if cfg == nil {

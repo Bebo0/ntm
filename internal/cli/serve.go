@@ -165,6 +165,43 @@ func serveStateMaintenance(ctx context.Context, store *state.Store, refreshEvery
 	}
 }
 
+// startServeProcessTriage starts the process-triage health monitor when
+// [integrations.process_triage] is enabled and pt's passive watch is
+// available, publishing its classification changes and alerts to feed (the
+// durable attention feed). Robot agent-health readers in this process see its
+// states. It returns the monitor's stop function, or nil when not started.
+func startServeProcessTriage(cfg *config.Config, feed *robot.AttentionFeed) func() {
+	ptCfg := config.DefaultProcessTriageConfig()
+	ranoDatabase := config.DefaultRanoConfig().SQLitePath
+	if cfg != nil {
+		ptCfg = cfg.Integrations.ProcessTriage
+		ranoDatabase = cfg.Integrations.Rano.SQLitePath
+	}
+	if !ptCfg.Enabled {
+		return nil
+	}
+	monitor := pt.InitGlobalMonitor(&ptCfg,
+		pt.WithRanoDatabase(ranoDatabase),
+		pt.WithStateChangeCallback(func(change pt.ClassificationStateChange) {
+			if feed == nil {
+				return
+			}
+			feed.PublishPTStateChange(change)
+		}),
+		pt.WithAlertCallback(func(alert pt.Alert) {
+			if feed == nil {
+				return
+			}
+			feed.PublishPTAlert(alert)
+		}),
+	)
+	if err := monitor.Start(); err != nil {
+		slog.Warn("process triage monitor start failed", "err", err)
+		return nil
+	}
+	return monitor.Stop
+}
+
 func runServe(opts serveOptions) error {
 	// Open state store
 	stateStore, err := state.Open("")
@@ -192,32 +229,8 @@ func runServe(opts serveOptions) error {
 		unsubscribeBus()
 	}()
 
-	ptCfg := config.DefaultProcessTriageConfig()
-	if cfg != nil {
-		ptCfg = cfg.Integrations.ProcessTriage
-	}
-	var ptMonitor *pt.HealthMonitor
-	if ptCfg.Enabled {
-		ptMonitor = pt.InitGlobalMonitor(&ptCfg,
-			pt.WithStateChangeCallback(func(change pt.ClassificationStateChange) {
-				if feed == nil {
-					return
-				}
-				feed.PublishPTStateChange(change)
-			}),
-			pt.WithAlertCallback(func(alert pt.Alert) {
-				if feed == nil {
-					return
-				}
-				feed.PublishPTAlert(alert)
-			}),
-		)
-		if err := ptMonitor.Start(); err != nil {
-			slog.Warn("process triage monitor start failed", "err", err)
-			ptMonitor = nil
-		} else {
-			defer ptMonitor.Stop()
-		}
+	if stopPT := startServeProcessTriage(cfg, feed); stopPT != nil {
+		defer stopPT()
 	}
 
 	mode, err := serve.ParseAuthMode(opts.AuthMode)

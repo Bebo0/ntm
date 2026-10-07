@@ -412,35 +412,3 @@ func parsePTWatch(data []byte, wanted map[int]struct{}, started, finished time.T
 	sort.Slice(results, func(i, j int) bool { return results[i].PID < results[j].PID })
 	return results, nil
 }
-
-// WatchSession monitors agent processes in a session
-func (a *PTAdapter) WatchSession(ctx context.Context, sessionName string) ([]PTProcessResult, error) {
-	ctx, cancel := context.WithTimeout(ctx, a.Timeout())
-	defer cancel()
-
-	cmd := exec.CommandContext(ctx, a.BinaryName(), "watch", "--session", sessionName, "--json", "--once")
-	cmd.WaitDelay = time.Second
-	stdout := NewLimitedBuffer(10 * 1024 * 1024)
-	var stderr bytes.Buffer
-	cmd.Stdout = stdout
-	cmd.Stderr = &stderr
-
-	if err := cmd.Run(); err != nil {
-		if ctx.Err() == context.DeadlineExceeded {
-			return nil, ErrTimeout
-		}
-		return nil, fmt.Errorf("pt watch failed: %w: %s", err, stderr.String())
-	}
-
-	output := stdout.Bytes()
-	if !json.Valid(output) {
-		return nil, fmt.Errorf("invalid JSON output from pt watch")
-	}
-
-	var results []PTProcessResult
-	if err := json.Unmarshal(output, &results); err != nil {
-		return nil, fmt.Errorf("failed to parse pt watch results: %w", err)
-	}
-
-	return results, nil
-}

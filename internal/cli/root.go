@@ -3243,6 +3243,9 @@ Shell Integration:
 				Panes:  panes,
 				Window: robotRanoWindow,
 			}
+			if cfg != nil {
+				opts.Database = cfg.Integrations.Rano.SQLitePath
+			}
 			if err := robot.PrintRanoStats(opts); err != nil {
 				recordRobotProcessExit(err)
 			}

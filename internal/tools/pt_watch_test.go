@@ -188,6 +188,48 @@ func TestPTPassiveWatchSchema(t *testing.T) {
 	}
 }
 
+// ptWatchRecordedShape is what upstream pt emits for
+// `pt agent watch --once --threshold low --format jsonl`.
+// Source: https://github.com/Dicklesworthstone/process_triage/blob/8ac066c38b2e14223b6c9cf11a6b12a81c6c0e1c/crates/pt-core/src/main.rs
+// (pt-core 2.2.1): run_agent_watch builds each line with serde_json::json!
+// (serde_json's indexmap preserve_order is enabled in Cargo.lock, so keys keep
+// insertion order) and emit_watch_event prints one per line. Timestamps are
+// chrono::Utc::now().to_rfc3339() ("+00:00", nanoseconds); confidence is the
+// posterior abandonment probability; classification is the decided action
+// (kill|spare|review); --threshold low drops confidence < 0.5. There is no
+// `classify` subcommand (Commands/AgentCommands enums).
+const ptWatchRecordedShape = `{"event":"candidate_detected","timestamp":"2026-01-20T12:00:00.482913771+00:00","pid":4242,"classification":"kill","confidence":0.9731842,"severity":"critical","command":"claude --dangerously-skip-permissions"}
+{"event":"candidate_detected","timestamp":"2026-01-20T12:00:00.483002114+00:00","pid":4243,"classification":"review","confidence":0.7408,"severity":"medium","command":"node"}
+{"event":"candidate_detected","timestamp":"2026-01-20T12:00:00.483019027+00:00","pid":5151,"classification":"spare","confidence":0.5123,"severity":"low","command":"codex"}
+`
+
+func TestPTWatchRecordedUpstreamShape(t *testing.T) {
+	sampled := time.Date(2026, 1, 20, 12, 0, 0, 0, time.UTC)
+	wanted := map[int]struct{}{4242: {}, 4243: {}, 5151: {}, 6000: {}}
+	results, err := parsePTWatch([]byte(ptWatchRecordedShape), wanted, sampled, sampled.Add(time.Second))
+	if err != nil || len(results) != 4 {
+		t.Fatalf("recorded pt watch rejected: %+v %v", results, err)
+	}
+	abandoned := results[0]
+	if abandoned.PID != 4242 || abandoned.Classification != PTClassAbandoned || abandoned.Confidence != 0.9731842 ||
+		abandoned.Recommendation != "kill" || abandoned.Source != "pt_agent_watch" ||
+		abandoned.AbandonmentProbability == nil || *abandoned.AbandonmentProbability != 0.9731842 {
+		t.Fatalf("kill candidate lost: %+v", abandoned)
+	}
+	for _, i := range []int{1, 2} {
+		r := results[i]
+		if r.Classification != PTClassUnknown || r.Confidence != 0 || r.AbandonmentProbability == nil {
+			t.Fatalf("review/spare advice promoted to a verdict or dropped: %+v", r)
+		}
+	}
+	if results[3].PID != 6000 || results[3].Classification != PTClassUnknown || results[3].AbandonmentProbability != nil {
+		t.Fatalf("unreported PID gained invented evidence: %+v", results[3])
+	}
+	if encoded, _ := json.Marshal(results); strings.Contains(string(encoded), "dangerously") {
+		t.Fatalf("process command line leaked into results: %s", encoded)
+	}
+}
+
 func TestPTWatchHealthRequiresThePassiveContract(t *testing.T) {
 	a, _ := ptWatchFixture(t)
 	for _, mode := range []string{"", "unsupported"} {

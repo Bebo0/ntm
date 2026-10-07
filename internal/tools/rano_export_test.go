@@ -8,6 +8,56 @@ import (
 	"time"
 )
 
+// ranoExportRecordedShape is what upstream rano emits for
+// `rano export --format jsonl --sqlite DB --fields ts,event,pid,comm,provider`.
+// Source: https://github.com/Dicklesworthstone/rano/blob/7f342a3d195dea97f083602274fd2758ff46c88e/src/main.rs
+// (rano 0.2.1): run_export/build_export_query select the fields ORDER BY ts
+// ASC; format_jsonl_row writes keys in BTreeMap (alphabetical) order and omits
+// NULL columns; system_time_to_rfc3339 stores whole-second UTC "Z" stamps;
+// synthesized_alert_event rows carry event "alert", an empty comm and a NULL
+// (omitted) pid. There is no `rano stats` subcommand (parse_cli dispatches only
+// update, report, export, config, diff and status).
+const ranoExportRecordedShape = `{"comm":"claude","event":"connect","pid":4242,"provider":"anthropic","ts":"2026-01-20T12:00:00Z"}
+{"comm":"claude","event":"connect","pid":4242,"provider":"anthropic","ts":"2026-01-20T12:00:03Z"}
+{"comm":"node","event":"connect","pid":4243,"provider":"unknown","ts":"2026-01-20T12:00:04Z"}
+{"comm":"claude","event":"close","pid":4242,"provider":"anthropic","ts":"2026-01-20T12:00:05Z"}
+{"comm":"codex","event":"connect","pid":5151,"provider":"openai","ts":"2026-01-20T12:01:00Z"}
+{"comm":"","event":"alert","provider":"anthropic","ts":"2026-01-20T12:01:30Z"}
+`
+
+func TestRanoExportRecordedUpstreamShape(t *testing.T) {
+	since := time.Date(2026, 1, 20, 12, 0, 0, 0, time.UTC)
+	stats, err := aggregateRanoExport([]byte(ranoExportRecordedShape), since, since.Add(5*time.Minute))
+	if err != nil {
+		t.Fatalf("recorded rano export rejected: %v", err)
+	}
+	want := []RanoProcessStats{
+		{PID: 4242, ProcessName: "claude", ConnectionCount: 2, LastConnection: "2026-01-20T12:00:03Z", Providers: map[string]int{"anthropic": 2}},
+		{PID: 4243, ProcessName: "node", ConnectionCount: 1, LastConnection: "2026-01-20T12:00:04Z", Providers: map[string]int{"unknown": 1}},
+		{PID: 5151, ProcessName: "codex", ConnectionCount: 1, LastConnection: "2026-01-20T12:01:00Z", Providers: map[string]int{"openai": 1}},
+	}
+	if len(stats) != len(want) {
+		t.Fatalf("stats = %+v, want %+v", stats, want)
+	}
+	for i := range want {
+		got := stats[i]
+		if got.PID != want[i].PID || got.ProcessName != want[i].ProcessName || got.ConnectionCount != want[i].ConnectionCount ||
+			got.LastConnection != want[i].LastConnection || len(got.Providers) != len(want[i].Providers) {
+			t.Fatalf("stats[%d] = %+v, want %+v (close/alert rows must not count)", i, got, want[i])
+		}
+		for provider, count := range want[i].Providers {
+			if got.Providers[provider] != count {
+				t.Fatalf("stats[%d].Providers = %v, want %v", i, got.Providers, want[i].Providers)
+			}
+		}
+	}
+	// A narrower window keeps only the rows inside it.
+	stats, err = aggregateRanoExport([]byte(ranoExportRecordedShape), since.Add(time.Minute), since.Add(5*time.Minute))
+	if err != nil || len(stats) != 1 || stats[0].PID != 5151 {
+		t.Fatalf("window filter = %+v, %v", stats, err)
+	}
+}
+
 func TestRanoExportConnectionMeasurements(t *testing.T) {
 	since := time.Date(2026, 1, 17, 10, 0, 0, 0, time.UTC)
 	until := since.Add(time.Hour)

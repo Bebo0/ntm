@@ -55,12 +55,20 @@ func ranoExportProcessFixture(t *testing.T) (*RanoAdapter, string) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	argsPath := filepath.Join(t.TempDir(), "args.json")
+	dir := t.TempDir()
+	argsPath := filepath.Join(dir, "args.json")
+	// The exporter only needs the database to exist; the fixture child prints
+	// the rows instead of opening it.
+	database := filepath.Join(dir, "observer.sqlite")
+	if err := os.WriteFile(database, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
 	t.Setenv("NTM_TEST_RANO_EXPORT_PROCESS", "1")
 	t.Setenv("NTM_TEST_RANO_EXPORT_ARGS", argsPath)
 	t.Setenv("NTM_TEST_RANO_EXPORT_MODE", "")
 	a := &RanoAdapter{BaseAdapter: NewBaseAdapter(ToolRano, binary)}
 	a.SetTimeout(5 * time.Second)
+	a.SetDatabase(database)
 	return a, argsPath
 }
 
@@ -88,13 +96,40 @@ func TestRanoExportCommandContract(t *testing.T) {
 	if err := json.Unmarshal(data, &args); err != nil {
 		t.Fatal(err)
 	}
-	if len(args) != 9 || !reflect.DeepEqual(args[:5], []string{"export", "--format", "jsonl", "--fields", "ts,event,pid,comm,provider"}) || args[5] != "--since" || args[7] != "--until" {
-		t.Fatalf("unsupported flags or sensitive export fields: %v", args)
+	database, err := a.Database()
+	if err != nil {
+		t.Fatal(err)
 	}
-	start, e1 := time.Parse(time.RFC3339, args[6])
-	end, e2 := time.Parse(time.RFC3339, args[8])
+	if len(args) != 11 || !reflect.DeepEqual(args[:7], []string{"export", "--format", "jsonl", "--sqlite", database, "--fields", "ts,event,pid,comm,provider"}) || args[7] != "--since" || args[9] != "--until" {
+		t.Fatalf("unsupported flags, wrong database or sensitive export fields: %v", args)
+	}
+	start, e1 := time.Parse(time.RFC3339, args[8])
+	end, e2 := time.Parse(time.RFC3339, args[10])
 	if e1 != nil || e2 != nil || end.Sub(start) != 90*time.Minute+2*time.Second {
 		t.Fatalf("window was ignored or not fixed for the query: %v", args)
+	}
+}
+
+// A missing observer database means rano has recorded nothing ntm can read.
+// That must surface as ErrRanoNoDatabase naming the path, never as a
+// successful zero-connection result, and must not spawn the exporter.
+func TestRanoExportMissingDatabaseIsUnavailableNotZeroTraffic(t *testing.T) {
+	a, argsPath := ranoExportProcessFixture(t)
+	missing := filepath.Join(t.TempDir(), "never-recorded.sqlite")
+	a.SetDatabase(missing)
+	stats, err := a.GetAllProcessStatsWithWindow(context.Background(), "5m")
+	if !errors.Is(err, ErrRanoNoDatabase) || stats != nil {
+		t.Fatalf("missing database = %+v, %v; want ErrRanoNoDatabase", stats, err)
+	}
+	if !strings.Contains(err.Error(), missing) || !strings.Contains(err.Error(), "sqlite_path") {
+		t.Fatalf("error does not name the database or the setting: %v", err)
+	}
+	if _, statErr := os.Stat(argsPath); !os.IsNotExist(statErr) {
+		t.Fatalf("exporter ran without a database (args file: %v)", statErr)
+	}
+	a.SetDatabase(t.TempDir()) // a directory is not a database either
+	if _, err := a.GetAllProcessStatsWithWindow(context.Background(), "5m"); !errors.Is(err, ErrRanoNoDatabase) {
+		t.Fatalf("directory accepted as database: %v", err)
 	}
 }
 

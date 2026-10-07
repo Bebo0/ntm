@@ -35,29 +35,26 @@ func TestRanoNetworkPanelViewWithRowsExpanded(t *testing.T) {
 		Loaded:       true,
 		Enabled:      true,
 		Available:    true,
-		Version:      "0.1.0",
+		Version:      "0.2.1",
 		PollInterval: 1 * time.Second,
+		Window:       5 * time.Minute,
 		Rows: []RanoNetworkRow{
 			{
-				Label:        "proj__cc_1",
-				AgentType:    "cc",
-				RequestCount: 3,
-				BytesOut:     45 * 1024,
-				BytesIn:      120 * 1024,
-				LastRequest:  time.Now().Add(-100 * time.Millisecond),
+				Label:          "proj__cc_1",
+				AgentType:      "cc",
+				Connections:    3,
+				LastConnection: time.Now().Add(-100 * time.Millisecond),
+				Providers:      map[string]int{"anthropic": 3},
 			},
 			{
-				Label:        "proj__cod_1",
-				AgentType:    "cod",
-				RequestCount: 1,
-				BytesOut:     10 * 1024,
-				BytesIn:      50 * 1024,
-				LastRequest:  time.Now().Add(-10 * time.Second),
+				Label:          "proj__cod_1",
+				AgentType:      "cod",
+				Connections:    1,
+				LastConnection: time.Now().Add(-10 * time.Second),
+				Providers:      map[string]int{"openai": 1},
 			},
 		},
-		TotalRequests: 4,
-		TotalBytesOut: 55 * 1024,
-		TotalBytesIn:  170 * 1024,
+		TotalConnections: 4,
 	})
 
 	out := status.StripANSI(panel.View())
@@ -65,13 +62,19 @@ func TestRanoNetworkPanelViewWithRowsExpanded(t *testing.T) {
 		"Network Activity",
 		"proj__cc_1",
 		"proj__cod_1",
-		"Total:",
+		"Conn",
+		"Total: 4 conn in the last 5m",
 		"By provider:",
-		"anthropic:",
-		"openai:",
+		"anthropic: 3",
+		"openai: 1",
 	} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("expected output to contain %q, got:\n%s", want, out)
+		}
+	}
+	for _, fabricated := range []string{"req", "KB", " out", " in\n"} {
+		if strings.Contains(out, fabricated) {
+			t.Fatalf("panel shows an unmeasured request/byte metric %q:\n%s", fabricated, out)
 		}
 	}
 }
@@ -93,32 +96,36 @@ func TestRanoNetworkPanelViewNotAvailable(t *testing.T) {
 
 func TestRanoNetworkPanelViewError(t *testing.T) {
 	panel := NewRanoNetworkPanel()
-	panel.SetSize(60, 12)
+	panel.SetSize(80, 14)
 	panel.SetData(RanoNetworkPanelData{
 		Loaded:  true,
 		Enabled: true,
-		Error:   errors.New("connection refused"),
+		Error:   errors.New("rano observer database not found at /srv/observer.sqlite"),
 	})
 
 	out := status.StripANSI(panel.View())
-	if !strings.Contains(out, "connection refused") {
-		t.Fatalf("expected error message, got:\n%s", out)
+	if !strings.Contains(out, "Network stats unavailable") || !strings.Contains(out, "database not found") {
+		t.Fatalf("expected unavailable reason, got:\n%s", out)
+	}
+	if strings.Contains(out, "No agent connections") {
+		t.Fatalf("missing source rendered as zero traffic:\n%s", out)
 	}
 }
 
-func TestRanoNetworkPanelViewNoTraffic(t *testing.T) {
+func TestRanoNetworkPanelViewNoConnections(t *testing.T) {
 	panel := NewRanoNetworkPanel()
 	panel.SetSize(60, 12)
 	panel.SetData(RanoNetworkPanelData{
 		Loaded:    true,
 		Enabled:   true,
 		Available: true,
+		Window:    5 * time.Minute,
 		Rows:      nil,
 	})
 
 	out := status.StripANSI(panel.View())
-	if !strings.Contains(out, "No agent traffic") {
-		t.Fatalf("expected no-traffic state, got:\n%s", out)
+	if !strings.Contains(out, "No agent connections") || !strings.Contains(out, "last 5m") {
+		t.Fatalf("expected no-connections state, got:\n%s", out)
 	}
 }
 
@@ -132,17 +139,14 @@ func TestRanoNetworkPanelViewCompact(t *testing.T) {
 		PollInterval: 1 * time.Second,
 		Rows: []RanoNetworkRow{
 			{
-				Label:        "proj__cc_1",
-				AgentType:    "cc",
-				RequestCount: 5,
-				BytesOut:     100 * 1024,
-				BytesIn:      200 * 1024,
-				LastRequest:  time.Now(),
+				Label:          "proj__cc_1",
+				AgentType:      "cc",
+				Connections:    5,
+				LastConnection: time.Now(),
+				Providers:      map[string]int{"anthropic": 5},
 			},
 		},
-		TotalRequests: 5,
-		TotalBytesOut: 100 * 1024,
-		TotalBytesIn:  200 * 1024,
+		TotalConnections: 5,
 	})
 
 	out := status.StripANSI(panel.View())
@@ -150,7 +154,7 @@ func TestRanoNetworkPanelViewCompact(t *testing.T) {
 		t.Fatalf("expected agent row, got:\n%s", out)
 	}
 	// Compact mode should NOT show totals or provider breakdown
-	if strings.Contains(out, "Total:") {
+	if strings.Contains(out, "Total:") || strings.Contains(out, "By provider:") {
 		t.Fatalf("compact mode should not show totals, got:\n%s", out)
 	}
 }
@@ -194,18 +198,9 @@ func TestRanoNetworkPanelViewWithVersion(t *testing.T) {
 		Available: true,
 		Version:   "1.2.3",
 		Rows: []RanoNetworkRow{
-			{
-				Label:        "test_agent",
-				AgentType:    "cc",
-				RequestCount: 1,
-				BytesOut:     1024,
-				BytesIn:      2048,
-				LastRequest:  time.Now(),
-			},
+			{Label: "test_agent", AgentType: "cc", Connections: 1, LastConnection: time.Now()},
 		},
-		TotalRequests: 1,
-		TotalBytesOut: 1024,
-		TotalBytesIn:  2048,
+		TotalConnections: 1,
 	})
 
 	out := status.StripANSI(panel.View())
@@ -217,45 +212,6 @@ func TestRanoNetworkPanelViewWithVersion(t *testing.T) {
 // =============================================================================
 // Pure helper function tests
 // =============================================================================
-
-func TestProviderFromAgentType(t *testing.T) {
-	t.Parallel()
-
-	tests := []struct {
-		input string
-		want  string
-	}{
-		{"cc", "anthropic"},
-		{"claude", "anthropic"},
-		{"claude-code", "anthropic"},
-		{"claude_code", "anthropic"},
-		{"claudecode", "anthropic"},
-		{"CC", "anthropic"},
-		{"cod", "openai"},
-		{"codex", "openai"},
-		{"openai-codex", "openai"},
-		{"COD", "openai"},
-		{"gmi", "google"},
-		{"gemini", "google"},
-		{"google-gemini", "google"},
-		{"google_gemini", "google"},
-		{"GMI", "google"},
-		{"cursor", "unknown"},
-		{"windsurf", "unknown"},
-		{"", "unknown"},
-		{"  cc  ", "anthropic"},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.input, func(t *testing.T) {
-			t.Parallel()
-			got := providerFromAgentType(tc.input)
-			if got != tc.want {
-				t.Errorf("providerFromAgentType(%q) = %q; want %q", tc.input, got, tc.want)
-			}
-		})
-	}
-}
 
 func TestRenderActivity(t *testing.T) {
 	t.Parallel()
@@ -293,32 +249,41 @@ func TestRenderActivity_ZeroPollInterval(t *testing.T) {
 	}
 }
 
-func TestFormatBytesShort(t *testing.T) {
+func TestFormatConnectionAge(t *testing.T) {
 	t.Parallel()
-
 	tests := []struct {
-		input int64
-		want  string
+		name string
+		last time.Time
+		want string
 	}{
-		{0, "0B"},
-		{500, "500B"},
-		{1023, "1023B"},
-		{1024, "1.0KB"},
-		{10240, "10KB"},
-		{1048576, "1.0MB"},
-		{10485760, "10MB"},
-		{1073741824, "1.0GB"},
-		{1099511627776, "1.0TB"},
+		{"never", time.Time{}, "-"},
+		{"seconds", time.Now().Add(-12 * time.Second), "12s"},
+		{"future clock skew", time.Now().Add(time.Minute), "0s"},
+		{"minutes", time.Now().Add(-3*time.Minute - time.Second), "3m"},
+		{"hours", time.Now().Add(-2*time.Hour - time.Minute), "2h"},
+		{"days", time.Now().Add(-49 * time.Hour), "2d"},
 	}
-
 	for _, tc := range tests {
-		t.Run(tc.want, func(t *testing.T) {
+		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			got := formatBytesShort(tc.input)
-			if got != tc.want {
-				t.Errorf("formatBytesShort(%d) = %q; want %q", tc.input, got, tc.want)
+			if got := formatConnectionAge(tc.last); got != tc.want {
+				t.Errorf("formatConnectionAge(%s) = %q; want %q", tc.name, got, tc.want)
 			}
 		})
+	}
+}
+
+func TestRanoWindowLabel(t *testing.T) {
+	t.Parallel()
+	for window, want := range map[time.Duration]string{
+		0:                "recently",
+		5 * time.Minute:  "in the last 5m",
+		2 * time.Hour:    "in the last 2h",
+		90 * time.Second: "in the last 1m30s",
+	} {
+		if got := ranoWindowLabel(window); got != want {
+			t.Errorf("ranoWindowLabel(%v) = %q; want %q", window, got, want)
+		}
 	}
 }
 
@@ -326,7 +291,7 @@ func TestRenderRanoTable_EmptyRows(t *testing.T) {
 	t.Parallel()
 	out := renderRanoTable(defaultTheme(), 60, nil, time.Second)
 	// Should have header but no data rows
-	if !strings.Contains(out, "Agent") {
+	if !strings.Contains(out, "Agent") || !strings.Contains(out, "Conn") {
 		t.Fatalf("expected table header, got: %q", out)
 	}
 }
@@ -341,49 +306,37 @@ func TestRenderRanoTable_ZeroWidth(t *testing.T) {
 
 func TestRenderRanoTable_WithRows(t *testing.T) {
 	rows := []RanoNetworkRow{
-		{
-			Label:        "test__cc_1",
-			AgentType:    "cc",
-			RequestCount: 10,
-			BytesOut:     5120,
-			BytesIn:      10240,
-			LastRequest:  time.Now(),
-		},
+		{Label: "test__cc_1", AgentType: "cc", Connections: 17, LastConnection: time.Now().Add(-42 * time.Second)},
 	}
 	out := status.StripANSI(renderRanoTable(defaultTheme(), 70, rows, time.Second))
 	if !strings.Contains(out, "test__cc_1") {
 		t.Fatalf("expected agent label, got:\n%s", out)
 	}
-	if !strings.Contains(out, "10") {
-		t.Fatalf("expected request count, got:\n%s", out)
+	if !strings.Contains(out, "17") || !strings.Contains(out, "42s") {
+		t.Fatalf("expected connection count and age, got:\n%s", out)
 	}
 }
 
 func TestRenderRanoTable_UnknownLabel(t *testing.T) {
-	rows := []RanoNetworkRow{
-		{
-			Label:        "",
-			AgentType:    "cc",
-			RequestCount: 1,
-		},
-	}
+	rows := []RanoNetworkRow{{Label: "", AgentType: "cc", Connections: 1}}
 	out := status.StripANSI(renderRanoTable(defaultTheme(), 70, rows, time.Second))
 	if !strings.Contains(out, "(unknown)") {
 		t.Fatalf("expected (unknown) for empty label, got:\n%s", out)
 	}
 }
 
-func TestRenderRanoProviderBreakdown(t *testing.T) {
+// The breakdown uses rano's recorded provider tag per connection, not a guess
+// from the pane's agent type: a Claude pane's openai connection counts as openai.
+func TestRenderRanoProviderBreakdownUsesRecordedTags(t *testing.T) {
 	rows := []RanoNetworkRow{
-		{AgentType: "cc", RequestCount: 5, BytesOut: 1024},
-		{AgentType: "cod", RequestCount: 3, BytesOut: 2048},
-		{AgentType: "gmi", RequestCount: 2, BytesOut: 512},
+		{AgentType: "cc", Providers: map[string]int{"anthropic": 5, "openai": 1}},
+		{AgentType: "cod", Providers: map[string]int{"openai": 3, "zeta": 1}},
+		{AgentType: "gmi", Providers: map[string]int{"google": 2, "unknown": 4}},
 	}
 	out := status.StripANSI(renderRanoProviderBreakdown(defaultTheme(), 120, rows))
-	for _, want := range []string{"anthropic:", "openai:", "google:"} {
-		if !strings.Contains(out, want) {
-			t.Fatalf("expected %q in breakdown, got:\n%s", want, out)
-		}
+	want := "By provider: anthropic: 5  openai: 4  google: 2  unknown: 4  zeta: 1"
+	if strings.TrimSpace(out) != want {
+		t.Fatalf("breakdown = %q, want %q", strings.TrimSpace(out), want)
 	}
 }
 
@@ -395,12 +348,10 @@ func TestRenderRanoProviderBreakdown_EmptyRows(t *testing.T) {
 }
 
 func TestRenderRanoProviderBreakdown_AllZero(t *testing.T) {
-	rows := []RanoNetworkRow{
-		{AgentType: "cc", RequestCount: 0, BytesOut: 0, BytesIn: 0},
-	}
+	rows := []RanoNetworkRow{{AgentType: "cc", Providers: map[string]int{"anthropic": 0}}}
 	out := renderRanoProviderBreakdown(defaultTheme(), 80, rows)
 	if out != "" {
-		t.Fatalf("expected empty breakdown for zero-traffic rows, got: %q", out)
+		t.Fatalf("expected empty breakdown for zero-connection rows, got: %q", out)
 	}
 }
 
@@ -436,108 +387,35 @@ func TestTruncateWidth(t *testing.T) {
 // =============================================================================
 
 func TestRanoNetworkPanelDataFlow_MultiAgent(t *testing.T) {
-	// Simulate what fetchRanoNetworkStats would produce with a real adapter:
-	// two Claude agents, one Codex agent, data aggregated by pane.
+	// Simulate what fetchRanoNetworkStats produces from a real export:
+	// two Claude agents and one Codex agent, aggregated by pane.
 	panel := NewRanoNetworkPanel()
 	panel.SetSize(100, 20)
 
-	data := RanoNetworkPanelData{
+	panel.SetData(RanoNetworkPanelData{
 		Loaded:       true,
 		Enabled:      true,
 		Available:    true,
-		Version:      "0.3.0",
+		Version:      "0.2.1",
 		PollInterval: 1 * time.Second,
+		Window:       5 * time.Minute,
 		Rows: []RanoNetworkRow{
-			{
-				Label:        "swarm__cc_1",
-				AgentType:    "cc",
-				RequestCount: 15,
-				BytesOut:     150 * 1024,
-				BytesIn:      300 * 1024,
-				LastRequest:  time.Now().Add(-200 * time.Millisecond),
-			},
-			{
-				Label:        "swarm__cc_2",
-				AgentType:    "cc",
-				RequestCount: 10,
-				BytesOut:     100 * 1024,
-				BytesIn:      200 * 1024,
-				LastRequest:  time.Now().Add(-2 * time.Second),
-			},
-			{
-				Label:        "swarm__cod_1",
-				AgentType:    "cod",
-				RequestCount: 7,
-				BytesOut:     70 * 1024,
-				BytesIn:      140 * 1024,
-				LastRequest:  time.Now().Add(-30 * time.Second),
-			},
+			{Label: "swarm__cc_1", AgentType: "cc", Connections: 15, LastConnection: time.Now().Add(-200 * time.Millisecond), Providers: map[string]int{"anthropic": 15}},
+			{Label: "swarm__cc_2", AgentType: "cc", Connections: 10, LastConnection: time.Now().Add(-2 * time.Second), Providers: map[string]int{"anthropic": 10}},
+			{Label: "swarm__cod_1", AgentType: "cod", Connections: 7, LastConnection: time.Now().Add(-30 * time.Second), Providers: map[string]int{"openai": 7}},
 		},
-		TotalRequests: 32,
-		TotalBytesOut: 320 * 1024,
-		TotalBytesIn:  640 * 1024,
-	}
-
-	panel.SetData(data)
+		TotalConnections: 32,
+	})
 	out := status.StripANSI(panel.View())
 
-	// All agents present
-	for _, label := range []string{"swarm__cc_1", "swarm__cc_2", "swarm__cod_1"} {
-		if !strings.Contains(out, label) {
-			t.Errorf("expected %q in output, got:\n%s", label, out)
+	for _, want := range []string{"swarm__cc_1", "swarm__cc_2", "swarm__cod_1", "anthropic: 25", "openai: 7", "Total: 32 conn"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("expected %q in output, got:\n%s", want, out)
 		}
 	}
-
-	// Provider breakdown
-	if !strings.Contains(out, "anthropic:") {
-		t.Errorf("expected anthropic provider, got:\n%s", out)
-	}
-	if !strings.Contains(out, "openai:") {
-		t.Errorf("expected openai provider, got:\n%s", out)
-	}
-
-	// Totals
-	if !strings.Contains(out, "32 req") {
-		t.Errorf("expected total requests, got:\n%s", out)
-	}
-}
-
-func TestRanoNetworkPanelDataFlow_GeminiOnly(t *testing.T) {
-	panel := NewRanoNetworkPanel()
-	panel.SetSize(80, 16)
-
-	data := RanoNetworkPanelData{
-		Loaded:       true,
-		Enabled:      true,
-		Available:    true,
-		PollInterval: 1 * time.Second,
-		Rows: []RanoNetworkRow{
-			{
-				Label:        "mono__gmi_1",
-				AgentType:    "gmi",
-				RequestCount: 20,
-				BytesOut:     2 * 1024 * 1024,
-				BytesIn:      4 * 1024 * 1024,
-				LastRequest:  time.Now(),
-			},
-		},
-		TotalRequests: 20,
-		TotalBytesOut: 2 * 1024 * 1024,
-		TotalBytesIn:  4 * 1024 * 1024,
-	}
-
-	panel.SetData(data)
-	out := status.StripANSI(panel.View())
-
-	if !strings.Contains(out, "mono__gmi_1") {
-		t.Errorf("expected gemini agent, got:\n%s", out)
-	}
-	if !strings.Contains(out, "google:") {
-		t.Errorf("expected google provider, got:\n%s", out)
-	}
-	// Should NOT have anthropic or openai since there are no such agents
-	if strings.Contains(out, "anthropic:") {
-		t.Errorf("unexpected anthropic provider for gemini-only panel, got:\n%s", out)
+	// Most recent connection is listed first.
+	if strings.Index(out, "swarm__cc_1") > strings.Index(out, "swarm__cod_1") {
+		t.Errorf("rows not ordered by recency:\n%s", out)
 	}
 }
 

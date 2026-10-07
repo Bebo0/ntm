@@ -493,13 +493,15 @@ func runDashboard(ctx context.Context, w io.Writer, errW io.Writer, session stri
 // the panel then reports pt unavailable).
 func startDashboardProcessTriage(cfg *config.Config) func() {
 	ptCfg := config.DefaultProcessTriageConfig()
+	ranoDatabase := config.DefaultRanoConfig().SQLitePath
 	if cfg != nil {
 		ptCfg = cfg.Integrations.ProcessTriage
+		ranoDatabase = cfg.Integrations.Rano.SQLitePath
 	}
 	if !ptCfg.Enabled {
 		return nil
 	}
-	monitor := pt.InitGlobalMonitor(&ptCfg)
+	monitor := pt.InitGlobalMonitor(&ptCfg, pt.WithRanoDatabase(ranoDatabase))
 	if err := monitor.Start(); err != nil {
 		return nil
 	}

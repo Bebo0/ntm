@@ -9,19 +9,19 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 
-	"github.com/Dicklesworthstone/ntm/internal/agent"
 	"github.com/Dicklesworthstone/ntm/internal/tui/components"
 	"github.com/Dicklesworthstone/ntm/internal/tui/theme"
 )
 
-// RanoNetworkRow is an aggregated per-agent row for the network activity panel.
+// RanoNetworkRow is one agent pane's recorded connection activity. rano records
+// socket connect/close events per process, not HTTP requests or bytes, so the
+// panel shows connection counts and recency only.
 type RanoNetworkRow struct {
-	Label        string
-	AgentType    string
-	RequestCount int
-	BytesOut     int64
-	BytesIn      int64
-	LastRequest  time.Time
+	Label          string
+	AgentType      string
+	Connections    int
+	LastConnection time.Time
+	Providers      map[string]int // connections by rano's provider tag
 }
 
 // RanoNetworkPanelData holds the data for the rano network activity panel.
@@ -33,17 +33,17 @@ type RanoNetworkPanelData struct {
 
 	// PollInterval is used for activity bucketing (best-effort).
 	PollInterval time.Duration
+	// Window is how far back connections are counted.
+	Window time.Duration
 
 	Rows []RanoNetworkRow
 
-	TotalRequests int
-	TotalBytesOut int64
-	TotalBytesIn  int64
+	TotalConnections int
 
 	Error error
 }
 
-// RanoNetworkPanel displays per-agent network activity sourced from rano (best-effort).
+// RanoNetworkPanel displays per-agent connection activity recorded by rano.
 type RanoNetworkPanel struct {
 	PanelBase
 	data  RanoNetworkPanelData
@@ -140,7 +140,7 @@ func (p *RanoNetworkPanel) View() string {
 		content.WriteString("\n" + components.RenderEmptyState(components.EmptyStateOptions{
 			Icon:        components.IconWaiting,
 			Title:       "rano not available",
-			Description: "Install rano and grant required permissions",
+			Description: "Install rano and make sure `rano status` succeeds",
 			Width:       w - 4,
 			Centered:    true,
 		}))
@@ -150,8 +150,8 @@ func (p *RanoNetworkPanel) View() string {
 	if len(p.data.Rows) == 0 {
 		content.WriteString("\n" + components.RenderEmptyState(components.EmptyStateOptions{
 			Icon:        components.IconWaiting,
-			Title:       "No agent traffic",
-			Description: "No recent requests observed",
+			Title:       "No agent connections",
+			Description: "No connections recorded " + ranoWindowLabel(p.data.Window),
 			Width:       w - 4,
 			Centered:    true,
 		}))
@@ -160,11 +160,11 @@ func (p *RanoNetworkPanel) View() string {
 
 	rows := append([]RanoNetworkRow(nil), p.data.Rows...)
 	sort.Slice(rows, func(i, j int) bool {
-		// Most-recent traffic first; fall back to higher bytes out.
-		if !rows[i].LastRequest.Equal(rows[j].LastRequest) {
-			return rows[i].LastRequest.After(rows[j].LastRequest)
+		// Most-recent connection first; fall back to more connections.
+		if !rows[i].LastConnection.Equal(rows[j].LastConnection) {
+			return rows[i].LastConnection.After(rows[j].LastConnection)
 		}
-		return rows[i].BytesOut > rows[j].BytesOut
+		return rows[i].Connections > rows[j].Connections
 	})
 
 	expanded := h >= 14
@@ -173,15 +173,24 @@ func (p *RanoNetworkPanel) View() string {
 	content.WriteString(renderRanoTable(t, w-4, rows, p.data.PollInterval))
 	if expanded {
 		content.WriteString("\n")
-		content.WriteString(fmt.Sprintf("Total: %d req  %s out  %s in\n",
-			p.data.TotalRequests,
-			formatBytesShort(p.data.TotalBytesOut),
-			formatBytesShort(p.data.TotalBytesIn),
-		))
+		content.WriteString(fmt.Sprintf("Total: %d conn %s\n", p.data.TotalConnections, ranoWindowLabel(p.data.Window)))
 		content.WriteString(renderRanoProviderBreakdown(t, w-4, rows))
 	}
 
 	return boxStyle.Render(FitToHeight(content.String(), h-4))
+}
+
+func ranoWindowLabel(window time.Duration) string {
+	switch {
+	case window <= 0:
+		return "recently"
+	case window%time.Hour == 0:
+		return fmt.Sprintf("in the last %dh", window/time.Hour)
+	case window%time.Minute == 0:
+		return fmt.Sprintf("in the last %dm", window/time.Minute)
+	default:
+		return "in the last " + window.String()
+	}
 }
 
 func renderRanoTable(t theme.Theme, width int, rows []RanoNetworkRow, pollInterval time.Duration) string {
@@ -189,24 +198,22 @@ func renderRanoTable(t theme.Theme, width int, rows []RanoNetworkRow, pollInterv
 		return ""
 	}
 
-	// Columns: Agent | Req | Out | In | Activity
+	// Columns: Agent | Conn | Last | Activity
 	// Keep this simple and stable; don't try to fully auto-fit.
-	reqW := 5
-	outW := 8
-	inW := 8
+	connW := 5
+	lastW := 6
 	actW := 9
 	sep := "  "
 
-	agentW := width - (reqW + outW + inW + actW + len(sep)*4)
+	agentW := width - (connW + lastW + actW + len(sep)*3)
 	if agentW < 10 {
 		agentW = 10
 	}
 
-	header := fmt.Sprintf("%-*s%s%*s%s%*s%s%*s%s%-*s",
+	header := fmt.Sprintf("%-*s%s%*s%s%*s%s%-*s",
 		agentW, "Agent",
-		sep, reqW, "Req",
-		sep, outW, "Out",
-		sep, inW, "In",
+		sep, connW, "Conn",
+		sep, lastW, "Last",
 		sep, actW, "Activity",
 	)
 	var b strings.Builder
@@ -219,13 +226,11 @@ func renderRanoTable(t theme.Theme, width int, rows []RanoNetworkRow, pollInterv
 		}
 		label = truncateWidth(label, agentW)
 
-		activity := renderActivity(row.LastRequest, pollInterval)
-		line := fmt.Sprintf("%-*s%s%*d%s%*s%s%*s%s%-*s",
+		line := fmt.Sprintf("%-*s%s%*d%s%*s%s%-*s",
 			agentW, label,
-			sep, reqW, row.RequestCount,
-			sep, outW, formatBytesShort(row.BytesOut),
-			sep, inW, formatBytesShort(row.BytesIn),
-			sep, actW, activity,
+			sep, connW, row.Connections,
+			sep, lastW, formatConnectionAge(row.LastConnection),
+			sep, actW, renderActivity(row.LastConnection, pollInterval),
 		)
 		b.WriteString(line + "\n")
 	}
@@ -233,43 +238,39 @@ func renderRanoTable(t theme.Theme, width int, rows []RanoNetworkRow, pollInterv
 	return strings.TrimRight(b.String(), "\n")
 }
 
+// renderRanoProviderBreakdown sums connections by rano's own provider tag
+// (anthropic, openai, google, unknown), as recorded per connection.
 func renderRanoProviderBreakdown(t theme.Theme, width int, rows []RanoNetworkRow) string {
-	// The underlying rano stats are per-process; provider here is best-effort based on agent type:
-	// Claude -> anthropic, Codex -> openai, Gemini -> google.
-	type agg struct {
-		req int
-		out int64
-		in  int64
-	}
-	byProvider := map[string]*agg{
-		"anthropic": {},
-		"openai":    {},
-		"google":    {},
-		"unknown":   {},
-	}
+	byProvider := make(map[string]int)
 	for _, row := range rows {
-		prov := providerFromAgentType(row.AgentType)
-		a := byProvider[prov]
-		if a == nil {
-			a = &agg{}
-			byProvider[prov] = a
+		for provider, count := range row.Providers {
+			if count > 0 {
+				byProvider[provider] += count
+			}
 		}
-		a.req += row.RequestCount
-		a.out += row.BytesOut
-		a.in += row.BytesIn
 	}
 
-	order := []string{"anthropic", "openai", "google", "unknown"}
+	// rano's labels in its own order; any other tag sorts after them.
+	rank := map[string]int{"anthropic": 0, "openai": 1, "google": 2, "unknown": 3}
+	providers := make([]string, 0, len(byProvider))
+	for provider := range byProvider {
+		providers = append(providers, provider)
+	}
+	sort.Slice(providers, func(i, j int) bool {
+		ri, iKnown := rank[providers[i]]
+		rj, jKnown := rank[providers[j]]
+		if iKnown != jKnown {
+			return iKnown
+		}
+		if iKnown && ri != rj {
+			return ri < rj
+		}
+		return providers[i] < providers[j]
+	})
+
 	var parts []string
-	for _, key := range order {
-		a := byProvider[key]
-		if a == nil {
-			continue
-		}
-		if a.req == 0 && a.out == 0 && a.in == 0 {
-			continue
-		}
-		parts = append(parts, fmt.Sprintf("%s: %d req (%s out)", key, a.req, formatBytesShort(a.out)))
+	for _, provider := range providers {
+		parts = append(parts, fmt.Sprintf("%s: %d", provider, byProvider[provider]))
 	}
 	if len(parts) == 0 {
 		return ""
@@ -279,16 +280,21 @@ func renderRanoProviderBreakdown(t theme.Theme, width int, rows []RanoNetworkRow
 	return truncateWidth(line, width) + "\n"
 }
 
-func providerFromAgentType(agentType string) string {
-	switch agent.AgentType(agentType).Canonical() {
-	case agent.AgentTypeClaudeCode:
-		return "anthropic"
-	case agent.AgentTypeCodex:
-		return "openai"
-	case agent.AgentTypeGemini, agent.AgentTypeAntigravity:
-		return "google"
+// formatConnectionAge renders how long ago the last connection was recorded.
+func formatConnectionAge(last time.Time) string {
+	if last.IsZero() {
+		return "-"
+	}
+	age := time.Since(last)
+	switch {
+	case age < time.Minute:
+		return fmt.Sprintf("%ds", max(int(age/time.Second), 0))
+	case age < time.Hour:
+		return fmt.Sprintf("%dm", int(age/time.Minute))
+	case age < 24*time.Hour:
+		return fmt.Sprintf("%dh", int(age/time.Hour))
 	default:
-		return "unknown"
+		return fmt.Sprintf("%dd", int(age/(24*time.Hour)))
 	}
 }
 
@@ -324,27 +330,4 @@ func truncateWidth(s string, w int) string {
 		return s[:w]
 	}
 	return lipgloss.NewStyle().MaxWidth(w).Render(s)
-}
-
-func formatBytesShort(b int64) string {
-	const unit = 1024
-	if b < unit {
-		return fmt.Sprintf("%dB", b)
-	}
-	div := int64(unit)
-	exp := 0
-	for n := b / unit; n >= unit && exp < 4; n /= unit {
-		div *= unit
-		exp++
-	}
-	value := float64(b) / float64(div)
-	suffixes := [...]string{"KB", "MB", "GB", "TB", "PB"}
-	if exp >= len(suffixes) {
-		exp = len(suffixes) - 1
-	}
-	suffix := suffixes[exp]
-	if value >= 10 {
-		return fmt.Sprintf("%.0f%s", value, suffix)
-	}
-	return fmt.Sprintf("%.1f%s", value, suffix)
 }

@@ -7,10 +7,18 @@ pt agent watch --once --threshold low --format jsonl
 ```
 
 This replaces the nonexistent `pt classify --json --pid ...` contract in the
-live monitor. Existing `ntm serve` and dashboard monitor startup use it without
-new NTM flags. Construction does not start PT. Availability checks require the
-passive watch options, rather than accepting a version string as proof that
-classification is supported.
+live monitor (pt-core has no `classify` subcommand, and no `pt watch --session`
+either; that dead adapter method is gone). Existing `ntm serve` and dashboard
+monitor startup use it without new NTM flags. Construction does not start PT.
+Availability checks require the passive watch options, rather than accepting a
+version string as proof that classification is supported.
+
+In `ntm serve`, monitor classification changes and alerts are published to the
+durable attention feed that `--robot-attention` and `--robot-snapshot --since`
+read from other processes. The robot agent-health reader takes
+`pt_health`/`pt_summary` only from a monitor running in its own process; a
+one-shot `ntm --robot-agent-health` has none and reports
+`pt_status: "monitor_not_running"` with `pt_available: false`.
 
 Each poll runs one bounded whole-host watch iteration and filters its results
 to the processes attributed to agent panes. It does not call `agent apply`, pass
@@ -47,9 +55,11 @@ not once per child. Session/window/index metadata follows that pane into robot
 lookups; equal pane indices across windows are not silently interchangeable.
 Callbacks carry the observed session, including for the all-session monitor.
 
-Recent Rano `last_connection` evidence can downgrade a suspected-stuck process
-to `waiting`. It is not an HTTP request or byte counter. Unavailable Rano data
-does not invalidate a successful PT sample. Failed PT/topology samples clear
+Recent Rano `last_connection` evidence (`use_rano_data`, read from the database
+named by `[integrations.rano] sqlite_path`; see `docs/rano-stats.md`) can
+downgrade a suspected-stuck process to `waiting`. It is not an HTTP request or
+byte counter. Unavailable Rano data, including a missing database, does not
+invalidate a successful PT sample. Failed PT/topology samples clear
 cached classifications so unavailable observations do not accrue stuck duration.
 A changed representative process resets its clock and history. Returned history
 slices are detached from the monitor's mutable state.

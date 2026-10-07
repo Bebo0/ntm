@@ -447,11 +447,8 @@ internal/tools/proxy.go:ProxyAdapter.InvalidateAvailabilityCache	bd-ld4j2	reacha
 internal/tools/proxy.go:ProxyAdapter.IsAvailable	bd-ld4j2	reachable only through RTA's reflection rule at the 2026-10-05 baseline; wire it (surface + behavioral test) or delete it
 internal/tools/pt.go:PTAdapter.ClassifyProcess	bd-ld4j2	reachable only through RTA's reflection rule at the 2026-10-05 baseline; wire it (surface + behavioral test) or delete it
 internal/tools/pt.go:PTAdapter.InvalidateStatusCache	bd-ld4j2	reachable only through RTA's reflection rule at the 2026-10-05 baseline; wire it (surface + behavioral test) or delete it
-internal/tools/pt.go:PTAdapter.WatchSession	bd-ld4j2	reachable only through RTA's reflection rule at the 2026-10-05 baseline; wire it (surface + behavioral test) or delete it
 internal/tools/rano.go:RanoAdapter.GetProcessStats	bd-ld4j2	reachable only through RTA's reflection rule at the 2026-10-05 baseline; wire it (surface + behavioral test) or delete it
 internal/tools/rano.go:RanoAdapter.GetProcessStatsWithWindow	bd-ld4j2	reachable only through RTA's reflection rule at the 2026-10-05 baseline; wire it (surface + behavioral test) or delete it
-internal/tools/rano.go:RanoAdapter.GetStatus	bd-ld4j2	reachable only through RTA's reflection rule at the 2026-10-05 baseline; wire it (surface + behavioral test) or delete it
-internal/tools/rano.go:RanoAdapter.HasRequiredPermissions	bd-ld4j2	reachable only through RTA's reflection rule at the 2026-10-05 baseline; wire it (surface + behavioral test) or delete it
 internal/tools/rano.go:RanoAdapter.InvalidateAvailabilityCache	bd-ld4j2	reachable only through RTA's reflection rule at the 2026-10-05 baseline; wire it (surface + behavioral test) or delete it
 internal/tools/rch.go:RCHAdapter.HasHealthyWorkers	bd-ld4j2	reachable only through RTA's reflection rule at the 2026-10-05 baseline; wire it (surface + behavioral test) or delete it
 internal/tools/rch.go:RCHAdapter.InvalidateAvailabilityCache	bd-ld4j2	reachable only through RTA's reflection rule at the 2026-10-05 baseline; wire it (surface + behavioral test) or delete it

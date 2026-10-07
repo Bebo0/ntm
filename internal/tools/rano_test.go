@@ -2,6 +2,7 @@ package tools
 
 import (
 	"context"
+	"path/filepath"
 	"testing"
 	"time"
 )
@@ -45,13 +46,13 @@ func TestRanoAdapterDetect(t *testing.T) {
 
 func TestRanoAvailabilityStruct(t *testing.T) {
 	availability := RanoAvailability{
-		Available:     true,
-		Compatible:    true,
-		HasCapability: true,
-		CanReadProc:   true,
-		Version:       Version{Major: 1, Minor: 0, Patch: 0},
-		Path:          "/usr/local/bin/rano",
-		LastChecked:   time.Now(),
+		Available:   true,
+		Compatible:  true,
+		Operational: true,
+		CanReadProc: true,
+		Version:     Version{Major: 1, Minor: 0, Patch: 0},
+		Path:        "/usr/local/bin/rano",
+		LastChecked: time.Now(),
 	}
 
 	if !availability.Available {
@@ -62,8 +63,8 @@ func TestRanoAvailabilityStruct(t *testing.T) {
 		t.Error("Expected Compatible to be true")
 	}
 
-	if !availability.HasCapability {
-		t.Error("Expected HasCapability to be true")
+	if !availability.Operational {
+		t.Error("Expected Operational to be true")
 	}
 
 	if !availability.CanReadProc {
@@ -71,53 +72,27 @@ func TestRanoAvailabilityStruct(t *testing.T) {
 	}
 }
 
-func TestRanoStatusStruct(t *testing.T) {
-	status := RanoStatus{
-		Running:      true,
-		Monitoring:   true,
-		ProcessCount: 5,
-		RequestCount: 100,
-		BytesIn:      1024 * 1024,
-		BytesOut:     512 * 1024,
-	}
+func TestRanoAdapterDatabaseResolution(t *testing.T) {
+	dir := t.TempDir()
+	t.Chdir(dir)
+	home := filepath.Join(dir, "home")
+	t.Setenv("HOME", home)
 
-	if !status.Running {
-		t.Error("Expected Running to be true")
+	adapter := NewRanoAdapter()
+	got, err := adapter.Database()
+	if err != nil || got != filepath.Join(dir, RanoDefaultDatabase) {
+		t.Fatalf("default database = %q, %v; want rano's observer.sqlite in the working directory", got, err)
 	}
-
-	if !status.Monitoring {
-		t.Error("Expected Monitoring to be true")
-	}
-
-	if status.ProcessCount != 5 {
-		t.Errorf("Expected ProcessCount 5, got %d", status.ProcessCount)
-	}
-
-	if status.RequestCount != 100 {
-		t.Errorf("Expected RequestCount 100, got %d", status.RequestCount)
-	}
-}
-
-func TestRanoProcessStatsStruct(t *testing.T) {
-	stats := RanoProcessStats{
-		PID:          12345,
-		ProcessName:  "claude-agent",
-		RequestCount: 50,
-		BytesIn:      256 * 1024,
-		BytesOut:     128 * 1024,
-		LastRequest:  "2026-01-21T10:00:00Z",
-	}
-
-	if stats.PID != 12345 {
-		t.Errorf("Expected PID 12345, got %d", stats.PID)
-	}
-
-	if stats.ProcessName != "claude-agent" {
-		t.Errorf("Expected ProcessName 'claude-agent', got %s", stats.ProcessName)
-	}
-
-	if stats.RequestCount != 50 {
-		t.Errorf("Expected RequestCount 50, got %d", stats.RequestCount)
+	for input, want := range map[string]string{
+		"  /var/lib/rano/observer.sqlite ": "/var/lib/rano/observer.sqlite",
+		"~/rano/observer.sqlite":           filepath.Join(home, "rano", "observer.sqlite"),
+		"data/observer.sqlite":             filepath.Join(dir, "data", "observer.sqlite"),
+		"":                                 filepath.Join(dir, RanoDefaultDatabase),
+	} {
+		adapter.SetDatabase(input)
+		if got, err := adapter.Database(); err != nil || got != want {
+			t.Errorf("SetDatabase(%q) -> %q, %v; want %q", input, got, err, want)
+		}
 	}
 }
 
@@ -194,22 +169,6 @@ func TestRanoAdapterIsAvailable(t *testing.T) {
 	_, installed := adapter.Detect()
 	if !installed && available {
 		t.Error("IsAvailable returned true but rano is not installed")
-	}
-}
-
-func TestRanoAdapterHasRequiredPermissions(t *testing.T) {
-	adapter := NewRanoAdapter()
-
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-
-	// HasRequiredPermissions should not panic
-	hasPerms := adapter.HasRequiredPermissions(ctx)
-
-	// If rano is not installed, should return false
-	_, installed := adapter.Detect()
-	if !installed && hasPerms {
-		t.Error("HasRequiredPermissions returned true but rano is not installed")
 	}
 }
 
@@ -320,25 +279,6 @@ func TestRanoMinVersionCompatibility(t *testing.T) {
 				t.Errorf("ranoCompatible(%v) = %v, want %v", tt.version, result, tt.expected)
 			}
 		})
-	}
-}
-
-func TestRanoAdapterGetStatus(t *testing.T) {
-	adapter := NewRanoAdapter()
-
-	// If rano is not installed, GetStatus should handle gracefully
-	_, installed := adapter.Detect()
-	if installed {
-		t.Skip("rano is installed, skipping not-installed test")
-	}
-
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-
-	_, err := adapter.GetStatus(ctx)
-	// Should return an error when not installed (exec.LookPath fails)
-	if err == nil {
-		t.Log("GetStatus returned no error - rano may be in PATH but not working")
 	}
 }
 

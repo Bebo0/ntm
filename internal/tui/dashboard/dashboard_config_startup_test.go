@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"github.com/Dicklesworthstone/ntm/internal/config"
+	"github.com/Dicklesworthstone/ntm/internal/robot"
 	"github.com/Dicklesworthstone/ntm/internal/tui/theme"
 )
 
@@ -51,6 +52,35 @@ func TestApplyConfigHonorsRanoDisabledBeforeAnyReload(t *testing.T) {
 	}
 	if update.Data.PollInterval != 2500*time.Millisecond {
 		t.Fatalf("poll interval = %v, want 2.5s", update.Data.PollInterval)
+	}
+}
+
+// The network panel shows what rano records: connection counts, the last
+// connection and rano's per-connection provider tags, keyed per durable pane
+// (two panes sharing a title stay two rows).
+func TestRanoNetworkRowsCarryRecordedConnections(t *testing.T) {
+	panes := map[string]robot.RanoPaneStats{
+		"%3": {PaneID: "%3", PaneTitle: "proj__cc_1", AgentType: "cc", ConnectionCount: 4,
+			LastConnection: "2026-01-20T12:00:03Z",
+			Providers:      map[string]robot.RanoProviderAgg{"anthropic": {Connections: 3}, "unknown": {Connections: 1}}},
+		"%4": {PaneID: "%4", PaneTitle: "proj__cc_1", AgentType: "cc", ConnectionCount: 1},
+		"%9": {PaneID: "%9", AgentType: "cod", ConnectionCount: 2, LastConnection: "not-a-time"},
+	}
+	rows := ranoNetworkRows(panes)
+	if len(rows) != 3 {
+		t.Fatalf("rows = %+v, want one per pane", rows)
+	}
+	if rows[0].Label != "%9" || rows[0].Connections != 2 || !rows[0].LastConnection.IsZero() {
+		t.Fatalf("untitled pane row = %+v", rows[0])
+	}
+	first := rows[1]
+	if first.Label != "proj__cc_1" || first.Connections != 4 ||
+		!first.LastConnection.Equal(time.Date(2026, 1, 20, 12, 0, 3, 0, time.UTC)) ||
+		first.Providers["anthropic"] != 3 || first.Providers["unknown"] != 1 {
+		t.Fatalf("recorded connection evidence lost: %+v", first)
+	}
+	if rows[2].Label != "proj__cc_1" || rows[2].Connections != 1 || rows[2].Providers != nil {
+		t.Fatalf("same-title pane merged or invented providers: %+v", rows[2])
 	}
 }
 

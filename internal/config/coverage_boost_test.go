@@ -294,6 +294,7 @@ func TestGetValue_MemoryPrivacySwarmAndRano(t *testing.T) {
 		{"integrations.rano"},
 		{"integrations.rano.enabled"},
 		{"integrations.rano.poll_interval_ms"},
+		{"integrations.rano.sqlite_path"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.path, func(t *testing.T) {

@@ -4,6 +4,7 @@ package robot
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sort"
 	"time"
@@ -15,8 +16,9 @@ import (
 
 // RanoStatsOptions configures the --robot-rano-stats command.
 type RanoStatsOptions struct {
-	Panes  []int  // pane indices to include (empty = all non-control panes)
-	Window string // time window (e.g., 5m, 1h)
+	Panes    []int  // pane indices to include (empty = all non-control panes)
+	Window   string // time window (e.g., 5m, 1h)
+	Database string // rano observer database ([integrations.rano] sqlite_path); empty = rano's default
 }
 
 // RanoStatsOutput represents the response from --robot-rano-stats.
@@ -26,6 +28,7 @@ type RanoStatsOutput struct {
 	Query              RanoStatsQuery           `json:"query"`
 	Panes              map[string]RanoPaneStats `json:"panes"`
 	Total              RanoTotals               `json:"total"`
+	Database           string                   `json:"database,omitempty"` // observer database the counts were read from
 	Measurement        string                   `json:"measurement,omitempty"`
 	Attribution        string                   `json:"attribution,omitempty"`
 	UnavailableMetrics []string                 `json:"unavailable_metrics,omitempty"`
@@ -36,7 +39,8 @@ type RanoStatsQuery struct {
 	PanesRequested []int `json:"panes_requested,omitempty"`
 }
 
-// RanoPaneStats aggregates network stats for a pane.
+// RanoPaneStats aggregates a pane's recorded connection events. rano records
+// socket connect/close events, not HTTP requests or transferred bytes.
 type RanoPaneStats struct {
 	PaneID          string                     `json:"pane_id,omitempty"`
 	WindowIndex     int                        `json:"window_index"`
@@ -46,33 +50,24 @@ type RanoPaneStats struct {
 	AgentType       string                     `json:"agent_type,omitempty"`
 	NTMIndex        int                        `json:"ntm_index,omitempty"`
 	PIDs            []int                      `json:"pids,omitempty"`
-	RequestCount    int                        `json:"request_count,omitempty"`
-	BytesIn         int64                      `json:"bytes_in,omitempty"`
-	BytesOut        int64                      `json:"bytes_out,omitempty"`
-	LastRequest     string                     `json:"last_request,omitempty"`
 	ConnectionCount int                        `json:"connection_count"`
 	LastConnection  string                     `json:"last_connection,omitempty"`
 	Providers       map[string]RanoProviderAgg `json:"providers,omitempty"`
 }
 
-// RanoProviderAgg counts exported connection opens by Rano's provider tag.
-// The export does not measure transfer bytes; those fields remain absent.
+// RanoProviderAgg counts recorded connection opens by rano's provider tag.
 type RanoProviderAgg struct {
-	Connections int   `json:"connections,omitempty"`
-	BytesSent   int64 `json:"bytes_sent,omitempty"`
-	BytesRecv   int64 `json:"bytes_received,omitempty"`
+	Connections int `json:"connections"`
 }
 
 // RanoTotals aggregates totals across all panes.
 type RanoTotals struct {
-	ConnectionCount int   `json:"connection_count"`
-	RequestCount    int   `json:"request_count,omitempty"`
-	BytesIn         int64 `json:"bytes_in,omitempty"`
-	BytesOut        int64 `json:"bytes_out,omitempty"`
+	ConnectionCount int `json:"connection_count"`
 }
 
 type ranoStatsAdapter interface {
 	GetAvailability(context.Context) (*tools.RanoAvailability, error)
+	Database() (string, error)
 	GetAllProcessStatsWithWindow(context.Context, string) ([]tools.RanoProcessStats, error)
 }
 
@@ -81,10 +76,12 @@ type ranoStatsPIDMap interface {
 	GetPaneForPID(int) *rano.PaneIdentity
 }
 
-// GetRanoStats returns per-pane network stats from rano.
+// GetRanoStats returns per-pane connection counts recorded by rano.
 // This function returns the data struct directly, enabling CLI/REST parity.
 func GetRanoStats(opts RanoStatsOptions) (*RanoStatsOutput, error) {
-	return getRanoStats(opts, tools.NewRanoAdapter(), rano.NewPIDMap(""), collectRanoTargetPanes)
+	adapter := tools.NewRanoAdapter()
+	adapter.SetDatabase(opts.Database)
+	return getRanoStats(opts, adapter, rano.NewPIDMap(""), collectRanoTargetPanes)
 }
 
 func getRanoStats(opts RanoStatsOptions, adapter ranoStatsAdapter, pidMap ranoStatsPIDMap,
@@ -137,7 +134,7 @@ func getRanoStats(opts RanoStatsOptions, adapter ranoStatsAdapter, pidMap ranoSt
 			Panes:  map[string]RanoPaneStats{},
 		}, nil
 	}
-	if !availability.HasCapability {
+	if !availability.Operational {
 		return &RanoStatsOutput{
 			RobotResponse: NewErrorResponse(
 				fmt.Errorf("rano status probe failed"),
@@ -183,17 +180,26 @@ func getRanoStats(opts RanoStatsOptions, adapter ranoStatsAdapter, pidMap ranoSt
 		}, nil
 	}
 
+	// The database is rano's monitor output; resolution failure leaves it unnamed.
+	database, _ := adapter.Database()
 	stats, err := adapter.GetAllProcessStatsWithWindow(ctx, window)
 	if err != nil {
+		code, hint := ErrCodeInternalError, "Failed to export rano's connection history"
+		if errors.Is(err, tools.ErrRanoNoDatabase) {
+			// Nothing recorded is not zero traffic: report the missing source.
+			code = ErrCodeDependencyMissing
+			hint = "Run rano's monitor (rano --sqlite PATH) and set [integrations.rano] sqlite_path to that PATH"
+		}
 		return &RanoStatsOutput{
-			RobotResponse: NewErrorResponse(err, ErrCodeInternalError, "Failed to query rano stats"),
+			RobotResponse: NewErrorResponse(err, code, hint),
 			Window:        window,
 			Query:         RanoStatsQuery{PanesRequested: opts.Panes},
 			Panes:         map[string]RanoPaneStats{},
+			Database:      database,
 		}, nil
 	}
 
-	panes, total := aggregateRanoStats(stats, func(pid int) *rano.PaneIdentity {
+	panes, total := AggregateRanoStats(stats, func(pid int) *rano.PaneIdentity {
 		return pidMap.GetPaneForPID(pid)
 	}, func(identity *rano.PaneIdentity) bool {
 		if identity == nil {
@@ -209,6 +215,7 @@ func getRanoStats(opts RanoStatsOptions, adapter ranoStatsAdapter, pidMap ranoSt
 		Query:              RanoStatsQuery{PanesRequested: opts.Panes},
 		Panes:              panes,
 		Total:              total,
+		Database:           database,
 		Measurement:        "connection_events",
 		Attribution:        "current_process_tree",
 		UnavailableMetrics: []string{"http_requests", "bytes_in", "bytes_out"},
@@ -283,13 +290,16 @@ func ranoAgentPane(pane tmux.Pane) bool {
 		pane.Type != tmux.AgentUser && pane.Type != tmux.AgentUnknown
 }
 
-func aggregateRanoStats(
+// AggregateRanoStats attributes per-process connection counts to panes (keyed
+// by durable pane identity) using pidLookup, keeping only panes allowPane
+// accepts. It is the single pane attribution shared by --robot-rano-stats and
+// the dashboard network panel.
+func AggregateRanoStats(
 	stats []tools.RanoProcessStats,
 	pidLookup func(int) *rano.PaneIdentity,
 	allowPane func(*rano.PaneIdentity) bool,
 ) (map[string]RanoPaneStats, RanoTotals) {
 	panes := make(map[string]RanoPaneStats)
-	lastRequest := make(map[string]time.Time)
 	lastConnection := make(map[string]time.Time)
 	total := RanoTotals{}
 
@@ -314,9 +324,6 @@ func aggregateRanoStats(
 		}
 
 		pane.PIDs = append(pane.PIDs, stat.PID)
-		pane.RequestCount += stat.RequestCount
-		pane.BytesIn += stat.BytesIn
-		pane.BytesOut += stat.BytesOut
 		pane.ConnectionCount += stat.ConnectionCount
 		if len(stat.Providers) > 0 {
 			if pane.Providers == nil {
@@ -335,17 +342,6 @@ func aggregateRanoStats(
 			}
 		}
 
-		if stat.LastRequest != "" {
-			if t, err := time.Parse(time.RFC3339, stat.LastRequest); err == nil {
-				if prev, ok := lastRequest[key]; !ok || t.After(prev) {
-					lastRequest[key] = t
-					pane.LastRequest = stat.LastRequest
-				}
-			} else if pane.LastRequest == "" {
-				pane.LastRequest = stat.LastRequest
-			}
-		}
-
 		panes[key] = pane
 	}
 
@@ -359,9 +355,6 @@ func aggregateRanoStats(
 		pane := panes[key]
 		sort.Ints(pane.PIDs)
 		panes[key] = pane
-		total.RequestCount += pane.RequestCount
-		total.BytesIn += pane.BytesIn
-		total.BytesOut += pane.BytesOut
 		total.ConnectionCount += pane.ConnectionCount
 	}
 

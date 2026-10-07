@@ -487,7 +487,12 @@ func (m *Model) fetchScanStatusWithContext(ctx context.Context) tea.Cmd {
 	}
 }
 
-// fetchRanoNetworkStats fetches per-agent network activity from rano (best-effort).
+// ranoNetworkWindow is how far back the network panel counts recorded connections.
+const ranoNetworkWindow = 5 * time.Minute
+
+// fetchRanoNetworkStats reads per-agent connection activity from rano's
+// observer database (best-effort). A missing database or failed export is
+// surfaced as the panel's error, never shown as zero traffic.
 func (m *Model) fetchRanoNetworkStats() tea.Cmd {
 	gen := m.nextGen(refreshRanoNetwork)
 	cfg := m.cfg
@@ -496,15 +501,18 @@ func (m *Model) fetchRanoNetworkStats() tea.Cmd {
 	return func() tea.Msg {
 		data := panels.RanoNetworkPanelData{
 			Loaded: true,
+			Window: ranoNetworkWindow,
 		}
 
 		enabled := true
 		pollInterval := 1 * time.Second
+		database := config.DefaultRanoConfig().SQLitePath
 		if cfg != nil {
 			enabled = cfg.Integrations.Rano.Enabled
 			if cfg.Integrations.Rano.PollIntervalMs > 0 {
 				pollInterval = time.Duration(cfg.Integrations.Rano.PollIntervalMs) * time.Millisecond
 			}
+			database = cfg.Integrations.Rano.SQLitePath
 		}
 		data.Enabled = enabled
 		data.PollInterval = pollInterval
@@ -517,6 +525,7 @@ func (m *Model) fetchRanoNetworkStats() tea.Cmd {
 		defer cancel()
 
 		adapter := tools.NewRanoAdapter()
+		adapter.SetDatabase(database)
 		availability, err := adapter.GetAvailability(ctx)
 		if err != nil {
 			data.Error = err
@@ -524,7 +533,7 @@ func (m *Model) fetchRanoNetworkStats() tea.Cmd {
 		}
 
 		if availability != nil {
-			data.Available = availability.Available && availability.Compatible && availability.HasCapability && availability.CanReadProc
+			data.Available = availability.Available && availability.Compatible && availability.Operational && availability.CanReadProc
 			if availability.Version.Raw != "" {
 				data.Version = availability.Version.String()
 			}
@@ -541,70 +550,55 @@ func (m *Model) fetchRanoNetworkStats() tea.Cmd {
 			return RanoNetworkUpdateMsg{Data: data, Gen: gen}
 		}
 
-		allStats, err := adapter.GetAllProcessStats(ctx)
+		allStats, err := adapter.GetAllProcessStatsWithWindow(ctx, ranoNetworkWindow.String())
 		if err != nil {
 			data.Error = err
 			return RanoNetworkUpdateMsg{Data: data, Gen: gen}
 		}
 
-		byPane := make(map[string]*panels.RanoNetworkRow)
-		for i := range allStats {
-			st := allStats[i]
-
-			identity := pidMap.GetPaneForPID(st.PID)
-			if identity == nil {
-				continue
-			}
-			label := identity.PaneTitle
-			if label == "" {
-				label = identity.String()
-			}
-
-			row := byPane[label]
-			if row == nil {
-				row = &panels.RanoNetworkRow{
-					Label:     label,
-					AgentType: string(identity.AgentType),
-				}
-				byPane[label] = row
-			}
-
-			row.RequestCount += st.RequestCount
-			row.BytesOut += st.BytesOut
-			row.BytesIn += st.BytesIn
-
-			if ts := parseRanoTimestamp(st.LastRequest); !ts.IsZero() && ts.After(row.LastRequest) {
-				row.LastRequest = ts
-			}
-		}
-
-		for _, row := range byPane {
-			data.Rows = append(data.Rows, *row)
-			data.TotalRequests += row.RequestCount
-			data.TotalBytesOut += row.BytesOut
-			data.TotalBytesIn += row.BytesIn
-		}
-
-		// Stable ordering by label (the panel will still prioritize recency in View).
-		sort.Slice(data.Rows, func(i, j int) bool {
-			return data.Rows[i].Label < data.Rows[j].Label
+		panes, total := robot.AggregateRanoStats(allStats, pidMap.GetPaneForPID, func(identity *rano.PaneIdentity) bool {
+			return identity.AgentType != "" && identity.AgentType != tmux.AgentUser && identity.AgentType != tmux.AgentUnknown
 		})
+		data.Rows = ranoNetworkRows(panes)
+		data.TotalConnections = total.ConnectionCount
 
 		return RanoNetworkUpdateMsg{Data: data, Gen: gen}
 	}
 }
 
-func parseRanoTimestamp(s string) time.Time {
-	if strings.TrimSpace(s) == "" {
-		return time.Time{}
+// ranoNetworkRows converts robot pane aggregates into panel rows, ordered by
+// label then pane identity (the panel still prioritizes recency in View).
+func ranoNetworkRows(panes map[string]robot.RanoPaneStats) []panels.RanoNetworkRow {
+	keys := make([]string, 0, len(panes))
+	for key := range panes {
+		keys = append(keys, key)
 	}
-	if ts, err := time.Parse(time.RFC3339Nano, s); err == nil {
-		return ts
+	sort.Strings(keys)
+	rows := make([]panels.RanoNetworkRow, 0, len(panes))
+	for _, key := range keys {
+		pane := panes[key]
+		label := pane.PaneTitle
+		if label == "" {
+			label = key
+		}
+		row := panels.RanoNetworkRow{
+			Label:       label,
+			AgentType:   pane.AgentType,
+			Connections: pane.ConnectionCount,
+		}
+		if at, err := time.Parse(time.RFC3339Nano, pane.LastConnection); err == nil {
+			row.LastConnection = at
+		}
+		if len(pane.Providers) > 0 {
+			row.Providers = make(map[string]int, len(pane.Providers))
+			for provider, agg := range pane.Providers {
+				row.Providers[provider] = agg.Connections
+			}
+		}
+		rows = append(rows, row)
 	}
-	if ts, err := time.Parse(time.RFC3339, s); err == nil {
-		return ts
-	}
-	return time.Time{}
+	sort.SliceStable(rows, func(i, j int) bool { return rows[i].Label < rows[j].Label })
+	return rows
 }
 
 // fetchRCHStatus fetches the current RCH status.

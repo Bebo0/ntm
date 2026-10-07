@@ -253,7 +253,7 @@ func init() {
 	config.RegisterReader("integrations.dcg.binary_path", policy.ClaudeAgentLaunchSettings)
 	config.RegisterReader("integrations.dcg.custom_blocklist", policy.ClaudeAgentLaunchSettings)
 	config.RegisterReader("integrations.dcg.custom_whitelist", policy.ClaudeAgentLaunchSettings)
-	config.RegisterReader("integrations.process_triage.enabled", runServe)
+	config.RegisterReader("integrations.process_triage.enabled", startServeProcessTriage)
 	config.RegisterReader("integrations.rch.enabled", policy.ClaudeAgentLaunchSettings)
 	config.RegisterReader("integrations.rch.binary_path", policy.ClaudeAgentLaunchSettings)
 	config.RegisterReader("integrations.rch.intercept_patterns", policy.ClaudeAgentLaunchSettings)

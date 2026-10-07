@@ -17,4 +17,6 @@ func init() {
 	// Rano network stats polling (dashboard.go).
 	config.RegisterReader("integrations.rano.enabled", (*Model).fetchRanoNetworkStats)
 	config.RegisterReader("integrations.rano.poll_interval_ms", (*Model).fetchRanoNetworkStats)
+	// Also read by --robot-rano-stats (cli root) and the PT monitor's rano input.
+	config.RegisterReader("integrations.rano.sqlite_path", (*Model).fetchRanoNetworkStats)
 }

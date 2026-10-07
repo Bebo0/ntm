@@ -1663,20 +1663,24 @@ func ValidateProcessTriageConfig(cfg *ProcessTriageConfig) error {
 }
 
 // RanoConfig holds configuration for the rano network observer integration.
-// rano monitors network activity per process, enabling per-agent API tracking.
+// rano's monitor records per-process connection events into an SQLite
+// database; ntm reads that history with `rano export` for per-agent
+// connection counts. ntm does not start the monitor.
 // The binary_path/providers keys were deprecated in v1.28.0 (bd-6otuk):
 // the rano adapter resolves the binary from PATH and tracks all known
 // providers.
 type RanoConfig struct {
-	Enabled        bool `toml:"enabled"`          // Enable rano network monitoring integration
-	PollIntervalMs int  `toml:"poll_interval_ms"` // Polling interval in milliseconds
+	Enabled        bool   `toml:"enabled"`          // Enable rano network monitoring integration
+	PollIntervalMs int    `toml:"poll_interval_ms"` // Polling interval in milliseconds
+	SQLitePath     string `toml:"sqlite_path"`      // rano observer database ntm reads (rano's --sqlite / sqlite=); relative paths resolve against the working directory
 }
 
 // DefaultRanoConfig returns sensible defaults for rano integration.
 func DefaultRanoConfig() RanoConfig {
 	return RanoConfig{
-		Enabled:        true, // Enabled by default (when rano is available)
-		PollIntervalMs: 1000, // Poll every second
+		Enabled:        true,              // Enabled by default (when rano is available)
+		PollIntervalMs: 1000,              // Poll every second
+		SQLitePath:     "observer.sqlite", // rano's own default database name
 	}
 }
 
@@ -3856,9 +3860,11 @@ func Print(cfg *Config, w io.Writer) error {
 	fmt.Fprintln(w)
 
 	fmt.Fprintln(w, "[integrations.rano]")
-	fmt.Fprintln(w, "# rano network observer settings for per-agent API tracking")
+	fmt.Fprintln(w, "# rano network observer: per-agent connection counts read from rano's database")
 	fmt.Fprintf(w, "enabled = %t\n", cfg.Integrations.Rano.Enabled)
 	fmt.Fprintf(w, "poll_interval_ms = %d\n", cfg.Integrations.Rano.PollIntervalMs)
+	fmt.Fprintln(w, "# Database rano's monitor writes (rano --sqlite PATH, or sqlite= in ~/.config/rano/config.conf)")
+	fmt.Fprintf(w, "sqlite_path = %q\n", cfg.Integrations.Rano.SQLitePath)
 	fmt.Fprintln(w)
 
 	fmt.Fprintln(w, "[integrations.xf]")
@@ -4832,6 +4838,8 @@ func GetValue(cfg *Config, path string) (interface{}, error) {
 				return cfg.Integrations.Rano.Enabled, nil
 			case "poll_interval_ms":
 				return cfg.Integrations.Rano.PollIntervalMs, nil
+			case "sqlite_path":
+				return cfg.Integrations.Rano.SQLitePath, nil
 			}
 		case "caam":
 			if len(parts) < 3 {
@@ -5772,6 +5780,7 @@ func Diff(cfg *Config) []ConfigDiff {
 	addDiff("integrations.dcg.allow_override", defaults.Integrations.DCG.AllowOverride, cfg.Integrations.DCG.AllowOverride)
 	addDiff("integrations.rano.enabled", defaults.Integrations.Rano.Enabled, cfg.Integrations.Rano.Enabled)
 	addDiff("integrations.rano.poll_interval_ms", defaults.Integrations.Rano.PollIntervalMs, cfg.Integrations.Rano.PollIntervalMs)
+	addDiff("integrations.rano.sqlite_path", defaults.Integrations.Rano.SQLitePath, cfg.Integrations.Rano.SQLitePath)
 	addDiff("integrations.caam.binary_path", defaults.Integrations.CAAM.BinaryPath, cfg.Integrations.CAAM.BinaryPath)
 	addDiff("integrations.caam.auto_failover", defaults.Integrations.CAAM.AutoFailover, cfg.Integrations.CAAM.AutoFailover)
 	addDiff("integrations.caam.reset_horizon_minutes", defaults.Integrations.CAAM.ResetHorizonMinutes, cfg.Integrations.CAAM.ResetHorizonMinutes)

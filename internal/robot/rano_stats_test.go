@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"reflect"
 	"strings"
 	"testing"
@@ -31,9 +32,9 @@ func TestNormalizeRanoWindowInvalid(t *testing.T) {
 
 func TestAggregateRanoStats(t *testing.T) {
 	stats := []tools.RanoProcessStats{
-		{PID: 100, RequestCount: 2, BytesIn: 10, BytesOut: 5, LastRequest: "2026-01-01T00:00:01Z"},
-		{PID: 101, RequestCount: 3, BytesIn: 20, BytesOut: 8, LastRequest: "2026-01-01T00:00:02Z"},
-		{PID: 200, RequestCount: 1, BytesIn: 5, BytesOut: 2, LastRequest: "2026-01-01T00:00:03Z"},
+		{PID: 100, ConnectionCount: 2, LastConnection: "2026-01-01T00:00:01Z", Providers: map[string]int{"anthropic": 2}},
+		{PID: 101, ConnectionCount: 3, LastConnection: "2026-01-01T00:00:02Z", Providers: map[string]int{"anthropic": 1, "unknown": 2}},
+		{PID: 200, ConnectionCount: 1, LastConnection: "2026-01-01T00:00:03Z", Providers: map[string]int{"openai": 1}},
 	}
 
 	pidLookup := func(pid int) *rano.PaneIdentity {
@@ -61,36 +62,26 @@ func TestAggregateRanoStats(t *testing.T) {
 		return identity != nil && identity.PaneTitle == "s1__cc_1"
 	}
 
-	panes, total := aggregateRanoStats(stats, pidLookup, allowPane)
+	panes, total := AggregateRanoStats(stats, pidLookup, allowPane)
 
 	pane, ok := panes["s1__cc_1"]
-	if !ok {
-		t.Fatalf("expected pane s1__cc_1 to be present")
+	if !ok || len(panes) != 1 {
+		t.Fatalf("expected only pane s1__cc_1, got %+v", panes)
 	}
-	if pane.RequestCount != 5 {
-		t.Fatalf("expected request count 5, got %d", pane.RequestCount)
+	if pane.ConnectionCount != 5 {
+		t.Fatalf("expected connection count 5, got %d", pane.ConnectionCount)
 	}
-	if pane.BytesIn != 30 {
-		t.Fatalf("expected bytes_in 30, got %d", pane.BytesIn)
+	if pane.LastConnection != "2026-01-01T00:00:02Z" {
+		t.Fatalf("expected last_connection 2026-01-01T00:00:02Z, got %s", pane.LastConnection)
 	}
-	if pane.BytesOut != 13 {
-		t.Fatalf("expected bytes_out 13, got %d", pane.BytesOut)
+	if pane.Providers["anthropic"].Connections != 3 || pane.Providers["unknown"].Connections != 2 || len(pane.Providers) != 2 {
+		t.Fatalf("provider tags not summed per pane: %+v", pane.Providers)
 	}
-	if pane.LastRequest != "2026-01-01T00:00:02Z" {
-		t.Fatalf("expected last_request 2026-01-01T00:00:02Z, got %s", pane.LastRequest)
+	if !reflect.DeepEqual(pane.PIDs, []int{100, 101}) {
+		t.Fatalf("expected pids [100 101], got %v", pane.PIDs)
 	}
-	if len(pane.PIDs) != 2 {
-		t.Fatalf("expected 2 pids, got %d", len(pane.PIDs))
-	}
-
-	if total.RequestCount != 5 {
-		t.Fatalf("expected total request count 5, got %d", total.RequestCount)
-	}
-	if total.BytesIn != 30 {
-		t.Fatalf("expected total bytes_in 30, got %d", total.BytesIn)
-	}
-	if total.BytesOut != 13 {
-		t.Fatalf("expected total bytes_out 13, got %d", total.BytesOut)
+	if total.ConnectionCount != 5 {
+		t.Fatalf("expected total connection count 5 (filtered pane excluded), got %d", total.ConnectionCount)
 	}
 }
 
@@ -108,6 +99,7 @@ func (f *ranoStatsFixture) GetAvailability(context.Context) (*tools.RanoAvailabi
 	f.calls = append(f.calls, "availability")
 	return f.availability, f.availabilityErr
 }
+func (f *ranoStatsFixture) Database() (string, error) { return "/data/rano/observer.sqlite", nil }
 func (f *ranoStatsFixture) GetAllProcessStatsWithWindow(ctx context.Context, w string) ([]tools.RanoProcessStats, error) {
 	f.calls = append(f.calls, "export:"+w)
 	return f.stats, f.statsErr
@@ -118,7 +110,7 @@ func (f *ranoStatsFixture) RefreshContext(context.Context) error {
 }
 func (f *ranoStatsFixture) GetPaneForPID(pid int) *rano.PaneIdentity { return f.pids[pid] }
 func readyRanoStatsFixture() *ranoStatsFixture {
-	return &ranoStatsFixture{availability: &tools.RanoAvailability{Available: true, Compatible: true, HasCapability: true, CanReadProc: true}}
+	return &ranoStatsFixture{availability: &tools.RanoAvailability{Available: true, Compatible: true, Operational: true, CanReadProc: true}}
 }
 
 func TestRanoStatsSurfaceReportsConnectionEvidence(t *testing.T) {
@@ -150,11 +142,12 @@ func TestRanoStatsSurfaceReportsConnectionEvidence(t *testing.T) {
 	if pane.ConnectionCount != 3 || pane.LastConnection != "2026-01-17T10:02:00Z" || !reflect.DeepEqual(pane.PIDs, []int{42, 43}) || pane.Providers["anthropic"].Connections != 2 || pane.WindowIndex != 1 {
 		t.Fatalf("untitled pane aggregation reset or lost attribution: %+v", pane)
 	}
-	if out.Measurement != "connection_events" || out.Attribution != "current_process_tree" || len(out.UnavailableMetrics) != 3 {
-		t.Fatalf("missing measurement scope: %+v", out)
+	if out.Measurement != "connection_events" || out.Attribution != "current_process_tree" || len(out.UnavailableMetrics) != 3 ||
+		out.Database != "/data/rano/observer.sqlite" {
+		t.Fatalf("missing measurement scope or source database: %+v", out)
 	}
 	encoded, _ := json.Marshal(out)
-	for _, unmeasured := range []string{`"request_count":`, `"bytes_in":`, `"bytes_out":`, `"last_request":`} {
+	for _, unmeasured := range []string{`"request_count":`, `"bytes_in":`, `"bytes_out":`, `"last_request":`, `"bytes_sent":`, `"bytes_received":`} {
 		if strings.Contains(string(encoded), unmeasured) {
 			t.Fatalf("fabricated metric in surface: %s", encoded)
 		}
@@ -165,7 +158,7 @@ func TestRanoStatsSurfaceReportsConnectionEvidence(t *testing.T) {
 	// Equal titles in separate windows must not merge a different set of PIDs.
 	first.PaneTitle = "same-title"
 	second.PaneTitle = "same-title"
-	panes, total := aggregateRanoStats(f.stats, f.GetPaneForPID, func(*rano.PaneIdentity) bool { return true })
+	panes, total := AggregateRanoStats(f.stats, f.GetPaneForPID, func(*rano.PaneIdentity) bool { return true })
 	if len(panes) != 2 || total.ConnectionCount != 4 {
 		t.Fatalf("duplicate titles merged identities: %+v", panes)
 	}
@@ -199,6 +192,25 @@ func TestRanoStatsSurfaceFailsWithoutCompleteSources(t *testing.T) {
 				t.Fatalf("lost source error: %+v", out)
 			}
 		})
+	}
+}
+
+// No observer database means rano recorded nothing ntm can read: a missing
+// dependency (exit 1, DEPENDENCY_MISSING) naming the database, not a
+// successful zero-connection report and not an internal error.
+func TestRanoStatsMissingDatabaseIsDependencyMissing(t *testing.T) {
+	f := readyRanoStatsFixture()
+	f.statsErr = fmt.Errorf("%w at /data/rano/observer.sqlite: start rano's monitor", tools.ErrRanoNoDatabase)
+	f.stats = []tools.RanoProcessStats{{PID: 42, ConnectionCount: 9}}
+	out, err := getRanoStats(RanoStatsOptions{}, f, f, func(context.Context, []int) (map[string]tmux.Pane, error) {
+		return map[string]tmux.Pane{}, nil
+	})
+	if err != nil || out.Success || out.ErrorCode != ErrCodeDependencyMissing || ExitCodeForResponse(out.RobotResponse) != 1 {
+		t.Fatalf("missing database = %+v %v; want DEPENDENCY_MISSING", out, err)
+	}
+	if out.Database != "/data/rano/observer.sqlite" || !strings.Contains(out.Hint, "sqlite_path") ||
+		out.Measurement != "" || out.Total.ConnectionCount != 0 || len(out.Panes) != 0 {
+		t.Fatalf("missing database reported as measurement or lost its source: %+v", out)
 	}
 }
 
