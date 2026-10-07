@@ -23,15 +23,21 @@ func pidmapLogger() *slog.Logger {
 
 // PaneIdentity represents a pane's identity for attribution.
 type PaneIdentity struct {
-	Session   string         // Session name
-	PaneIndex int            // Pane index within session
-	PaneTitle string         // Full pane title (e.g., "myproject__cc_1")
-	AgentType tmux.AgentType // Parsed agent type
-	NTMIndex  int            // NTM-specific index (e.g., 1 for cc_1)
+	PaneID      string         // Durable tmux identity; titles are not unique
+	WindowIndex int            // Physical window containing PaneIndex
+	Session     string         // Session name
+	PaneIndex   int            // Pane index within session
+	PaneTitle   string         // Full pane title (e.g., "myproject__cc_1")
+	AgentType   tmux.AgentType // Parsed agent type
+	NTMIndex    int            // NTM-specific index (e.g., 1 for cc_1)
 }
 
-// String returns a readable representation of the pane identity.
+// String prefers the durable tmux ID. Titles are a readable fallback for
+// synthetic identities that have no tmux ID, never the production join key.
 func (p PaneIdentity) String() string {
+	if p.PaneID != "" {
+		return p.PaneID
+	}
 	if p.PaneTitle != "" {
 		return p.PaneTitle
 	}
@@ -81,7 +87,7 @@ func (m *PIDMap) RefreshContext(ctx context.Context) error {
 		sessions = []tmux.Session{*sess}
 	} else {
 		// Get all sessions
-		sessions, err = tmux.ListSessions()
+		sessions, err = tmux.ListSessionsContext(ctx)
 		if err != nil {
 			return fmt.Errorf("failed to list sessions: %w", err)
 		}
@@ -96,24 +102,22 @@ func (m *PIDMap) RefreshContext(ctx context.Context) error {
 
 		panes, err := tmux.GetPanesContext(ctx, sess.Name)
 		if err != nil {
-			pidmapLogger().Warn("failed to get panes for session",
-				"session", sess.Name,
-				"error", err,
-			)
-			continue
+			return fmt.Errorf("failed to get panes for session %s: %w", sess.Name, err)
 		}
 
 		for _, pane := range panes {
-			if pane.PID <= 0 {
+			if pane.PID <= 0 || pane.Dead || pane.IsServicePane() {
 				continue
 			}
 
 			identity := &PaneIdentity{
-				Session:   sess.Name,
-				PaneIndex: pane.Index,
-				PaneTitle: pane.Title,
-				AgentType: pane.Type,
-				NTMIndex:  pane.NTMIndex,
+				PaneID:      pane.ID,
+				WindowIndex: pane.WindowIndex,
+				Session:     sess.Name,
+				PaneIndex:   pane.Index,
+				PaneTitle:   pane.Title,
+				AgentType:   pane.Type,
+				NTMIndex:    pane.NTMIndex,
 			}
 
 			// Map shell PID to pane
@@ -161,7 +165,7 @@ func (m *PIDMap) GetPaneForPID(pid int) *PaneIdentity {
 }
 
 // GetPIDLabels returns a map of PID to label string for use with rano.
-// The label format is: "session:paneTitle" or just "paneTitle" if unambiguous.
+// Live mappings use durable pane IDs so retitled or same-titled panes stay distinct.
 func (m *PIDMap) GetPIDLabels() map[int]string {
 	m.mu.RLock()
 	defer m.mu.RUnlock()

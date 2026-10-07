@@ -11,7 +11,6 @@ import (
 	"github.com/Dicklesworthstone/ntm/internal/integrations/rano"
 	"github.com/Dicklesworthstone/ntm/internal/tmux"
 	"github.com/Dicklesworthstone/ntm/internal/tools"
-	"github.com/Dicklesworthstone/ntm/internal/util"
 )
 
 // RanoStatsOptions configures the --robot-rano-stats command.
@@ -23,10 +22,13 @@ type RanoStatsOptions struct {
 // RanoStatsOutput represents the response from --robot-rano-stats.
 type RanoStatsOutput struct {
 	RobotResponse
-	Window string                   `json:"window"`
-	Query  RanoStatsQuery           `json:"query"`
-	Panes  map[string]RanoPaneStats `json:"panes"`
-	Total  RanoTotals               `json:"total"`
+	Window             string                   `json:"window"`
+	Query              RanoStatsQuery           `json:"query"`
+	Panes              map[string]RanoPaneStats `json:"panes"`
+	Total              RanoTotals               `json:"total"`
+	Measurement        string                   `json:"measurement,omitempty"`
+	Attribution        string                   `json:"attribution,omitempty"`
+	UnavailableMetrics []string                 `json:"unavailable_metrics,omitempty"`
 }
 
 // RanoStatsQuery captures request parameters.
@@ -36,22 +38,25 @@ type RanoStatsQuery struct {
 
 // RanoPaneStats aggregates network stats for a pane.
 type RanoPaneStats struct {
-	Session      string                     `json:"session"`
-	PaneIndex    int                        `json:"pane_index"`
-	PaneTitle    string                     `json:"pane_title"`
-	AgentType    string                     `json:"agent_type,omitempty"`
-	NTMIndex     int                        `json:"ntm_index,omitempty"`
-	PIDs         []int                      `json:"pids,omitempty"`
-	RequestCount int                        `json:"request_count"`
-	BytesIn      int64                      `json:"bytes_in"`
-	BytesOut     int64                      `json:"bytes_out"`
-	LastRequest  string                     `json:"last_request,omitempty"`
-	Providers    map[string]RanoProviderAgg `json:"providers,omitempty"`
+	PaneID          string                     `json:"pane_id,omitempty"`
+	WindowIndex     int                        `json:"window_index"`
+	Session         string                     `json:"session"`
+	PaneIndex       int                        `json:"pane_index"`
+	PaneTitle       string                     `json:"pane_title"`
+	AgentType       string                     `json:"agent_type,omitempty"`
+	NTMIndex        int                        `json:"ntm_index,omitempty"`
+	PIDs            []int                      `json:"pids,omitempty"`
+	RequestCount    int                        `json:"request_count,omitempty"`
+	BytesIn         int64                      `json:"bytes_in,omitempty"`
+	BytesOut        int64                      `json:"bytes_out,omitempty"`
+	LastRequest     string                     `json:"last_request,omitempty"`
+	ConnectionCount int                        `json:"connection_count"`
+	LastConnection  string                     `json:"last_connection,omitempty"`
+	Providers       map[string]RanoProviderAgg `json:"providers,omitempty"`
 }
 
-// RanoProviderAgg aggregates network stats per API provider.
-// Currently unpopulated because rano does not yet expose per-provider breakdowns;
-// the field is retained with omitempty so the schema is ready when rano adds support.
+// RanoProviderAgg counts exported connection opens by Rano's provider tag.
+// The export does not measure transfer bytes; those fields remain absent.
 type RanoProviderAgg struct {
 	Connections int   `json:"connections,omitempty"`
 	BytesSent   int64 `json:"bytes_sent,omitempty"`
@@ -60,14 +65,31 @@ type RanoProviderAgg struct {
 
 // RanoTotals aggregates totals across all panes.
 type RanoTotals struct {
-	RequestCount int   `json:"request_count"`
-	BytesIn      int64 `json:"bytes_in"`
-	BytesOut     int64 `json:"bytes_out"`
+	ConnectionCount int   `json:"connection_count"`
+	RequestCount    int   `json:"request_count,omitempty"`
+	BytesIn         int64 `json:"bytes_in,omitempty"`
+	BytesOut        int64 `json:"bytes_out,omitempty"`
+}
+
+type ranoStatsAdapter interface {
+	GetAvailability(context.Context) (*tools.RanoAvailability, error)
+	GetAllProcessStatsWithWindow(context.Context, string) ([]tools.RanoProcessStats, error)
+}
+
+type ranoStatsPIDMap interface {
+	RefreshContext(context.Context) error
+	GetPaneForPID(int) *rano.PaneIdentity
 }
 
 // GetRanoStats returns per-pane network stats from rano.
 // This function returns the data struct directly, enabling CLI/REST parity.
 func GetRanoStats(opts RanoStatsOptions) (*RanoStatsOutput, error) {
+	return getRanoStats(opts, tools.NewRanoAdapter(), rano.NewPIDMap(""), collectRanoTargetPanes)
+}
+
+func getRanoStats(opts RanoStatsOptions, adapter ranoStatsAdapter, pidMap ranoStatsPIDMap,
+	collectTargets func(context.Context, []int) (map[string]tmux.Pane, error),
+) (*RanoStatsOutput, error) {
 	window, err := normalizeRanoWindow(opts.Window)
 	if err != nil {
 		return &RanoStatsOutput{
@@ -81,7 +103,6 @@ func GetRanoStats(opts RanoStatsOptions) (*RanoStatsOutput, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	adapter := tools.NewRanoAdapter()
 	availability, err := adapter.GetAvailability(ctx)
 	if err != nil {
 		return &RanoStatsOutput{
@@ -119,9 +140,9 @@ func GetRanoStats(opts RanoStatsOptions) (*RanoStatsOutput, error) {
 	if !availability.HasCapability {
 		return &RanoStatsOutput{
 			RobotResponse: NewErrorResponse(
-				fmt.Errorf("rano lacks required capabilities"),
-				ErrCodePermissionDenied,
-				"Grant CAP_NET_ADMIN or run with appropriate privileges",
+				fmt.Errorf("rano status probe failed"),
+				ErrCodeDependencyMissing,
+				"Run rano status and check its database; same-user observation does not require CAP_NET_ADMIN",
 			),
 			Window: window,
 			Query:  RanoStatsQuery{PanesRequested: opts.Panes},
@@ -142,7 +163,7 @@ func GetRanoStats(opts RanoStatsOptions) (*RanoStatsOutput, error) {
 	}
 
 	// Build pane filter map (keys are pane identity strings).
-	targets, err := collectRanoTargetPanes(ctx, opts.Panes)
+	targets, err := collectTargets(ctx, opts.Panes)
 	if err != nil {
 		return &RanoStatsOutput{
 			RobotResponse: NewErrorResponse(err, ErrCodeInternalError, "Failed to list tmux panes"),
@@ -153,7 +174,6 @@ func GetRanoStats(opts RanoStatsOptions) (*RanoStatsOutput, error) {
 	}
 
 	// Build PID mapping across sessions for attribution.
-	pidMap := rano.NewPIDMap("")
 	if err := pidMap.RefreshContext(ctx); err != nil {
 		return &RanoStatsOutput{
 			RobotResponse: NewErrorResponse(err, ErrCodeInternalError, "Failed to refresh PID map"),
@@ -184,11 +204,14 @@ func GetRanoStats(opts RanoStatsOptions) (*RanoStatsOutput, error) {
 	})
 
 	return &RanoStatsOutput{
-		RobotResponse: NewRobotResponse(true),
-		Window:        window,
-		Query:         RanoStatsQuery{PanesRequested: opts.Panes},
-		Panes:         panes,
-		Total:         total,
+		RobotResponse:      NewRobotResponse(true),
+		Window:             window,
+		Query:              RanoStatsQuery{PanesRequested: opts.Panes},
+		Panes:              panes,
+		Total:              total,
+		Measurement:        "connection_events",
+		Attribution:        "current_process_tree",
+		UnavailableMetrics: []string{"http_requests", "bytes_in", "bytes_out"},
 	}, nil
 }
 
@@ -206,14 +229,14 @@ func normalizeRanoWindow(window string) (string, error) {
 	if window == "" {
 		return "5m", nil
 	}
-	if _, err := util.ParseDuration(window); err != nil {
+	if _, err := tools.RanoWindowDuration(window); err != nil {
 		return "", err
 	}
 	return window, nil
 }
 
 func collectRanoTargetPanes(ctx context.Context, panesFilter []int) (map[string]tmux.Pane, error) {
-	sessions, err := tmux.ListSessions()
+	sessions, err := tmux.ListSessionsContext(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -230,7 +253,9 @@ func collectRanoTargetPanes(ctx context.Context, panesFilter []int) (map[string]
 			return nil, err
 		}
 		for _, pane := range panes {
-			if pane.Index <= 0 {
+			// Index zero is an agent in --no-user-pane sessions. Roles, not
+			// physical indices, decide whether this pane is a control/service.
+			if !ranoAgentPane(pane) {
 				continue
 			}
 			if len(filter) > 0 && !filter[pane.Index] {
@@ -244,10 +269,18 @@ func collectRanoTargetPanes(ctx context.Context, panesFilter []int) (map[string]
 }
 
 func paneIdentityKey(pane tmux.Pane, session string) string {
+	if pane.ID != "" {
+		return pane.ID
+	}
 	if pane.Title != "" {
 		return pane.Title
 	}
-	return pane.ID
+	return fmt.Sprintf("%s:%d", session, pane.Index)
+}
+
+func ranoAgentPane(pane tmux.Pane) bool {
+	return !pane.Dead && !pane.IsServicePane() && pane.Type != "" &&
+		pane.Type != tmux.AgentUser && pane.Type != tmux.AgentUnknown
 }
 
 func aggregateRanoStats(
@@ -257,6 +290,7 @@ func aggregateRanoStats(
 ) (map[string]RanoPaneStats, RanoTotals) {
 	panes := make(map[string]RanoPaneStats)
 	lastRequest := make(map[string]time.Time)
+	lastConnection := make(map[string]time.Time)
 	total := RanoTotals{}
 
 	for _, stat := range stats {
@@ -266,14 +300,16 @@ func aggregateRanoStats(
 		}
 
 		key := identity.String()
-		pane := panes[key]
-		if pane.PaneTitle == "" {
+		pane, exists := panes[key]
+		if !exists {
 			pane = RanoPaneStats{
-				Session:   identity.Session,
-				PaneIndex: identity.PaneIndex,
-				PaneTitle: identity.PaneTitle,
-				AgentType: string(identity.AgentType),
-				NTMIndex:  identity.NTMIndex,
+				PaneID:      identity.PaneID,
+				WindowIndex: identity.WindowIndex,
+				Session:     identity.Session,
+				PaneIndex:   identity.PaneIndex,
+				PaneTitle:   identity.PaneTitle,
+				AgentType:   string(identity.AgentType),
+				NTMIndex:    identity.NTMIndex,
 			}
 		}
 
@@ -281,6 +317,23 @@ func aggregateRanoStats(
 		pane.RequestCount += stat.RequestCount
 		pane.BytesIn += stat.BytesIn
 		pane.BytesOut += stat.BytesOut
+		pane.ConnectionCount += stat.ConnectionCount
+		if len(stat.Providers) > 0 {
+			if pane.Providers == nil {
+				pane.Providers = make(map[string]RanoProviderAgg)
+			}
+			for provider, count := range stat.Providers {
+				agg := pane.Providers[provider]
+				agg.Connections += count
+				pane.Providers[provider] = agg
+			}
+		}
+		if at, err := time.Parse(time.RFC3339Nano, stat.LastConnection); err == nil {
+			if prev, ok := lastConnection[key]; !ok || at.After(prev) {
+				lastConnection[key] = at
+				pane.LastConnection = stat.LastConnection
+			}
+		}
 
 		if stat.LastRequest != "" {
 			if t, err := time.Parse(time.RFC3339, stat.LastRequest); err == nil {
@@ -309,6 +362,7 @@ func aggregateRanoStats(
 		total.RequestCount += pane.RequestCount
 		total.BytesIn += pane.BytesIn
 		total.BytesOut += pane.BytesOut
+		total.ConnectionCount += pane.ConnectionCount
 	}
 
 	return panes, total

@@ -1,19 +1,24 @@
 package tools
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
+	"os"
 	"os/exec"
+	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
 )
 
 // RanoAdapter provides integration with the rano network observer tool.
-// rano monitors network traffic per-process, enabling per-agent API tracking.
+// rano observes socket connections, enabling per-agent connection attribution.
 type RanoAdapter struct {
 	*BaseAdapter
 }
@@ -129,7 +134,7 @@ func (a *RanoAdapter) Info(ctx context.Context) (*ToolInfo, error) {
 type RanoAvailability struct {
 	Available     bool      `json:"available"`
 	Compatible    bool      `json:"compatible"`
-	HasCapability bool      `json:"has_capability"` // Has CAP_NET_ADMIN
+	HasCapability bool      `json:"has_capability"` // Operational status probe, not a kernel capability
 	CanReadProc   bool      `json:"can_read_proc"`  // Can read /proc for PID mapping
 	Version       Version   `json:"version,omitempty"`
 	Path          string    `json:"path,omitempty"`
@@ -150,12 +155,17 @@ type RanoStatus struct {
 
 // RanoProcessStats represents network stats for a single process/agent
 type RanoProcessStats struct {
-	PID          int    `json:"pid"`
-	ProcessName  string `json:"process_name,omitempty"`
-	RequestCount int    `json:"request_count"`
-	BytesIn      int64  `json:"bytes_in"`
-	BytesOut     int64  `json:"bytes_out"`
-	LastRequest  string `json:"last_request,omitempty"` // ISO timestamp
+	PID         int    `json:"pid"`
+	ProcessName string `json:"process_name,omitempty"`
+	// Exported socket observations do not measure HTTP requests or byte
+	// transfer. Never populate these unavailable measurements from connections.
+	RequestCount    int            `json:"request_count,omitempty"`
+	BytesIn         int64          `json:"bytes_in,omitempty"`
+	BytesOut        int64          `json:"bytes_out,omitempty"`
+	LastRequest     string         `json:"last_request,omitempty"` // ISO timestamp
+	ConnectionCount int            `json:"connection_count"`
+	LastConnection  string         `json:"last_connection,omitempty"`
+	Providers       map[string]int `json:"providers,omitempty"`
 }
 
 var (
@@ -310,12 +320,9 @@ func (a *RanoAdapter) checkOperational(ctx context.Context) bool {
 
 // checkProcAccess checks if we can read /proc for PID mapping
 func (a *RanoAdapter) checkProcAccess() bool {
-	// Try to read /proc/self as a basic check
-	cmd := exec.Command("ls", "/proc/self")
-	if err := cmd.Run(); err != nil {
-		return false
-	}
-	return true
+	// This is a filesystem probe, not an unbounded subprocess from PATH.
+	info, err := os.Stat("/proc/self")
+	return err == nil && info.IsDir()
 }
 
 // GetStatus returns the current rano status
@@ -368,39 +375,19 @@ func (a *RanoAdapter) GetProcessStats(ctx context.Context, pid int) (*RanoProces
 // GetProcessStatsWithWindow returns network stats for a specific PID with a time window override.
 // Window should be a string like "5m", "1h". Empty means default window.
 func (a *RanoAdapter) GetProcessStatsWithWindow(ctx context.Context, pid int, window string) (*RanoProcessStats, error) {
-	ctx, cancel := context.WithTimeout(ctx, a.Timeout())
-	defer cancel()
-
-	args := []string{"stats", "--pid", fmt.Sprintf("%d", pid), "--json"}
-	if window != "" {
-		args = append(args, "--window", window)
+	if pid <= 0 {
+		return nil, errors.New("rano process PID must be positive")
 	}
-
-	cmd := exec.CommandContext(ctx, a.BinaryName(), args...)
-	cmd.WaitDelay = time.Second
-	stdout := NewLimitedBuffer(10 * 1024 * 1024)
-	var stderr bytes.Buffer
-	cmd.Stdout = stdout
-	cmd.Stderr = &stderr
-
-	if err := cmd.Run(); err != nil {
-		if ctx.Err() == context.DeadlineExceeded {
-			return nil, ErrTimeout
+	stats, err := a.GetAllProcessStatsWithWindow(ctx, window)
+	if err != nil {
+		return nil, err
+	}
+	for _, stat := range stats {
+		if stat.PID == pid {
+			return &stat, nil
 		}
-		return nil, fmt.Errorf("rano stats failed: %w: %s", err, stderr.String())
 	}
-
-	output := stdout.Bytes()
-	if !json.Valid(output) {
-		return nil, fmt.Errorf("invalid JSON output from rano stats")
-	}
-
-	var stats RanoProcessStats
-	if err := json.Unmarshal(output, &stats); err != nil {
-		return nil, fmt.Errorf("failed to parse rano stats: %w", err)
-	}
-
-	return &stats, nil
+	return &RanoProcessStats{PID: pid}, nil
 }
 
 // GetAllProcessStats returns network stats for all tracked processes.
@@ -409,40 +396,158 @@ func (a *RanoAdapter) GetAllProcessStats(ctx context.Context) ([]RanoProcessStat
 	return a.GetAllProcessStatsWithWindow(ctx, "")
 }
 
-// GetAllProcessStatsWithWindow returns network stats for all tracked processes with a time window override.
-// Window should be a string like "5m", "1h". Empty means default window.
+// GetAllProcessStatsWithWindow aggregates persisted connection observations,
+// not HTTP traffic. Rano has no stats subcommand; its supported JSONL export
+// supplies PID, timestamp, event kind and provider. One bounded export serves
+// the whole fleet, and the time range is rechecked after decoding.
+// The CLI selects its usual observer.sqlite in the current directory. This
+// never starts an observer or enables packet capture. Export itself may migrate
+// optional columns in an older database; it is not a read-only SQLite API.
 func (a *RanoAdapter) GetAllProcessStatsWithWindow(ctx context.Context, window string) ([]RanoProcessStats, error) {
+	if ctx == nil {
+		return nil, errors.New("rano export requires a context")
+	}
+	duration, err := RanoWindowDuration(window)
+	if err != nil {
+		return nil, err
+	}
 	ctx, cancel := context.WithTimeout(ctx, a.Timeout())
 	defer cancel()
-
-	args := []string{"stats", "--all", "--json"}
-	if window != "" {
-		args = append(args, "--window", window)
+	if err := ctx.Err(); err != nil {
+		return nil, err
 	}
-
+	until := time.Now().UTC()
+	since := until.Add(-duration)
+	// Rano filters text timestamps in SQLite. Widen the SQL interval by one
+	// second so mixed whole/fractional-second encodings cannot lose a boundary
+	// row; the reducer applies the exact [since, until) instants below.
+	args := []string{"export", "--format", "jsonl", "--fields", "ts,event,pid,comm,provider",
+		"--since", since.Add(-time.Second).Format(time.RFC3339),
+		"--until", until.Add(time.Second).Format(time.RFC3339)}
 	cmd := exec.CommandContext(ctx, a.BinaryName(), args...)
 	cmd.WaitDelay = time.Second
 	stdout := NewLimitedBuffer(10 * 1024 * 1024)
-	var stderr bytes.Buffer
+	stderr := NewLimitedBuffer(64 * 1024)
 	cmd.Stdout = stdout
-	cmd.Stderr = &stderr
+	cmd.Stderr = stderr
 
 	if err := cmd.Run(); err != nil {
-		if ctx.Err() == context.DeadlineExceeded {
-			return nil, ErrTimeout
+		if ctx.Err() != nil {
+			if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+				return nil, errors.Join(ErrTimeout, ctx.Err())
+			}
+			return nil, ctx.Err()
 		}
-		return nil, fmt.Errorf("rano stats failed: %w: %s", err, stderr.String())
+		if stdout.Len() >= stdout.Limit || stderr.Len() >= stderr.Limit {
+			return nil, fmt.Errorf("rano export exceeded capture limit: %w", errors.Join(ErrOutputLimitExceeded, err))
+		}
+		// Do not echo arbitrary tool output (which can include command lines).
+		return nil, fmt.Errorf("rano export failed (check observer.sqlite and export support): %w", err)
 	}
-
-	output := stdout.Bytes()
-	if !json.Valid(output) {
-		return nil, fmt.Errorf("invalid JSON output from rano stats")
+	if err := ctx.Err(); err != nil {
+		return nil, err
 	}
+	return aggregateRanoExport(stdout.Bytes(), since, until)
+}
 
-	var stats []RanoProcessStats
-	if err := json.Unmarshal(output, &stats); err != nil {
-		return nil, fmt.Errorf("failed to parse rano stats: %w", err)
+// RanoWindowDuration is shared by the adapter and robot validation. Durations
+// must be positive; d/w are whole-number extensions of Go's duration grammar.
+// Checked multiplication prevents large day/week inputs from wrapping around.
+func RanoWindowDuration(window string) (time.Duration, error) {
+	if window == "" {
+		window = "5m"
 	}
+	var d time.Duration
+	var err error
+	if strings.HasSuffix(window, "d") || strings.HasSuffix(window, "w") {
+		unit := 24 * time.Hour
+		if strings.HasSuffix(window, "w") {
+			unit *= 7
+		}
+		var n uint64
+		n, err = strconv.ParseUint(window[:len(window)-1], 10, 64)
+		if err == nil && n > uint64((1<<63-1)/unit) {
+			err = errors.New("duration overflow")
+		}
+		if err == nil {
+			d = time.Duration(n) * unit
+		}
+	} else {
+		d, err = time.ParseDuration(window)
+	}
+	if err != nil || d <= 0 {
+		return 0, fmt.Errorf("invalid rano window %q: use a positive duration such as 5m, 1h or 1d", window)
+	}
+	return d, nil
+}
 
+func aggregateRanoExport(data []byte, since, until time.Time) ([]RanoProcessStats, error) {
+	byPID := make(map[int]*RanoProcessStats)
+	latest := make(map[int]time.Time)
+	scanner := bufio.NewScanner(bytes.NewReader(data))
+	scanner.Buffer(make([]byte, 4096), 64*1024)
+	for line := 1; scanner.Scan(); line++ {
+		if len(bytes.TrimSpace(scanner.Bytes())) == 0 {
+			continue
+		}
+		var row *struct {
+			Timestamp string `json:"ts"`
+			Event     string `json:"event"`
+			PID       *int   `json:"pid"`
+			Command   string `json:"comm"`
+			Provider  string `json:"provider"`
+		}
+		if err := json.Unmarshal(scanner.Bytes(), &row); err != nil {
+			return nil, fmt.Errorf("rano export row %d: %w", line, err)
+		}
+		if row == nil || (row.Event != "connect" && row.Event != "close" && row.Event != "alert") {
+			return nil, fmt.Errorf("rano export row %d: missing or unsupported event kind", line)
+		}
+		at, err := time.Parse(time.RFC3339Nano, row.Timestamp)
+		if err != nil {
+			return nil, fmt.Errorf("rano export row %d: invalid timestamp", line)
+		}
+		// Threshold alerts may have no PID. Close events are not new
+		// connections; counting them would double each completed connection.
+		if row.Event != "connect" {
+			continue
+		}
+		// Rano also persists unattributed sockets (NULL pid). They cannot
+		// contribute to a per-process measurement and are deliberately omitted.
+		if row.PID == nil {
+			continue
+		}
+		if *row.PID <= 0 {
+			return nil, fmt.Errorf("rano export row %d: connection has no positive PID", line)
+		}
+		if at.Before(since) || !at.Before(until) {
+			continue
+		}
+		pid := *row.PID
+		stat := byPID[pid]
+		if stat == nil {
+			stat = &RanoProcessStats{PID: pid, Providers: make(map[string]int)}
+			byPID[pid] = stat
+		}
+		stat.ConnectionCount++
+		provider := strings.ToLower(strings.TrimSpace(row.Provider))
+		if provider == "" {
+			provider = "unknown"
+		}
+		stat.Providers[provider]++
+		if prev, ok := latest[pid]; !ok || at.After(prev) || (at.Equal(prev) && row.Command < stat.ProcessName) {
+			latest[pid] = at
+			stat.LastConnection = at.UTC().Format(time.RFC3339Nano)
+			stat.ProcessName = row.Command
+		}
+	}
+	if err := scanner.Err(); err != nil {
+		return nil, fmt.Errorf("rano export is incomplete: %w", err)
+	}
+	stats := make([]RanoProcessStats, 0, len(byPID))
+	for _, stat := range byPID {
+		stats = append(stats, *stat)
+	}
+	sort.Slice(stats, func(i, j int) bool { return stats[i].PID < stats[j].PID })
 	return stats, nil
 }
