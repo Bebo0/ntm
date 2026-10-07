@@ -69,7 +69,7 @@ func TestInjectContextFromQuery_StubCassE2E(t *testing.T) {
 	query, filter, inject := stubCassConfigs(stub)
 
 	prompt := "Implement rate limiting middleware for the API gateway"
-	injectRes, queryRes, filterRes := InjectContextFromQuery(prompt, query, filter, inject)
+	injectRes, queryRes, filterRes := InjectContextFromQuery(prompt, prompt, query, filter, inject)
 
 	if !queryRes.Success {
 		t.Fatalf("query failed: %s", queryRes.Error)
@@ -117,7 +117,7 @@ func TestInjectContextFromQuery_StubCassE2E(t *testing.T) {
 func TestInjectContextFromQuery_CassUnavailable(t *testing.T) {
 	query, filter, inject := stubCassConfigs(filepath.Join(t.TempDir(), "no-such-cass"))
 
-	injectRes, queryRes, _ := InjectContextFromQuery("Implement rate limiting middleware", query, filter, inject)
+	injectRes, queryRes, _ := InjectContextFromQuery("Implement rate limiting middleware", "Implement rate limiting middleware", query, filter, inject)
 	if queryRes.Success {
 		t.Fatal("query should fail when the cass binary is absent")
 	}

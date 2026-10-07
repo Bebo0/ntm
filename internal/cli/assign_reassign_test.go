@@ -5,10 +5,15 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
 	"path/filepath"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/spf13/cobra"
 
 	"github.com/Dicklesworthstone/ntm/internal/assignment"
 	"github.com/Dicklesworthstone/ntm/internal/bv"
@@ -62,6 +67,9 @@ type assignGlobalsSnapshot struct {
 	assignVerbose      bool
 	assignRepoPath     string
 	assignReserveFiles bool
+	assignWithCASS     bool
+	assignNoCASS       bool
+	assignWithMemory   bool
 }
 
 func captureAssignGlobals() assignGlobalsSnapshot {
@@ -82,6 +90,9 @@ func captureAssignGlobals() assignGlobalsSnapshot {
 		assignVerbose:      assignVerbose,
 		assignRepoPath:     assignRepoPath,
 		assignReserveFiles: assignReserveFiles,
+		assignWithCASS:     assignWithCASS,
+		assignNoCASS:       assignNoCASS,
+		assignWithMemory:   assignWithMemory,
 	}
 }
 
@@ -102,6 +113,9 @@ func (s assignGlobalsSnapshot) restore() {
 	assignVerbose = s.assignVerbose
 	assignRepoPath = s.assignRepoPath
 	assignReserveFiles = s.assignReserveFiles
+	assignWithCASS = s.assignWithCASS
+	assignNoCASS = s.assignNoCASS
+	assignWithMemory = s.assignWithMemory
 }
 
 func setupReassignSession(t *testing.T, tmpDir string) (string, tmux.Pane, tmux.Pane) {
@@ -1061,5 +1075,370 @@ func TestRunReassignment_RedactionBlockLeavesRecoverableHandoffBarrier(t *testin
 	}
 	if strings.Contains(outputPane, "hunter2hunter2") {
 		t.Fatalf("blocked reassignment leaked prompt to target pane: %q", outputPane)
+	}
+}
+
+// --- Assignment-time CASS/CM prompt enrichment (--with-cass / --no-cass) ---
+
+const (
+	assignContextCASSMarker = "NTM_ASSIGN_CASS_HISTORY"
+	assignContextTitle      = "Add rate limiting middleware"
+)
+
+// writeAssignContextStubCass writes a stub cass that logs each invocation's
+// arguments and prints one dateless, high-scoring hit, so the relevance and
+// age filters keep it.
+func writeAssignContextStubCass(t *testing.T) (string, string) {
+	t.Helper()
+	dir := t.TempDir()
+	logPath := filepath.Join(dir, "cass.log")
+	payload := `{"query":"rate limiting","total_matches":1,"hits":[{"source_path":"/home/user/.cass/sessions/gateway/session-a.jsonl",` +
+		`"line_number":7,"agent":"codex","content":"` + assignContextCASSMarker + ` token bucket per API key fixed the burst","score":0.93}]}`
+	script := "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '" + logPath + "'\ncat <<'NTM_FIXTURE_EOF'\n" + payload + "\nNTM_FIXTURE_EOF\n"
+	binPath := filepath.Join(dir, "cass")
+	if err := os.WriteFile(binPath, []byte(script), 0o755); err != nil {
+		t.Fatalf("write stub cass: %v", err)
+	}
+	return binPath, logPath
+}
+
+func readAssignContextStubLog(t *testing.T, path string) string {
+	t.Helper()
+	data, err := os.ReadFile(path)
+	if err != nil && !os.IsNotExist(err) {
+		t.Fatalf("read stub cass log: %v", err)
+	}
+	return string(data)
+}
+
+// installAssignContextTracker stubs the tracker with a stateful fake: a claim
+// makes the bead in_progress and owned by its actor, so a fresh assignment
+// and a same-key recovery both pass the atomic eligibility gate.
+func installAssignContextTracker(t *testing.T) {
+	t.Helper()
+	var mu sync.Mutex
+	owners := map[string]string{}
+	previousClaim, previousStatus, previousDetails := claimBeadForAssignmentWithPolicy, getBeadStatusForAssignment, getBeadAssignmentDetailsForAssignment
+	claimBeadForAssignmentWithPolicy = func(_ context.Context, _ string, beadID, actor string, _ []string) (bv.BeadClaimResult, error) {
+		mu.Lock()
+		defer mu.Unlock()
+		owners[beadID] = actor
+		return bv.BeadClaimResult{ID: beadID, Actor: actor, Status: "in_progress", ClaimedAt: time.Now().UTC()}, nil
+	}
+	getBeadStatusForAssignment = func(_ context.Context, _ string, beadID string) (string, error) {
+		mu.Lock()
+		defer mu.Unlock()
+		if owners[beadID] != "" {
+			return "in_progress", nil
+		}
+		return "open", nil
+	}
+	getBeadAssignmentDetailsForAssignment = func(_ context.Context, _ string, beadID string) (*bv.BeadAssignmentDetails, error) {
+		mu.Lock()
+		defer mu.Unlock()
+		details := &bv.BeadAssignmentDetails{
+			ID: beadID, Title: assignContextTitle, IssueType: "task", Status: "open",
+			Labels: []string{"gateway"}, Description: "Throttle bursts with a token bucket keyed by API key.",
+		}
+		if owner := owners[beadID]; owner != "" {
+			details.Status, details.Assignee = "in_progress", owner
+		}
+		return details, nil
+	}
+	t.Cleanup(func() {
+		claimBeadForAssignmentWithPolicy = previousClaim
+		getBeadStatusForAssignment = previousStatus
+		getBeadAssignmentDetailsForAssignment = previousDetails
+	})
+}
+
+// installAssignContextObserver reports pane freshly idle on every observation
+// except those refuse selects, which fail before any keystroke is sent.
+func installAssignContextObserver(t *testing.T, session string, pane tmux.Pane, refuse func(call int32) bool) {
+	t.Helper()
+	var calls atomic.Int32
+	previous := newAssignSessionObserver
+	newAssignSessionObserver = func() assignSessionObserver {
+		return fixedAssignSessionObserver{observe: func(context.Context, string) (statuspkg.SessionObservation, error) {
+			if call := calls.Add(1); refuse != nil && refuse(call) {
+				return statuspkg.SessionObservation{}, errors.New("pane became busy")
+			}
+			observedAt := time.Now().UTC()
+			return statuspkg.SessionObservation{
+				Session: session, ObservedAt: observedAt, Complete: true,
+				Panes: []statuspkg.PaneObservation{{
+					Pane: tmux.PaneRef{ID: pane.ID, WindowIndex: pane.WindowIndex, PaneIndex: pane.Index},
+					Current: statuspkg.StateObservation{
+						Status:     statuspkg.AgentStatus{State: statuspkg.StateIdle},
+						ObservedAt: observedAt,
+						Freshness:  statuspkg.FreshnessFresh,
+						Confidence: 0.99,
+					},
+				}},
+			}, nil
+		}}
+	}
+	t.Cleanup(func() { newAssignSessionObserver = previous })
+}
+
+// setupAssignContextSession spawns a real tmux session whose codex pane runs
+// cat, and returns the session, its project directory, and that pane.
+func setupAssignContextSession(t *testing.T) (string, string, tmux.Pane) {
+	t.Helper()
+	testutil.RequireTmuxThrottled(t)
+	tmpDir := t.TempDir()
+	t.Setenv("XDG_DATA_HOME", filepath.Join(tmpDir, "xdg"))
+	t.Setenv("AGENT_MAIL_URL", "http://127.0.0.1:1")
+	cfg = newTmuxIntegrationTestConfig(tmpDir)
+	cfg.Agents.Claude = testAgentCatCommandTemplate
+	cfg.Agents.Codex = testAgentCodexCommandTemplate
+	cfg.Agents.Gemini = testAgentCatCommandTemplate
+	jsonOutput = true // non-interactive spawn creates the project directory
+	session, _, codexPane := setupReassignSession(t, tmpDir)
+	return session, tmpDir, codexPane
+}
+
+func assignContextLedgerRow(t *testing.T, session, beadID string) *assignment.Assignment {
+	t.Helper()
+	store, err := assignment.LoadStoreStrict(session)
+	if err != nil {
+		t.Fatalf("load assignment ledger: %v", err)
+	}
+	row := store.Get(beadID)
+	if row == nil {
+		t.Fatalf("%s missing from the assignment ledger", beadID)
+	}
+	return row
+}
+
+func waitForAssignContextPaneText(t *testing.T, paneID, marker string) {
+	t.Helper()
+	deadline := time.Now().Add(testutil.ScaleTimeout(10 * time.Second))
+	for {
+		output, err := tmux.CapturePaneOutput(paneID, 120)
+		if err == nil && strings.Contains(output, marker) {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("pane %s never showed %q (err=%v):\n%s", paneID, marker, err, output)
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+}
+
+// TestExecuteAssignmentsEnhancedEnrichesPromptBeforeRecordingIntent drives the
+// `ntm assign --auto` execution path against a real tmux agent pane with a
+// stub cass: [cass.context] enabled=true enriches the prompt before the intent
+// is recorded (delivered to the pane and persisted in the ledger), --no-cass
+// disables it without touching cass, and a missing cass degrades to a
+// recorded skip while the bead is still assigned.
+func TestExecuteAssignmentsEnhancedEnrichesPromptBeforeRecordingIntent(t *testing.T) {
+	snapshot := captureAssignGlobals()
+	defer snapshot.restore()
+	installAssignContextTracker(t)
+	session, projectDir, codexPane := setupAssignContextSession(t)
+	installAssignContextObserver(t, session, codexPane, nil)
+	cassBin, cassLog := writeAssignContextStubCass(t)
+	cfg.CASS.BinaryPath = cassBin
+	cfg.CASS.Context.Enabled = true
+
+	execute := func(beadID string, noCASS bool) AssignmentItem {
+		t.Helper()
+		out := &AssignOutputEnhanced{Assignments: []AssignmentItem{{
+			BeadID: beadID, BeadTitle: assignContextTitle, Pane: codexPane.Index,
+			PaneTarget: assignmentPaneTarget(codexPane), PaneID: codexPane.ID, AgentType: "codex",
+		}}}
+		opts := &AssignCommandOptions{
+			Session: session, ProjectDir: projectDir, Template: "impl", Quiet: true,
+			Timeout: 15 * time.Second, NoCASS: noCASS, policyProject: projectDir,
+		}
+		if err := executeAssignmentsEnhanced(t.Context(), session, out, opts); err != nil {
+			t.Fatalf("assign %s: %v (errors %v)", beadID, err, out.Errors)
+		}
+		if item := out.Assignments[0]; !item.PromptSent {
+			t.Fatalf("assign %s did not deliver: %+v", beadID, item)
+		}
+		return out.Assignments[0]
+	}
+	release := func(beadID string) {
+		t.Helper()
+		store, err := assignment.LoadStoreStrict(session)
+		if err != nil {
+			t.Fatalf("load ledger: %v", err)
+		}
+		if err := store.MarkFailed(beadID, "phase complete"); err != nil {
+			t.Fatalf("free pane after %s: %v", beadID, err)
+		}
+		// Restart the fixture agent so the next phase meets a fresh composer
+		// rather than the previous prompt's echo.
+		if _, err := tmux.DefaultClient.Run("respawn-pane", "-k", "-t", codexPane.ID, `printf '\342\200\272 \n'; exec /bin/cat`); err != nil {
+			t.Fatalf("respawn fixture agent: %v", err)
+		}
+		waitForAssignContextPaneText(t, codexPane.ID, "›")
+	}
+
+	// [cass.context] enabled=true with no flag: the history is injected.
+	const enrichedBead = "ntm-ctx-config"
+	enriched := execute(enrichedBead, false)
+	if enriched.CASSInjection == nil || enriched.CASSInjection.ItemsInjected == 0 || enriched.CASSInjection.SkippedReason != "" {
+		t.Fatalf("cass_injection = %+v, want injected history", enriched.CASSInjection)
+	}
+	raw, err := json.Marshal(enriched)
+	if err != nil || !strings.Contains(string(raw), `"cass_injection"`) {
+		t.Fatalf("assignment JSON lacks cass_injection: %s (%v)", raw, err)
+	}
+	cassCalls := readAssignContextStubLog(t, cassLog)
+	if strings.Count(cassCalls, "search") != 1 || !strings.Contains(cassCalls, "gateway") || !strings.Contains(cassCalls, "bucket") {
+		t.Fatalf("cass calls = %q, want one search over the bead's title, labels, and description", cassCalls)
+	}
+	if strings.Contains(cassCalls, "dependencies") {
+		t.Fatalf("cass query carried template boilerplate: %q", cassCalls)
+	}
+	waitForAssignContextPaneText(t, codexPane.ID, assignContextCASSMarker)
+	base := expandPromptTemplate(enrichedBead, assignContextTitle, "impl", "")
+	row := assignContextLedgerRow(t, session, enrichedBead)
+	if row.DispatchState != assignment.DispatchSent || !strings.Contains(row.PromptSent, assignContextCASSMarker) ||
+		!strings.HasSuffix(row.PromptSent, "\n---\n\n"+base) {
+		t.Fatalf("ledger row = %+v, want the enriched prompt recorded as sent", row)
+	}
+	if row.BaseIntentSHA256 != assignment.PromptSHA256(base) || row.IntentSHA256 != assignment.PromptSHA256(row.PromptSent) {
+		t.Fatalf("ledger checksums base=%q intent=%q, want base over the template and intent over the enriched prompt", row.BaseIntentSHA256, row.IntentSHA256)
+	}
+	release(enrichedBead)
+
+	// --no-cass overrides [cass.context] enabled=true and never runs cass.
+	const disabledBead = "ntm-ctx-no-cass"
+	disabled := execute(disabledBead, true)
+	if disabled.CASSInjection != nil || disabled.MemoryInjection != nil {
+		t.Fatalf("--no-cass assignment reported enrichment: cass=%+v memory=%+v", disabled.CASSInjection, disabled.MemoryInjection)
+	}
+	if calls := readAssignContextStubLog(t, cassLog); calls != cassCalls {
+		t.Fatalf("--no-cass queried cass: %q", calls)
+	}
+	if row := assignContextLedgerRow(t, session, disabledBead); row.PromptSent != expandPromptTemplate(disabledBead, assignContextTitle, "impl", "") || row.BaseIntentSHA256 != "" {
+		t.Fatalf("--no-cass ledger row = %+v, want the bare template prompt and no enrichment record", row)
+	}
+	release(disabledBead)
+
+	// cass missing: still assigned, with the skip recorded.
+	cfg.CASS.BinaryPath = filepath.Join(t.TempDir(), "no-such-cass")
+	const degradedBead = "ntm-ctx-missing"
+	degraded := execute(degradedBead, false)
+	if degraded.CASSInjection == nil || degraded.CASSInjection.ItemsInjected != 0 || !strings.Contains(degraded.CASSInjection.SkippedReason, "not found") {
+		t.Fatalf("degraded cass_injection = %+v, want a recorded missing-cass skip", degraded.CASSInjection)
+	}
+	if row := assignContextLedgerRow(t, session, degradedBead); row.PromptSent != expandPromptTemplate(degradedBead, assignContextTitle, "impl", "") {
+		t.Fatalf("degraded ledger prompt = %q, want the bare template prompt", row.PromptSent)
+	}
+}
+
+// TestDirectPaneAssignWithCASSRecoveryReplaysRecordedPrompt drives
+// `ntm assign --pane --with-cass`: the first attempt enriches and records the
+// prompt, but the dispatch-time re-observation refuses before any keystroke;
+// the same-intent re-run recovers that claim and delivers exactly the
+// recorded enriched prompt without querying cass again.
+func TestDirectPaneAssignWithCASSRecoveryReplaysRecordedPrompt(t *testing.T) {
+	snapshot := captureAssignGlobals()
+	defer snapshot.restore()
+	installAssignContextTracker(t)
+	session, projectDir, codexPane := setupAssignContextSession(t)
+	// Observation 1 is the direct preflight gate; observation 2 is the first
+	// attempt's dispatch-time re-check.
+	installAssignContextObserver(t, session, codexPane, func(call int32) bool { return call == 2 })
+	cassBin, cassLog := writeAssignContextStubCass(t)
+	cfg.CASS.BinaryPath = cassBin // [cass.context] stays disabled: --with-cass alone drives injection
+	jsonOutput = true
+
+	const beadID = "ntm-ctx-direct"
+	run := func() (AssignEnvelope[DirectAssignData], error) {
+		t.Helper()
+		opts := &AssignCommandOptions{
+			Session: session, ProjectDir: projectDir, BeadIDs: []string{beadID}, PaneSelector: codexPane.ID,
+			Template: "impl", IgnoreDeps: true, Quiet: true, Timeout: 15 * time.Second, WithCASS: true,
+			policyProject: projectDir,
+		}
+		output, runErr := captureStdout(t, func() error { return runDirectPaneAssignment(t.Context(), opts) })
+		var envelope AssignEnvelope[DirectAssignData]
+		if err := json.Unmarshal([]byte(output), &envelope); err != nil {
+			t.Fatalf("decode direct assignment JSON: %v\n%s", err, output)
+		}
+		return envelope, runErr
+	}
+
+	first, err := run()
+	if !errors.Is(err, errJSONFailure) || first.Success || first.Data == nil || first.Data.Assignment == nil {
+		t.Fatalf("first attempt = %+v (err %v), want a refused dispatch", first, err)
+	}
+	if cass := first.Data.Assignment.CASSInjection; cass == nil || cass.ItemsInjected == 0 {
+		t.Fatalf("first attempt cass_injection = %+v, want injected history", cass)
+	}
+	cassCalls := readAssignContextStubLog(t, cassLog)
+	if strings.Count(cassCalls, "search") != 1 || !strings.Contains(cassCalls, "gateway") {
+		t.Fatalf("cass calls = %q, want one search over the bead", cassCalls)
+	}
+	pending := assignContextLedgerRow(t, session, beadID)
+	if pending.Status != assignment.StatusClaimed || pending.DispatchState != assignment.DispatchPending ||
+		!strings.Contains(pending.PendingPrompt, assignContextCASSMarker) ||
+		pending.BaseIntentSHA256 != assignment.PromptSHA256(expandPromptTemplate(beadID, assignContextTitle, "impl", "")) {
+		t.Fatalf("pending ledger row = %+v, want a claimed, undelivered, enriched intent", pending)
+	}
+
+	second, err := run()
+	if err != nil || !second.Success || second.Data == nil || second.Data.Assignment == nil || !second.Data.Assignment.PromptSent {
+		t.Fatalf("recovery = %+v (err %v), want the recorded intent delivered", second, err)
+	}
+	if second.Data.Assignment.CASSInjection != nil {
+		t.Fatalf("recovery re-ran enrichment: %+v", second.Data.Assignment.CASSInjection)
+	}
+	if calls := readAssignContextStubLog(t, cassLog); calls != cassCalls {
+		t.Fatalf("recovery queried cass again: %q", calls)
+	}
+	waitForAssignContextPaneText(t, codexPane.ID, assignContextCASSMarker)
+	if row := assignContextLedgerRow(t, session, beadID); row.PromptSent != pending.PendingPrompt || row.DispatchState != assignment.DispatchSent ||
+		row.IdempotencyKey != pending.IdempotencyKey {
+		t.Fatalf("recovered ledger row = %+v, want the recorded prompt sent under key %s", row, pending.IdempotencyKey)
+	}
+}
+
+// TestResolvePromptContextOptionsMirrorsSendPrecedence pins the flag/config
+// precedence the assignment surfaces share with --robot-send, and that every
+// assignment command registers the flags.
+func TestResolvePromptContextOptionsMirrorsSendPrecedence(t *testing.T) {
+	cfgOn := config.Default() // [cass.context] enabled=true, [memory] send_injection=false
+	cfgOn.CASS.Context.MaxTokens = 777
+	cfgOn.Memory.SendMaxRules = 2
+
+	if opts := resolvePromptContextOptions(false, false, false, cfgOn); !opts.WithCASS || opts.WithMemory || opts.InjectConfig == nil || opts.InjectConfig.MaxTokens != 777 {
+		t.Fatalf("config default = %+v, want CASS on with [cass.context] parameters and memory off", opts)
+	}
+	if opts := resolvePromptContextOptions(true, true, false, cfgOn); opts.WithCASS {
+		t.Fatal("--no-cass must override both --with-cass and [cass.context] enabled=true")
+	}
+	if opts := resolvePromptContextOptions(false, false, true, cfgOn); !opts.WithMemory || opts.MemoryInject == nil || opts.MemoryInject.MaxRules != 2 {
+		t.Fatalf("--with-memory = %+v, want memory on with [memory] send_max_rules", opts)
+	}
+	cfgOn.Memory.SendInjection = true
+	if opts := resolvePromptContextOptions(false, false, false, cfgOn); !opts.WithMemory {
+		t.Fatal("[memory] send_injection=true must enable memory by default")
+	}
+	cfgOn.Memory.Enabled = false
+	if opts := resolvePromptContextOptions(false, false, true, cfgOn); !opts.WithMemory || opts.MemoryInject.Enabled {
+		t.Fatalf("[memory] enabled=false + --with-memory = %+v, want a request that degrades to a recorded skip", opts)
+	}
+	cfgOff := config.Default()
+	cfgOff.CASS.Context.Enabled = false
+	if opts := resolvePromptContextOptions(false, false, false, cfgOff); opts.Enabled() {
+		t.Fatalf("[cass.context] off without flags = %+v, want nothing enabled", opts)
+	}
+	if opts := resolvePromptContextOptions(true, false, false, cfgOff); !opts.WithCASS {
+		t.Fatal("--with-cass must enable injection when [cass.context] is off")
+	}
+
+	for name, cmd := range map[string]*cobra.Command{"assign": newAssignCmd(), "coordinator assign": newCoordinatorAssignCmd()} {
+		for _, flag := range []string{"with-cass", "no-cass", "with-memory"} {
+			if cmd.Flags().Lookup(flag) == nil {
+				t.Errorf("ntm %s missing --%s", name, flag)
+			}
+		}
 	}
 }

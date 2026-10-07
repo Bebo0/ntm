@@ -1262,11 +1262,15 @@ func buildCommandRegistry() []RobotCommandInfo {
 				{Name: "bulk-stagger", Flag: "--bulk-stagger", Type: "duration", Required: false, Default: "0s", Description: "Delay between sequential assignment attempts"},
 				{Name: "reserve-files", Flag: "--reserve-files", Type: "bool", Required: false, Default: "true", Description: "Reserve each bead's file scope in Agent Mail after its claim and before dispatch, as ntm assign does: --reservation-paths when given, otherwise the paths named in the bead's title and description. A bead naming no files, or an unavailable Agent Mail, refuses that assignment unclaimed (RESERVATION_REQUIRED); assignments[].reservation reports the scope. --reserve-files=false opts out"},
 				{Name: "reservation-paths", Flag: "--reservation-paths", Type: "string", Required: false, Description: "Comma-separated project-relative globs reserved instead of the paths discovered from each bead"},
+				{Name: "with-cass", Flag: "--with-cass", Type: "bool", Required: false, Description: "Inject relevant CASS session history above each fresh assignment prompt, queried by the bead's title, labels, and description (default from [cass.context] enabled); degrades gracefully when cass is unavailable. Reported per assignment as cass_injection"},
+				{Name: "no-cass", Flag: "--no-cass", Type: "bool", Required: false, Description: "Disable CASS history injection, overriding [cass.context] enabled=true"},
+				{Name: "with-memory", Flag: "--with-memory", Type: "bool", Required: false, Description: "Inject relevant CM (cass-memory) rules above each fresh assignment prompt (default from [memory] send_injection); degrades gracefully when cm is unavailable. Reported per assignment as memory_injection"},
 				{Name: "dry-run", Flag: "--dry-run", Type: "bool", Required: false, Description: "Preview assignments without sending prompts"},
 			},
 			Examples: []string{
 				"ntm --robot-bulk-assign=proj --from-bv --bulk-parallel",
 				"ntm --robot-bulk-assign=proj --allocation='{\"0.1\":\"bd-abc\"}' --skip=%7 --dry-run",
+				"ntm --robot-bulk-assign=proj --from-bv --with-cass --with-memory",
 			},
 		},
 

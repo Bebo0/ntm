@@ -87,6 +87,11 @@ type AssignmentResult struct {
 	MessageSent    bool            `json:"message_sent"`
 	ClaimActor     string          `json:"claim_actor,omitempty"`
 	IdempotencyKey string          `json:"idempotency_key,omitempty"`
+	// CASSInjection and MemoryInjection report the fresh assignment's prompt
+	// enrichment, as on --robot-send; absent when not requested or when a
+	// recorded intent was recovered.
+	CASSInjection   *robot.CASSInjectionInfo `json:"cass_injection,omitempty"`
+	MemoryInjection *robot.CMInjectionInfo   `json:"memory_injection,omitempty"`
 }
 
 // AssignWork assigns verified actionable work to idle agents.
@@ -992,6 +997,18 @@ func (c *SessionCoordinator) attemptAssignment(ctx context.Context, assignment *
 	if err != nil {
 		return AssignmentResult{Assignment: safeCoordinatorWorkProjection(assignment), ClaimActor: claimActor, IdempotencyKey: idempotencyKey, Error: fmt.Sprintf("loading assignment ledger: %v", err)}
 	}
+	// Enrich the fresh intent before Execute records it, so the ledger holds
+	// exactly the prompt the agent receives and recoverPendingAssignment
+	// replays it without querying cass or cm again. The triage record carries
+	// no description, so the retrieval query is the title and labels.
+	prompt, cassInjection, memoryInjection := robot.EnrichAssignmentPrompt(ctx, robot.AssignmentPrompt{
+		Prompt: body, Title: assignment.BeadTitle, Labels: rec.Labels, AgentType: assignment.AgentType,
+		Session: c.session, ProjectDir: c.projectKey,
+	}, c.promptContext)
+	baseIntentSHA256 := ""
+	if c.promptContext.Enabled() {
+		baseIntentSHA256 = assignmentstore.PromptSHA256(body)
+	}
 	request := assignmentstore.AtomicRequest{
 		BeadID:             assignment.BeadID,
 		BeadTitle:          assignment.BeadTitle,
@@ -1001,13 +1018,16 @@ func (c *SessionCoordinator) attemptAssignment(ctx context.Context, assignment *
 		AgentType:          assignment.AgentType,
 		AgentName:          assignment.AgentMailName,
 		Actor:              assignment.AgentMailName,
-		Prompt:             body,
+		Prompt:             prompt,
 		IdempotencyKey:     idempotencyKey,
+		BaseIntentSHA256:   baseIntentSHA256,
 		RequireReservation: len(requestedPaths) > 0,
 		RequestedPaths:     requestedPaths,
 		ReservationTTL:     time.Hour,
 	}
-	return c.executeAtomicAssignment(ctx, store, assignment, request)
+	result := c.executeAtomicAssignment(ctx, store, assignment, request)
+	result.CASSInjection, result.MemoryInjection = cassInjection, memoryInjection
+	return result
 }
 
 // repositoryReservationPaths keeps path-shaped prose out of Agent Mail

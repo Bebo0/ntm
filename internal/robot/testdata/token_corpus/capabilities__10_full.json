@@ -2487,6 +2487,27 @@
           "description": "Comma-separated project-relative globs reserved instead of the paths discovered from each bead"
         },
         {
+          "name": "with-cass",
+          "flag": "--with-cass",
+          "type": "bool",
+          "required": false,
+          "description": "Inject relevant CASS session history above each fresh assignment prompt, queried by the bead's title, labels, and description (default from [cass.context] enabled); degrades gracefully when cass is unavailable. Reported per assignment as cass_injection"
+        },
+        {
+          "name": "no-cass",
+          "flag": "--no-cass",
+          "type": "bool",
+          "required": false,
+          "description": "Disable CASS history injection, overriding [cass.context] enabled=true"
+        },
+        {
+          "name": "with-memory",
+          "flag": "--with-memory",
+          "type": "bool",
+          "required": false,
+          "description": "Inject relevant CM (cass-memory) rules above each fresh assignment prompt (default from [memory] send_injection); degrades gracefully when cm is unavailable. Reported per assignment as memory_injection"
+        },
+        {
           "name": "dry-run",
           "flag": "--dry-run",
           "type": "bool",
@@ -2496,7 +2517,8 @@
       ],
       "examples": [
         "ntm --robot-bulk-assign=proj --from-bv --bulk-parallel",
-        "ntm --robot-bulk-assign=proj --allocation='{\"0.1\":\"bd-abc\"}' --skip=%7 --dry-run"
+        "ntm --robot-bulk-assign=proj --allocation='{\"0.1\":\"bd-abc\"}' --skip=%7 --dry-run",
+        "ntm --robot-bulk-assign=proj --from-bv --with-cass --with-memory"
       ],
       "transports": [
         {

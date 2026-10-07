@@ -111,6 +111,12 @@ type SessionCoordinator struct {
 	// [context_rotation] tunables); nil is fine.
 	ntmConfig *config.Config
 
+	// promptContext enriches each fresh auto-assignment with CASS history
+	// and CM rules before its durable intent is recorded. The caller
+	// resolves it from [cass.context] and [memory] send_injection; the zero
+	// value disables enrichment.
+	promptContext robot.PromptContextOptions
+
 	// Event channel for coordination actions
 	events chan CoordinatorEvent
 
@@ -280,6 +286,14 @@ func (c *SessionCoordinator) WithConfig(cfg CoordinatorConfig) *SessionCoordinat
 // is accepted and keeps built-in defaults.
 func (c *SessionCoordinator) WithNTMConfig(cfg *config.Config) *SessionCoordinator {
 	c.ntmConfig = cfg
+	return c
+}
+
+// WithPromptContext enables CASS history and CM rule enrichment of fresh
+// auto-assignment prompts, using the same resolved options as --robot-send.
+// Recovery of a recorded intent always replays its recorded prompt.
+func (c *SessionCoordinator) WithPromptContext(opts robot.PromptContextOptions) *SessionCoordinator {
+	c.promptContext = opts
 	return c
 }
 

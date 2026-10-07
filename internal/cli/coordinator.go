@@ -546,7 +546,8 @@ func runCoordinatorRun(cmd *cobra.Command, args []string, once bool) error {
 	coordName := resolveCoordinatorIdentity(cmd.Context(), mailClient, session, projectKey)
 	coord := coordinator.New(session, projectKey, mailClient, coordName).
 		WithConfig(runtimeConfig).
-		WithNTMConfig(ntmConfig)
+		WithNTMConfig(ntmConfig).
+		WithPromptContext(resolvePromptContextOptions(false, false, false, ntmConfig))
 	// The coordinator's actuation records (rotation enqueued, mail nudges,
 	// account failover) must land in the durable attention feed that other
 	// processes read, not this process's in-memory default (bd-viwo4).
@@ -889,6 +890,7 @@ Examples:
 	cmd.Flags().BoolVar(&assignForce, "force", false, "Force assignment even if pane is busy")
 	cmd.Flags().BoolVar(&assignIgnoreDeps, "ignore-deps", false, "Ignore dependency checks for assignment")
 	cmd.Flags().StringVar(&assignPrompt, "prompt", "", "Custom prompt for direct assignment")
+	registerAssignPromptContextFlags(cmd)
 
 	return cmd
 }
@@ -969,6 +971,9 @@ func runCoordinatorAssign(cmd *cobra.Command, args []string, dryRun bool) error 
 		Force:           assignForce,
 		IgnoreDeps:      assignIgnoreDeps,
 		Prompt:          assignPrompt,
+		WithCASS:        assignWithCASS,
+		NoCASS:          assignNoCASS,
+		WithMemory:      assignWithMemory,
 		policyProject:   filepath.Clean(projectDir),
 	}
 

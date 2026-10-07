@@ -390,7 +390,8 @@ func (h *monitorCoordinatorHost) runHosted(ctx context.Context, settings monitor
 	name := resolveCoordinatorIdentity(ctx, mailClient, h.session, settings.projectKey)
 	coord := coordinator.New(h.session, settings.projectKey, mailClient, name).
 		WithConfig(settings.runtime).
-		WithNTMConfig(settings.ntm)
+		WithNTMConfig(settings.ntm).
+		WithPromptContext(resolvePromptContextOptions(false, false, false, settings.ntm))
 	if err := coord.Start(ctx); err != nil {
 		if ctx.Err() != nil {
 			return nil

@@ -6139,6 +6139,23 @@ func paneAgentType(pane tmux.Pane) string {
 	return detectAgentType(pane.Title)
 }
 
+// sendInjectionFormat picks the CASS block format for a send. One prompt goes
+// to every target, so a mixed --cc/--cod send uses the neutral markdown
+// format instead of formatting for whichever pane happens to be first. No
+// targets keeps the configured format.
+func sendInjectionFormat(targetPanes []tmux.Pane) InjectionFormat {
+	if len(targetPanes) == 0 {
+		return ""
+	}
+	agentType := paneAgentType(targetPanes[0])
+	for _, pane := range targetPanes[1:] {
+		if paneAgentType(pane) != agentType {
+			return FormatMarkdown
+		}
+	}
+	return FormatForAgent(agentType)
+}
+
 func stateAgentTypeForPane(pane tmux.Pane, detectedType string) string {
 	if normalized := normalizeAgentType(detectedType); normalized != "unknown" {
 		return normalized
@@ -7338,76 +7355,23 @@ func GetSend(opts SendOptions) (*SendOutput, error) {
 		renderBaselines = captureSendRenderBaselines(targetPanes, targetKeys)
 	}
 
-	// Perform CASS injection if enabled
-	messageToSend := opts.Message
-	if opts.WithCASS {
-		// Use provided configs or defaults
-		queryConfig := DefaultCASSConfig()
-		if opts.CASSConfig != nil {
-			queryConfig = *opts.CASSConfig
-		}
-
-		filterConfig := DefaultFilterConfig()
-		if opts.FilterConfig != nil {
-			filterConfig = *opts.FilterConfig
-		}
-
-		injectConfig := DefaultInjectConfig()
-		if opts.InjectConfig != nil {
-			injectConfig = *opts.InjectConfig
-		}
-
-		// If there are target panes, try to determine agent type for
-		// formatting. One prompt goes to every pane, so a mixed --cc/--cod
-		// send uses the neutral markdown format instead of formatting for
-		// whichever pane happens to be first.
-		if len(targetPanes) > 0 {
-			agentType := paneAgentType(targetPanes[0])
-			uniform := true
-			for _, pane := range targetPanes[1:] {
-				if paneAgentType(pane) != agentType {
-					uniform = false
-					break
-				}
-			}
-			if uniform {
-				injectConfig.Format = FormatForAgent(agentType)
-			} else {
-				injectConfig.Format = FormatMarkdown
-			}
-		}
-
-		// Perform CASS query and injection
-		injectResult, queryResult, filterResult := InjectContextFromQuery(
-			opts.Message,
-			queryConfig,
-			filterConfig,
-			injectConfig,
-		)
-
-		// Record injection metadata
-		output.CASSInjection = NewCASSInjectionInfo(injectResult, queryResult.Query, filterResult.Hits)
-
-		// Use modified message if injection succeeded
-		if injectResult.Success && injectResult.ModifiedPrompt != "" {
-			messageToSend = injectResult.ModifiedPrompt
-		}
-	}
-
-	// Perform CM memory rule injection if enabled (bd-3j6hm). The retrieval
-	// query is the caller's original message; the block is prepended to the
-	// (possibly CASS-augmented) payload. Degradation is graceful: cm being
-	// unavailable records a skip reason and the send proceeds unmodified.
-	if opts.WithMemory {
-		memCfg := DefaultCMInjectConfig()
-		if opts.MemoryInject != nil {
-			memCfg = *opts.MemoryInject
-		}
-		memCfg, output.MemoryInjection = prepareCMSendContext(ctx, opts.Session, targetPanes, memCfg)
-		if output.MemoryInjection == nil {
-			messageToSend, output.MemoryInjection = InjectCMRules(ctx, opts.Message, messageToSend, memCfg)
-		}
-	}
+	// CASS history and CM memory rules (--with-cass / --with-memory, bd-3j6hm)
+	// through the pipeline every assignment surface shares
+	// (prompt_context.go). The retrieval query is the caller's original
+	// message, and CM memory is scoped to the verified project of the live
+	// targets. Degradation is graceful: cass or cm being unavailable records a
+	// skip reason and the send proceeds unmodified.
+	messageToSend, cassInjection, memoryInjection := injectPromptContext(
+		ctx, opts.Message, opts.Message, sendInjectionFormat(targetPanes),
+		PromptContextOptions{
+			WithCASS: opts.WithCASS, CASSConfig: opts.CASSConfig, FilterConfig: opts.FilterConfig, InjectConfig: opts.InjectConfig,
+			WithMemory: opts.WithMemory, MemoryInject: opts.MemoryInject,
+		},
+		func(cfg CMInjectConfig) (CMInjectConfig, *CMInjectionInfo) {
+			return prepareCMSendContext(ctx, opts.Session, targetPanes, cfg)
+		},
+	)
+	output.CASSInjection, output.MemoryInjection = cassInjection, memoryInjection
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}

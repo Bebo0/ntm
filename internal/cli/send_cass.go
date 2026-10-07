@@ -80,6 +80,21 @@ func robotSendCASSOptions(withFlag, noFlag bool, cfg *config.Config) (bool, *rob
 	return enabled, &query, &filter, &inject
 }
 
+// resolvePromptContextOptions resolves --with-cass / --no-cass / --with-memory
+// against cfg exactly as --robot-send does, for the assignment surfaces that
+// enrich prompts through robot.EnrichAssignmentPrompt (`ntm assign`,
+// `--robot-bulk-assign`, and the session coordinator's auto-assign, which
+// passes no flags and so follows [cass.context] enabled and [memory]
+// send_injection).
+func resolvePromptContextOptions(withCASS, noCASS, withMemory bool, cfg *config.Config) robot.PromptContextOptions {
+	cassEnabled, cassQuery, cassFilter, cassInject := robotSendCASSOptions(withCASS, noCASS, cfg)
+	memoryEnabled, memoryInject := robotSendMemoryOptions(withMemory, cfg)
+	return robot.PromptContextOptions{
+		WithCASS: cassEnabled, CASSConfig: cassQuery, FilterConfig: cassFilter, InjectConfig: cassInject,
+		WithMemory: memoryEnabled, MemoryInject: memoryInject,
+	}
+}
+
 // sendCASSInjectionConfigs resolves the cobra `ntm send` CASS injection state
 // and internal/cass engine parameters from the same flag/config precedence.
 func sendCASSInjectionConfigs(withFlag, noFlag bool, cfg *config.Config) (bool, cass.CASSConfig, cass.FilterConfig, cass.InjectConfig) {

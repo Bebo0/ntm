@@ -702,7 +702,7 @@ $ ntm diff myproject cc_1 cod_1
 
 ## Feature 5: CASS Auto-Injection
 
-**Status: Shipped** — `ntm send --with-cass/--no-cass`, `--robot-send --with-cass/--no-cass`, `ntm cass preview`, and the `[cass.context]` config are live.
+**Status: Shipped** — `ntm send --with-cass/--no-cass`, `--robot-send --with-cass/--no-cass`, `ntm cass preview`, and the `[cass.context]` config are live. Assignment prompts are enriched through the same pipeline: `ntm assign` (and `ntm coordinator assign`) and `--robot-bulk-assign` take `--with-cass/--no-cass/--with-memory`, and the coordinator's auto-assign follows `[cass.context] enabled` and `[memory] send_injection` (see [Assignment-time injection](#assignment-time-injection)).
 
 ### Problem Statement
 
@@ -792,6 +792,36 @@ ntm cass preview "Implement rate limiting"
   ...
 }
 ```
+
+### Assignment-time injection
+
+Every surface that hands an agent its work enriches the assignment prompt
+before the agent starts, so each task begins with the lessons from past
+sessions that solved similar problems:
+
+| Surface | Control |
+|---------|---------|
+| `ntm assign` (`--auto`, `--pane`, `--watch`, `--retry`, `--reassign`), `ntm coordinator assign` | `--with-cass` / `--no-cass` / `--with-memory` |
+| `ntm --robot-bulk-assign` | `--with-cass` / `--no-cass` / `--with-memory` |
+| Session coordinator auto-assign (`ntm coordinator run`, session monitor) | config only |
+
+Precedence matches send: `--no-cass` > `--with-cass` > `[cass] enabled &&
+[cass.context] enabled`; `--with-memory` or `[memory] enabled &&
+send_injection` turns on CM rules. The CASS query is built from the bead's
+title, labels, and description (credentials redacted) rather than the
+template boilerplate, and the CM workspace is the bead's project.
+
+The prompt is enriched once, **before** the durable assignment intent is
+recorded: the assignment ledger hashes and persists the enriched prompt
+(`pending_prompt` / `prompt_sent`), plus `base_intent_sha256`, the checksum of
+the prompt before enrichment. Retries and recovery (`ntm assign --retry` of a
+pending claim, a same-intent `ntm assign --pane` re-run, a
+`--robot-bulk-assign` re-run of the same template intent, and the
+coordinator's pending recovery) replay the recorded prompt exactly and never
+query cass or cm again. cass or cm being missing, disabled, or failing never
+blocks an assignment; each assignment record in the JSON output carries the
+same `cass_injection` / `memory_injection` objects as send, including the
+skip reason on the degraded path.
 
 ---
 

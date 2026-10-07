@@ -487,6 +487,13 @@ type AtomicRequest struct {
 	// RecoveredIntentSHA256 may carry the exact checksum from an existing same-key
 	// durable row when the original unredacted prompt is intentionally unavailable.
 	RecoveredIntentSHA256 string
+	// BaseIntentSHA256 is the checksum of the caller's rendered prompt before
+	// history/memory context enrichment (cass/cm), set only when the prompt
+	// was enriched. Prompt and IntentSHA256 cover the enriched payload; this
+	// lets a later invocation of the same template intent find the recorded
+	// row and replay its exact enriched prompt instead of re-querying. It is
+	// persisted on the new row and takes no part in intent matching.
+	BaseIntentSHA256 string
 	// RequireReservation fails closed before a new claim or dispatch when the
 	// reservation port is unavailable. RequestedPaths also implies this flag.
 	RequireReservation        bool
@@ -1938,6 +1945,7 @@ func (s *AssignmentStore) RecordAtomicIntent(req AtomicRequest, actor string, cr
 		OccupancyKey:             normalizeOccupancyKey(req.Target, req.OccupancyKey),
 		PromptSHA256:             PromptSHA256(req.Prompt),
 		IntentSHA256:             req.IntentSHA256,
+		BaseIntentSHA256:         strings.TrimSpace(req.BaseIntentSHA256),
 		PendingPrompt:            req.Prompt,
 	}
 	previous := existing

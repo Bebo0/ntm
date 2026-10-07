@@ -1295,6 +1295,7 @@ func TestInjectContextFromQuery_Disabled(t *testing.T) {
 
 	injectResult, queryResult, filterResult := InjectContextFromQuery(
 		"test prompt",
+		"test prompt",
 		queryConfig,
 		filterConfig,
 		injectConfig,
@@ -1334,6 +1335,7 @@ func TestInjectContextFromQuery_WithPrompt(t *testing.T) {
 	// This will attempt to query CASS but likely won't find anything
 	// The test verifies the function handles this gracefully
 	injectResult, queryResult, filterResult := InjectContextFromQuery(
+		"how do I implement authentication",
 		"how do I implement authentication",
 		queryConfig,
 		filterConfig,

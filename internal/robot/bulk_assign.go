@@ -65,7 +65,12 @@ type BulkAssignOptions struct {
 	// DefaultTemplate is an inline project/user-level configured template
 	// (cfg.Assign.PromptTemplate). It is used when neither PromptTemplatePath
 	// nor DefaultTemplatePath resolves to content, and overrides the built-in const.
-	DefaultTemplate     string
+	DefaultTemplate string
+	// PromptContext enriches each fresh assignment prompt with CASS history
+	// and CM rules (--with-cass / --no-cass / --with-memory), resolved with
+	// the same flag/config precedence as --robot-send. The zero value
+	// disables enrichment.
+	PromptContext       PromptContextOptions
 	Deps                *BulkAssignDependencies
 	projectDir          string
 	operatorGatedLabels []string
@@ -143,8 +148,14 @@ type BulkAssignAssignment struct {
 	ReservationIDs    []int  `json:"reservation_ids,omitempty"`
 	// Reservation reports the assignment's Agent Mail file-reservation scope
 	// and outcome once the plan has decided it.
-	Reservation    *BulkAssignReservation `json:"reservation,omitempty"`
-	Error          string                 `json:"error,omitempty"`
+	Reservation *BulkAssignReservation `json:"reservation,omitempty"`
+	Error       string                 `json:"error,omitempty"`
+	// CASSInjection and MemoryInjection report this assignment's prompt
+	// enrichment, as on --robot-send. Absent when enrichment was not
+	// requested or when a recorded intent was replayed without re-querying.
+	CASSInjection   *CASSInjectionInfo `json:"cass_injection,omitempty"`
+	MemoryInjection *CMInjectionInfo   `json:"memory_injection,omitempty"`
+
 	paneIndex      int
 	paneTitle      string
 	failureCause   error
@@ -1739,7 +1750,7 @@ func applyBulkAssignPlan(ctx context.Context, opts BulkAssignOptions, deps BulkA
 		return
 	}
 
-	runtime, runtimeErr := newBulkAtomicRuntime(ctx, deps, output.Session, opts.projectDir, opts.operatorGatedLabels)
+	runtime, runtimeErr := newBulkAtomicRuntime(ctx, deps, output.Session, opts.projectDir, opts.operatorGatedLabels, opts.PromptContext)
 	if runtimeErr != nil {
 		for i := range plan.Assignments {
 			if plan.Assignments[i].Status != "planned" {
@@ -2259,6 +2270,7 @@ type bulkAtomicRuntime struct {
 	deps                BulkAssignDependencies
 	workDir             string
 	operatorGatedLabels []string
+	promptContext       PromptContextOptions
 	newKey              func() (string, error)
 	observeMu           sync.Mutex
 	observation         statuspkg.SessionObservation
@@ -2275,7 +2287,7 @@ func (r *bulkAtomicRuntime) observeSession(ctx context.Context, session string) 
 	return r.observation, r.observeErr
 }
 
-func newBulkAtomicRuntime(ctx context.Context, deps BulkAssignDependencies, session, workDir string, operatorGatedLabels []string) (*bulkAtomicRuntime, error) {
+func newBulkAtomicRuntime(ctx context.Context, deps BulkAssignDependencies, session, workDir string, operatorGatedLabels []string, promptContext PromptContextOptions) (*bulkAtomicRuntime, error) {
 	if strings.TrimSpace(workDir) == "" {
 		var err error
 		workDir, err = deps.ResolveProject(ctx, session, nil)
@@ -2308,7 +2320,8 @@ func newBulkAtomicRuntime(ctx context.Context, deps BulkAssignDependencies, sess
 	)
 	return &bulkAtomicRuntime{
 		store: store, claimPort: claimPort, dispatchPort: dispatchPort,
-		deps: deps, workDir: workDir, operatorGatedLabels: capturedLabels, newKey: deps.NewIdempotencyKey,
+		deps: deps, workDir: workDir, operatorGatedLabels: capturedLabels, promptContext: promptContext,
+		newKey: deps.NewIdempotencyKey,
 	}, nil
 }
 
@@ -2373,12 +2386,20 @@ func (r *bulkAtomicRuntime) execute(ctx context.Context, session string, output 
 	actor := ""
 	idempotencyKey := ""
 	recoveredIntentSHA256 := ""
+	baseIntentSHA256 := ""
 	requireReservation := output.Reservation != nil && output.Reservation.Required
 	// Discovered paths are recorded with discovery allowed, as `ntm assign
 	// --pane` records them, so recovery replays the same intent.
 	reservationDiscovery := requireReservation && output.Reservation.Source == bulkReservationDiscovered
 	reservationPaths := append([]string(nil), output.reservationPaths...)
 	occupancyKey := target
+	if output.recovery == nil {
+		// A live row recorded from this same template intent with an enriched
+		// prompt is replayed through the durable-recovery path: its recorded
+		// prompt is delivered (or its receipt replayed) exactly, and cass/cm
+		// are never queried again.
+		output.recovery = robotAtomicContextIntent(r.store, output.Bead, target, output.AgentType, prompt, requireReservation, reservationPaths)
+	}
 	if recovery := output.recovery; recovery != nil {
 		target = strings.TrimSpace(recovery.DispatchTarget)
 		if target == "" {
@@ -2470,6 +2491,11 @@ func (r *bulkAtomicRuntime) execute(ctx context.Context, session string, output 
 			failBulkAssignment(output, keyErr, "")
 			return
 		}
+		if !robotAtomicLiveKey(r.store, output.Bead, idempotencyKey) {
+			// A fresh intent: enrich now, before Execute records it, so the
+			// ledger hashes and persists exactly what the agent receives.
+			prompt, baseIntentSHA256 = r.enrichPrompt(ctx, session, output, prompt)
+		}
 	}
 	if actor == "" {
 		actor = agentName
@@ -2516,6 +2542,7 @@ func (r *bulkAtomicRuntime) execute(ctx context.Context, session string, output 
 		Prompt:                    prompt,
 		IdempotencyKey:            idempotencyKey,
 		RecoveredIntentSHA256:     recoveredIntentSHA256,
+		BaseIntentSHA256:          baseIntentSHA256,
 		RequireReservation:        requireReservation,
 		AllowReservationDiscovery: reservationDiscovery,
 		RequestedPaths:            append([]string(nil), reservationPaths...),
@@ -2848,6 +2875,73 @@ func robotAtomicReplayIntent(
 		return nil
 	}
 	return existing
+}
+
+// robotAtomicContextIntent returns the live row a re-run of one enriched
+// template intent must replay. The row's prompt was enriched with cass/cm
+// context, so its intent checksum covers the enriched payload; only its
+// recorded pre-enrichment checksum can recognize the caller's template
+// prompt. Rows recorded without enrichment keep matching by prompt in
+// robotAtomicReplayIntent and robotAtomicIdempotencyKey.
+func robotAtomicContextIntent(
+	store *assignment.AssignmentStore,
+	beadID, target, agentType, basePrompt string,
+	requireReservation bool,
+	requestedPaths []string,
+) *assignment.Assignment {
+	if store == nil {
+		return nil
+	}
+	existing := store.Get(beadID)
+	if existing == nil || robotAtomicAssignmentTerminal(existing.Status) || existing.IdempotencyKey == "" ||
+		existing.BaseIntentSHA256 == "" || existing.BaseIntentSHA256 != assignment.PromptSHA256(basePrompt) {
+		return nil
+	}
+	occupancyKey := strings.TrimSpace(existing.OccupancyKey)
+	if occupancyKey == "" {
+		occupancyKey = strings.TrimSpace(existing.DispatchTarget)
+	}
+	if existing.DispatchTarget != target || occupancyKey != target || existing.AgentType != agentType ||
+		existing.ReservationRequired != requireReservation ||
+		!stringSlicesEqualRobot(existing.ReservationInputPaths, requestedPaths) {
+		return nil
+	}
+	return existing
+}
+
+// robotAtomicLiveKey reports whether key already identifies the bead's live
+// ledger row, i.e. robotAtomicIdempotencyKey reused a recorded intent rather
+// than minting a fresh one.
+func robotAtomicLiveKey(store *assignment.AssignmentStore, beadID, key string) bool {
+	if store == nil {
+		return false
+	}
+	existing := store.Get(beadID)
+	return existing != nil && !robotAtomicAssignmentTerminal(existing.Status) && existing.IdempotencyKey == key
+}
+
+// enrichPrompt applies the shared cass/cm prompt-context pipeline to a fresh
+// bulk intent's prompt and records the outcome on output. It returns the
+// prompt to dispatch and, when enrichment ran, the checksum of the template
+// prompt it started from. The bead's labels and description join the
+// retrieval query when the tracker can supply them; a failed lookup only
+// narrows the query to the title and never blocks the assignment.
+func (r *bulkAtomicRuntime) enrichPrompt(ctx context.Context, session string, output *BulkAssignAssignment, prompt string) (string, string) {
+	if !r.promptContext.Enabled() {
+		return prompt, ""
+	}
+	request := AssignmentPrompt{
+		Prompt: prompt, Title: output.BeadTitle, AgentType: output.AgentType,
+		Session: session, ProjectDir: r.workDir,
+	}
+	if r.deps.GetBeadAssignmentDetails != nil {
+		if details, err := r.deps.GetBeadAssignmentDetails(ctx, r.workDir, output.Bead); err == nil && details != nil {
+			request.Labels, request.Description = details.Labels, details.Description
+		}
+	}
+	enriched, cassInjection, memoryInjection := EnrichAssignmentPrompt(ctx, request, r.promptContext)
+	output.CASSInjection, output.MemoryInjection = cassInjection, memoryInjection
+	return enriched, assignment.PromptSHA256(prompt)
 }
 
 func robotAtomicAssignmentTerminal(status assignment.AssignmentStatus) bool {

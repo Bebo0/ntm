@@ -1145,6 +1145,114 @@ func TestAttemptAssignmentAtomicSuccessPersistsReceipt(t *testing.T) {
 	}
 }
 
+const coordinatorContextCASSMarker = "NTM_COORDINATOR_CASS_HISTORY"
+
+// writeCoordinatorStubCass writes a stub cass that logs each invocation and
+// prints one dateless, high-scoring hit.
+func writeCoordinatorStubCass(t *testing.T) (string, string) {
+	t.Helper()
+	dir := t.TempDir()
+	logPath := filepath.Join(dir, "cass.log")
+	payload := `{"query":"rate limiting","total_matches":1,"hits":[{"source_path":"/home/user/.cass/sessions/gateway/session-a.jsonl",` +
+		`"line_number":7,"agent":"codex","content":"` + coordinatorContextCASSMarker + ` token bucket per API key","score":0.93}]}`
+	script := "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '" + logPath + "'\ncat <<'NTM_FIXTURE_EOF'\n" + payload + "\nNTM_FIXTURE_EOF\n"
+	binPath := filepath.Join(dir, "cass")
+	if err := os.WriteFile(binPath, []byte(script), 0o755); err != nil {
+		t.Fatalf("write stub cass: %v", err)
+	}
+	return binPath, logPath
+}
+
+func readCoordinatorStubLog(t *testing.T, path string) string {
+	t.Helper()
+	data, err := os.ReadFile(path)
+	if err != nil && !os.IsNotExist(err) {
+		t.Fatalf("read stub log: %v", err)
+	}
+	return string(data)
+}
+
+// TestAttemptAssignmentEnrichesPromptAndRecoveryReplaysRecordedPrompt proves
+// coordinator auto-assign enriches the work-assignment message with CASS
+// history before the durable intent is recorded, and that pending recovery
+// re-delivers the recorded enriched prompt without querying cass again.
+func TestAttemptAssignmentEnrichesPromptAndRecoveryReplaysRecordedPrompt(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	cassBin, cassLog := writeCoordinatorStubCass(t)
+	query := robot.DefaultCASSConfig()
+	query.BinaryPath = cassBin
+	query.Timeout = 10 * time.Second
+	filter := robot.DefaultFilterConfig()
+	filter.MinRelevance = 0
+	filter.MaxAgeDays = 0
+	c := New("coordinator-prompt-context", t.TempDir(), &agentmail.Client{}, "CoordinatorAgent").
+		WithPromptContext(robot.PromptContextOptions{WithCASS: true, CASSConfig: &query, FilterConfig: &filter})
+
+	refuseDispatch := true
+	var dispatched []string
+	c.atomicCoordinatorFactory = func(store *assignmentstore.AssignmentStore) *assignmentstore.AtomicCoordinator {
+		claim := assignmentstore.ClaimFunc(func(_ context.Context, beadID, actor string) (assignmentstore.ClaimReceipt, error) {
+			return assignmentstore.ClaimReceipt{BeadID: beadID, Actor: actor, Status: "in_progress", ClaimedAt: time.Now().UTC()}, nil
+		})
+		dispatch := assignmentstore.DispatchFunc(func(_ context.Context, request assignmentstore.DispatchRequest) (assignmentstore.DispatchReceipt, error) {
+			if refuseDispatch {
+				return assignmentstore.DispatchReceipt{}, assignmentstore.GuaranteeNoActuation(errors.New("mailbox unavailable"))
+			}
+			dispatched = append(dispatched, request.Prompt)
+			return assignmentstore.DispatchReceipt{DeliveryID: "mail-context"}, nil
+		})
+		preflight := assignmentstore.PromptPreflightFunc(func(_ context.Context, request assignmentstore.DispatchRequest) (assignmentstore.PromptPreflightResult, error) {
+			return assignmentstore.PromptPreflightResult{DispatchPrompt: request.Prompt, DurablePrompt: request.Prompt}, nil
+		})
+		return assignmentstore.NewAtomicCoordinator(store, claim, nil, dispatch, preflight)
+	}
+
+	work := &WorkAssignment{
+		BeadID: "ntm-context", BeadTitle: "Add rate limiting middleware", AgentPaneID: "%9", AgentPaneIndex: 4,
+		AgentMailName: "BlueFox", AgentType: "cod", Priority: 1, Score: 0.9,
+	}
+	rec := &bv.TriageRecommendation{ID: work.BeadID, Title: work.BeadTitle, Labels: []string{"gateway"}}
+	first := c.attemptAssignment(t.Context(), work, rec)
+	if first.Success || first.MessageSent || first.CASSInjection == nil || first.CASSInjection.ItemsInjected == 0 {
+		t.Fatalf("first attempt = %+v (cass %+v), want an enriched intent refused before delivery", first, first.CASSInjection)
+	}
+	cassCalls := readCoordinatorStubLog(t, cassLog)
+	if strings.Count(cassCalls, "search") != 1 || !strings.Contains(cassCalls, "gateway") || strings.Contains(cassCalls, "acknowledge") {
+		t.Fatalf("cass calls = %q, want one search over the bead title and labels", cassCalls)
+	}
+
+	store, err := assignmentstore.LoadStoreStrict(c.session)
+	if err != nil {
+		t.Fatalf("LoadStoreStrict: %v", err)
+	}
+	pending := store.Get(work.BeadID)
+	if pending == nil || pending.Status != assignmentstore.StatusClaimed || pending.DispatchState != assignmentstore.DispatchPending {
+		t.Fatalf("pending intent = %+v, want a claimed, undelivered row", pending)
+	}
+	history, body := strings.Index(pending.PendingPrompt, coordinatorContextCASSMarker), strings.Index(pending.PendingPrompt, "# Work Assignment")
+	if history < 0 || body < 0 || history > body {
+		t.Fatalf("recorded prompt lacks history above the assignment message:\n%s", pending.PendingPrompt)
+	}
+	if want := assignmentstore.PromptSHA256(c.formatAssignmentMessage(work, rec, pending.ClaimActor)); pending.BaseIntentSHA256 != want {
+		t.Fatalf("base intent = %q, want the unenriched message checksum %q", pending.BaseIntentSHA256, want)
+	}
+
+	refuseDispatch = false
+	recovered := c.recoverPendingAssignment(t.Context(), store, pending, coordinatorWorkAssignmentFromRecord(pending))
+	if !recovered.Success || !recovered.MessageSent || recovered.IdempotencyKey != pending.IdempotencyKey {
+		t.Fatalf("recovery = %+v, want key %s delivered", recovered, pending.IdempotencyKey)
+	}
+	if recovered.CASSInjection != nil {
+		t.Fatalf("recovery re-ran enrichment: %+v", recovered.CASSInjection)
+	}
+	if len(dispatched) != 1 || dispatched[0] != pending.PendingPrompt {
+		t.Fatalf("recovery delivered %q, want the recorded prompt", dispatched)
+	}
+	if calls := readCoordinatorStubLog(t, cassLog); calls != cassCalls {
+		t.Fatalf("recovery queried cass again: %q", calls)
+	}
+}
+
 func TestExecuteAtomicAssignmentDoesNotProjectForeignTargetOwner(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	const session = "coordinator-foreign-occupant"

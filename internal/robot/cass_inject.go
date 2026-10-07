@@ -1341,9 +1341,13 @@ func countInjectedItems(context string, format InjectionFormat) int {
 	}
 }
 
-// InjectContextFromQuery is a convenience function that queries CASS, filters results,
-// and injects the context in one call.
-func InjectContextFromQuery(prompt string, queryConfig CASSConfig, filterConfig FilterConfig, injectConfig InjectConfig) (InjectionResult, CASSQueryResult, FilterResult) {
+// InjectContextFromQuery queries CASS with the keywords of query, filters the
+// results, and prepends the formatted context to prompt in one call. A send
+// passes its message as both; an assignment queries with its bead's title,
+// labels, and description and enriches the rendered assignment prompt, whose
+// template boilerplate would otherwise crowd the bead's own terms out of the
+// keyword budget.
+func InjectContextFromQuery(prompt, query string, queryConfig CASSConfig, filterConfig FilterConfig, injectConfig InjectConfig) (InjectionResult, CASSQueryResult, FilterResult) {
 	// [cass] enabled=false with an explicit --with-cass degrades to a
 	// recorded skip. Record the honest reason — the query never ran — rather
 	// than the zero-hits path's "no relevant context found".
@@ -1360,7 +1364,7 @@ func InjectContextFromQuery(prompt string, queryConfig CASSConfig, filterConfig 
 	}
 
 	// Query and filter
-	queryResult, filterResult := QueryAndFilterCASS(prompt, queryConfig, filterConfig)
+	queryResult, filterResult := QueryAndFilterCASS(query, queryConfig, filterConfig)
 
 	if !queryResult.Success {
 		return InjectionResult{

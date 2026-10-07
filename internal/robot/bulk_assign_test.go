@@ -4008,3 +4008,340 @@ func TestBulkAssignRecoveryReplaysRecordedReservationDiscovery(t *testing.T) {
 		t.Fatalf("recovery dispatches = %v", got)
 	}
 }
+
+// --- Assignment-time CASS/CM prompt enrichment (--with-cass / --with-memory) ---
+
+const bulkContextCASSMarker = "NTM_BULK_CASS_HISTORY"
+const bulkContextCMMarker = "NTM_BULK_CM_RULE"
+
+// bulkContextCASSFixture is a stub `cass search --json` response with one
+// dateless, high-scoring hit so the relevance and age filters keep it.
+const bulkContextCASSFixture = `{"query":"rate limiting","total_matches":1,"hits":[` +
+	`{"source_path":"/home/user/.cass/sessions/gateway/session-a.jsonl","line_number":7,"agent":"claude","content":"` +
+	bulkContextCASSMarker + ` token bucket per API key fixed the burst","score":0.93}]}`
+
+// writeBulkContextStub writes an executable stub that appends each
+// invocation's arguments to a log and prints payload, so a test can prove
+// whether (and with what query) enrichment called it.
+func writeBulkContextStub(t *testing.T, name, payload string) (string, string) {
+	t.Helper()
+	dir := t.TempDir()
+	logPath := filepath.Join(dir, name+".log")
+	script := "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '" + logPath + "'\ncat <<'NTM_FIXTURE_EOF'\n" + payload + "\nNTM_FIXTURE_EOF\n"
+	binPath := filepath.Join(dir, name)
+	if err := os.WriteFile(binPath, []byte(script), 0o755); err != nil {
+		t.Fatalf("write stub %s: %v", name, err)
+	}
+	return binPath, logPath
+}
+
+func bulkContextStubCalls(t *testing.T, logPath string) string {
+	t.Helper()
+	data, err := os.ReadFile(logPath)
+	if err != nil && !os.IsNotExist(err) {
+		t.Fatalf("read stub log: %v", err)
+	}
+	return string(data)
+}
+
+// bulkContextOptions enriches with the stub cass (filters opened so the
+// fixture hit survives) and, when cmBin is set, the stub cm CLI.
+func bulkContextOptions(cassBin, cmBin string) PromptContextOptions {
+	query := DefaultCASSConfig()
+	query.BinaryPath = cassBin
+	query.Timeout = 10 * time.Second
+	filter := DefaultFilterConfig()
+	filter.MinRelevance = 0
+	filter.MaxAgeDays = 0
+	opts := PromptContextOptions{WithCASS: true, CASSConfig: &query, FilterConfig: &filter}
+	if cmBin != "" {
+		memory := DefaultCMInjectConfig()
+		memory.CLIBinary = cmBin
+		opts.WithMemory = true
+		opts.MemoryInject = &memory
+	}
+	return opts
+}
+
+// bulkContextFixture is a one-pane session whose tracker claim and live
+// details are stateful, so a fresh run and a durable recovery both pass the
+// atomic eligibility gate.
+type bulkContextFixture struct {
+	session   string
+	store     *assignment.AssignmentStore
+	deps      BulkAssignDependencies
+	mu        sync.Mutex
+	delivered []string
+	owners    map[string]string
+	observe   func(call int) error
+	calls     int
+}
+
+func newBulkContextFixture(t *testing.T, session string) *bulkContextFixture {
+	t.Helper()
+	t.Setenv("HOME", t.TempDir())
+	projectDir := t.TempDir()
+	panes := mockTmuxPanesForList([]int{1})
+	f := &bulkContextFixture{session: session, store: assignment.NewStore(session), owners: map[string]string{}}
+	f.deps = BulkAssignDependencies{
+		ResolveProject: func(context.Context, string, []tmux.Pane) (string, error) { return projectDir, nil },
+		FetchBeadTitle: func(context.Context, string, string) (string, error) {
+			return "Add rate limiting middleware", nil
+		},
+		ListPanes: func(context.Context, string) ([]tmux.Pane, error) { return panes, nil },
+		ReadFile:  func(string) ([]byte, error) { return []byte(defaultBulkAssignTemplate), nil },
+		LoadStore: func(string) (*assignment.AssignmentStore, error) { return f.store, nil },
+		GetBeadAssignmentDetails: func(_ context.Context, _ string, beadID string) (*bv.BeadAssignmentDetails, error) {
+			f.mu.Lock()
+			defer f.mu.Unlock()
+			details := &bv.BeadAssignmentDetails{
+				ID: beadID, Title: "Add rate limiting middleware", Status: "open",
+				Labels: []string{"gateway"}, Description: "Throttle bursts with a token bucket keyed by API key.",
+			}
+			if owner := f.owners[beadID]; owner != "" {
+				details.Status, details.Assignee = "in_progress", owner
+			}
+			return details, nil
+		},
+		ClaimBead: func(_ context.Context, _ string, beadID, actor string) (bv.BeadClaimResult, error) {
+			f.mu.Lock()
+			defer f.mu.Unlock()
+			f.owners[beadID] = actor
+			return bv.BeadClaimResult{ID: beadID, Actor: actor, Status: "in_progress", ClaimedAt: time.Now().UTC()}, nil
+		},
+		NewIdempotencyKey: assignment.NewAssignmentIdempotencyKey,
+		ResolveAgentName: func(context.Context, string, string, string, string) (string, error) {
+			return "ContextAgent", nil
+		},
+		ObserveSession: func(_ context.Context, session string) (statuspkg.SessionObservation, error) {
+			f.mu.Lock()
+			f.calls++
+			call := f.calls
+			f.mu.Unlock()
+			if f.observe != nil {
+				if err := f.observe(call); err != nil {
+					return statuspkg.SessionObservation{}, err
+				}
+			}
+			return bulkSafeObservation(session, panes), nil
+		},
+		DispatchDeliverer: dispatchsvc.DelivererFunc(func(_ context.Context, delivery dispatchsvc.Delivery) error {
+			f.mu.Lock()
+			defer f.mu.Unlock()
+			f.delivered = append(f.delivered, delivery.Message)
+			return nil
+		}),
+		LoadRedaction: func(string) (redaction.Config, error) { return redaction.Config{Mode: redaction.ModeOff}, nil },
+	}
+	return f
+}
+
+func (f *bulkContextFixture) run(t *testing.T, opts PromptContextOptions) *BulkAssignOutput {
+	t.Helper()
+	output, err := GetBulkAssign(t.Context(), BulkAssignOptions{
+		Session: f.session, AllocationJSON: `{"1":"bd-ctx"}`, Deps: &f.deps, PromptContext: opts,
+	})
+	if err != nil {
+		t.Fatalf("GetBulkAssign: %v", err)
+	}
+	if len(output.Assignments) != 1 {
+		t.Fatalf("assignments = %+v, want one", output.Assignments)
+	}
+	return output
+}
+
+func (f *bulkContextFixture) deliveries() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]string(nil), f.delivered...)
+}
+
+func (f *bulkContextFixture) ledgerRow(t *testing.T) *assignment.Assignment {
+	t.Helper()
+	store, err := assignment.LoadStoreStrict(f.session)
+	if err != nil {
+		t.Fatalf("load ledger: %v", err)
+	}
+	row := store.Get("bd-ctx")
+	if row == nil {
+		t.Fatal("bd-ctx missing from the assignment ledger")
+	}
+	return row
+}
+
+// TestBulkAssignWithCASSAndMemoryEnrichesPromptAndReplaysWithoutRequery drives
+// --robot-bulk-assign with stub cass and cm binaries: the delivered prompt
+// carries the CM rules block above the CASS history above the template, the
+// query is the bead's own text rather than template boilerplate, the ledger
+// records the enriched prompt with its pre-enrichment checksum, and a re-run
+// of the same intent replays the receipt without querying either tool again.
+func TestBulkAssignWithCASSAndMemoryEnrichesPromptAndReplaysWithoutRequery(t *testing.T) {
+	f := newBulkContextFixture(t, "bulk-context-enriched")
+	cassBin, cassLog := writeBulkContextStub(t, "cass", bulkContextCASSFixture)
+	cmBin, cmLog := writeBulkContextStub(t, "cm",
+		`{"success":true,"data":{"relevantBullets":[{"id":"b-rate","content":"`+bulkContextCMMarker+` prefer token buckets over fixed windows"}],"antiPatterns":[],"historySnippets":[],"suggestedCassQueries":[]}}`)
+	opts := bulkContextOptions(cassBin, cmBin)
+
+	first := f.run(t, opts)
+	got := first.Assignments[0]
+	if !first.Success || got.Status != "assigned" || !got.PromptSent {
+		t.Fatalf("enriched bulk assignment = %+v (response %+v)", got, first.RobotResponse)
+	}
+	if got.CASSInjection == nil || got.CASSInjection.ItemsInjected == 0 || got.CASSInjection.SkippedReason != "" {
+		t.Fatalf("cass_injection = %+v, want injected history", got.CASSInjection)
+	}
+	if got.MemoryInjection == nil || !reflect.DeepEqual(got.MemoryInjection.RulesInjected, []string{"b-rate"}) || got.MemoryInjection.Source != "cli" {
+		t.Fatalf("memory_injection = %+v, want rule b-rate from the cm CLI", got.MemoryInjection)
+	}
+	raw, err := json.Marshal(got)
+	if err != nil || !strings.Contains(string(raw), `"cass_injection"`) || !strings.Contains(string(raw), `"memory_injection"`) {
+		t.Fatalf("assignment JSON lacks the injection blocks: %s (%v)", raw, err)
+	}
+
+	delivered := f.deliveries()
+	if len(delivered) != 1 {
+		t.Fatalf("deliveries = %d, want 1", len(delivered))
+	}
+	prompt := delivered[0]
+	rules, history, task := strings.Index(prompt, bulkContextCMMarker), strings.Index(prompt, bulkContextCASSMarker), strings.Index(prompt, "Work on: bd-ctx")
+	if rules < 0 || history < 0 || task < 0 || rules > history || history > task {
+		t.Fatalf("delivered prompt order rules=%d history=%d task=%d, want rules < history < task:\n%s", rules, history, task, prompt)
+	}
+
+	cassCalls := bulkContextStubCalls(t, cassLog)
+	if strings.Count(cassCalls, "search") != 1 || !strings.Contains(cassCalls, "gateway") || !strings.Contains(cassCalls, "bucket") {
+		t.Fatalf("cass calls = %q, want one search over the bead's title, labels, and description", cassCalls)
+	}
+	if strings.Contains(cassCalls, "register") || strings.Contains(cassCalls, "ultrathink") {
+		t.Fatalf("cass query carried template boilerplate: %q", cassCalls)
+	}
+	cmCalls := bulkContextStubCalls(t, cmLog)
+	if strings.Count(cmCalls, "context") != 1 || !strings.Contains(cmCalls, "rate limiting middleware") {
+		t.Fatalf("cm calls = %q, want one context query for the bead", cmCalls)
+	}
+
+	row := f.ledgerRow(t)
+	if row.PromptSent != prompt || row.DispatchState != assignment.DispatchSent {
+		t.Fatalf("ledger row prompt/dispatch = %q/%s, want the delivered enriched prompt", row.PromptSent, row.DispatchState)
+	}
+	base := prompt[strings.LastIndex(prompt, "\n---\n\n")+len("\n---\n\n"):]
+	if row.BaseIntentSHA256 != assignment.PromptSHA256(base) || row.BaseIntentSHA256 == row.IntentSHA256 {
+		t.Fatalf("ledger base intent = %q (intent %q), want the template prompt's checksum %q", row.BaseIntentSHA256, row.IntentSHA256, assignment.PromptSHA256(base))
+	}
+
+	second := f.run(t, opts)
+	replayed := second.Assignments[0]
+	if !second.Success || replayed.Status != "assigned" || !replayed.PromptSent || replayed.IdempotencyKey != got.IdempotencyKey {
+		t.Fatalf("re-run of the same intent = %+v, want the durable replay of key %s", replayed, got.IdempotencyKey)
+	}
+	if replayed.CASSInjection != nil || replayed.MemoryInjection != nil {
+		t.Fatalf("replay re-ran enrichment: cass=%+v memory=%+v", replayed.CASSInjection, replayed.MemoryInjection)
+	}
+	if n := len(f.deliveries()); n != 1 {
+		t.Fatalf("replay delivered again: %d deliveries", n)
+	}
+	if calls := bulkContextStubCalls(t, cassLog); calls != cassCalls {
+		t.Fatalf("replay queried cass again: %q", calls)
+	}
+	if calls := bulkContextStubCalls(t, cmLog); calls != cmCalls {
+		t.Fatalf("replay queried cm again: %q", calls)
+	}
+}
+
+// TestBulkAssignPendingEnrichedIntentRecoversRecordedPrompt proves recovery
+// of a claimed-but-undelivered enriched intent re-delivers exactly the prompt
+// the ledger recorded and never queries cass again.
+func TestBulkAssignPendingEnrichedIntentRecoversRecordedPrompt(t *testing.T) {
+	f := newBulkContextFixture(t, "bulk-context-recovery")
+	cassBin, cassLog := writeBulkContextStub(t, "cass", bulkContextCASSFixture)
+	opts := bulkContextOptions(cassBin, "")
+	// Observation 1 is the pre-claim safety gate; observation 2 is the
+	// dispatch-time re-check, which refuses before any keystroke.
+	f.observe = func(call int) error {
+		if call == 2 {
+			return errors.New("pane became busy")
+		}
+		return nil
+	}
+
+	first := f.run(t, opts)
+	if got := first.Assignments[0]; got.Status != "failed" || got.PromptSent || got.CASSInjection == nil || got.CASSInjection.ItemsInjected == 0 {
+		t.Fatalf("first attempt = %+v, want an enriched claim that failed before delivery", got)
+	}
+	if n := len(f.deliveries()); n != 0 {
+		t.Fatalf("refused dispatch delivered %d prompts", n)
+	}
+	pending := f.ledgerRow(t)
+	if pending.Status != assignment.StatusClaimed || pending.DispatchState != assignment.DispatchPending ||
+		!strings.Contains(pending.PendingPrompt, bulkContextCASSMarker) || pending.BaseIntentSHA256 == "" {
+		t.Fatalf("pending ledger row = %+v, want a claimed, undelivered, enriched intent", pending)
+	}
+	cassCalls := bulkContextStubCalls(t, cassLog)
+
+	second := f.run(t, opts)
+	recovered := second.Assignments[0]
+	if !second.Success || recovered.Status != "assigned" || !recovered.PromptSent || recovered.IdempotencyKey != pending.IdempotencyKey {
+		t.Fatalf("recovery = %+v, want key %s delivered", recovered, pending.IdempotencyKey)
+	}
+	if recovered.CASSInjection != nil {
+		t.Fatalf("recovery re-ran enrichment: %+v", recovered.CASSInjection)
+	}
+	delivered := f.deliveries()
+	if len(delivered) != 1 || delivered[0] != pending.PendingPrompt {
+		t.Fatalf("recovery delivered %q, want the recorded prompt %q", delivered, pending.PendingPrompt)
+	}
+	if calls := bulkContextStubCalls(t, cassLog); calls != cassCalls {
+		t.Fatalf("recovery queried cass again: %q", calls)
+	}
+	if row := f.ledgerRow(t); row.PromptSent != pending.PendingPrompt || row.DispatchState != assignment.DispatchSent {
+		t.Fatalf("recovered ledger row = %+v, want the recorded prompt marked sent", row)
+	}
+}
+
+// TestBulkAssignCASSUnavailableDegradesAndReports proves cass and cm being
+// missing never blocks a bulk assignment: the template prompt is delivered
+// unchanged and each skip is recorded on the assignment.
+func TestBulkAssignCASSUnavailableDegradesAndReports(t *testing.T) {
+	f := newBulkContextFixture(t, "bulk-context-degraded")
+	missing := filepath.Join(t.TempDir(), "no-such-tool")
+	opts := bulkContextOptions(missing, missing)
+
+	output := f.run(t, opts)
+	got := output.Assignments[0]
+	if !output.Success || got.Status != "assigned" || !got.PromptSent {
+		t.Fatalf("degraded bulk assignment = %+v (response %+v), want it delivered", got, output.RobotResponse)
+	}
+	if got.CASSInjection == nil || got.CASSInjection.ItemsInjected != 0 || !strings.Contains(got.CASSInjection.SkippedReason, "not found") {
+		t.Fatalf("cass_injection = %+v, want a recorded missing-cass skip", got.CASSInjection)
+	}
+	if got.MemoryInjection == nil || !strings.Contains(got.MemoryInjection.SkippedReason, "cm is not available") {
+		t.Fatalf("memory_injection = %+v, want a recorded missing-cm skip", got.MemoryInjection)
+	}
+	delivered := f.deliveries()
+	if len(delivered) != 1 || strings.Contains(delivered[0], "\n---\n\n") || !strings.Contains(delivered[0], "Work on: bd-ctx") {
+		t.Fatalf("degraded delivery = %q, want the bare template prompt", delivered)
+	}
+	if row := f.ledgerRow(t); row.PromptSent != delivered[0] {
+		t.Fatalf("ledger prompt = %q, want the delivered template prompt", row.PromptSent)
+	}
+}
+
+// TestBulkAssignWithoutPromptContextNeverQueriesCASS proves the disabled
+// state (--no-cass, or [cass.context] off without --with-cass) leaves cass
+// untouched, the prompt bare, and no enrichment record on the ledger.
+func TestBulkAssignWithoutPromptContextNeverQueriesCASS(t *testing.T) {
+	f := newBulkContextFixture(t, "bulk-context-disabled")
+	_, cassLog := writeBulkContextStub(t, "cass", bulkContextCASSFixture)
+
+	output := f.run(t, PromptContextOptions{})
+	got := output.Assignments[0]
+	if !output.Success || got.Status != "assigned" || got.CASSInjection != nil || got.MemoryInjection != nil {
+		t.Fatalf("disabled-context assignment = %+v, want a bare delivery with no injection blocks", got)
+	}
+	if calls := bulkContextStubCalls(t, cassLog); calls != "" {
+		t.Fatalf("disabled context queried cass: %q", calls)
+	}
+	if row := f.ledgerRow(t); row.BaseIntentSHA256 != "" || strings.Contains(row.PromptSent, "\n---\n\n") {
+		t.Fatalf("disabled-context ledger row = %+v, want no enrichment record", row)
+	}
+}

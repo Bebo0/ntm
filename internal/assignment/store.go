@@ -116,6 +116,7 @@ type Assignment struct {
 	OccupancyKey             string               `json:"occupancy_key,omitempty"`
 	PromptSHA256             string               `json:"prompt_sha256,omitempty"`
 	IntentSHA256             string               `json:"intent_sha256,omitempty"`
+	BaseIntentSHA256         string               `json:"base_intent_sha256,omitempty"` // pre-enrichment prompt checksum (AtomicRequest.BaseIntentSHA256)
 	PendingPrompt            string               `json:"pending_prompt,omitempty"`
 	DispatchAttempts         int                  `json:"dispatch_attempts,omitempty"`
 	DispatchStartedAt        *time.Time           `json:"dispatch_started_at,omitempty"`

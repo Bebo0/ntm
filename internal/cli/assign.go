@@ -93,6 +93,12 @@ var (
 	// caller's CWD. Used by long-running watchers (launchd/cron/systemd) where
 	// CWD-walk discovery would otherwise pick up the wrong `.beads/`.
 	assignRepoPath string
+
+	// Prompt-context enrichment, with send's flag/config precedence: CASS
+	// history and CM rules are prepended to each fresh assignment prompt.
+	assignWithCASS   bool // force CASS history injection on
+	assignNoCASS     bool // force CASS history injection off, overriding [cass.context] enabled=true
+	assignWithMemory bool // inject CM rules even when [memory] send_injection=false
 )
 
 const (
@@ -431,7 +437,17 @@ Examples:
 	// Repository binding (issue #123)
 	cmd.Flags().StringVar(&assignRepoPath, "repo", "", "Pin the bead-source repository path (overrides CWD discovery; required for daemon/cron use)")
 
+	registerAssignPromptContextFlags(cmd)
+
 	return cmd
+}
+
+// registerAssignPromptContextFlags adds send's --with-cass / --no-cass /
+// --with-memory to an assignment command.
+func registerAssignPromptContextFlags(cmd *cobra.Command) {
+	cmd.Flags().BoolVar(&assignWithCASS, "with-cass", false, "Inject relevant CASS session history above each assignment prompt (query: bead title, labels, description); degrades gracefully when cass is unavailable. Config: [cass.context] enabled/max_sessions/lookback_days/max_tokens/min_relevance/skip_if_context_above/prefer_same_project")
+	cmd.Flags().BoolVar(&assignNoCASS, "no-cass", false, "Disable CASS history injection for this assignment, overriding [cass.context] enabled=true")
+	cmd.Flags().BoolVar(&assignWithMemory, "with-memory", false, "Inject relevant CM (cass-memory) rules above each assignment prompt; degrades gracefully when cm is unavailable. Config: [memory] send_injection/send_max_rules/send_budget_tokens")
 }
 
 func resolveAssignProjectDir(ctx context.Context, session string) (string, error) {
@@ -652,6 +668,9 @@ func runAssign(cmd *cobra.Command, args []string) error {
 		Force:           assignForce,
 		IgnoreDeps:      assignIgnoreDeps,
 		Prompt:          assignPrompt,
+		WithCASS:        assignWithCASS,
+		NoCASS:          assignNoCASS,
+		WithMemory:      assignWithMemory,
 		policyProject:   policyProject,
 	}
 
@@ -734,6 +753,9 @@ func runWatchMode(cmd *cobra.Command, session, projectDir, policyProject string)
 		AgentTypeFilter: agentTypeFilter,
 		DryRun:          assignDryRun,
 		IdleThreshold:   idleThreshold,
+		WithCASS:        assignWithCASS,
+		NoCASS:          assignNoCASS,
+		WithMemory:      assignWithMemory,
 		policyProject:   policyProject,
 	}
 
@@ -793,6 +815,9 @@ func runWatchMode(cmd *cobra.Command, session, projectDir, policyProject string)
 		Quiet:           true, // Suppress normal output during initial pass
 		Timeout:         assignTimeout,
 		ReserveFiles:    assignReserveFiles,
+		WithCASS:        assignWithCASS,
+		NoCASS:          assignNoCASS,
+		WithMemory:      assignWithMemory,
 		policyProject:   policyProject,
 	}
 
@@ -1203,6 +1228,12 @@ type AssignCommandOptions struct {
 	Clear     string // Clear specific bead assignments (comma-separated)
 	ClearPane string // Clear all assignments for one canonical pane selector
 
+	// Prompt-context flags (--with-cass / --no-cass / --with-memory). All
+	// false follows [cass.context] enabled and [memory] send_injection.
+	WithCASS   bool
+	NoCASS     bool
+	WithMemory bool
+
 	// policyProject records the exact authoritative project whose assignment
 	// policy was already installed during this command path.
 	policyProject string
@@ -1243,6 +1274,10 @@ type AssignmentItem struct {
 	Reasoning       string                            `json:"reasoning,omitempty"`
 	ReasonCodes     []string                          `json:"reason_codes,omitempty"`
 	ScoreComponents *assign.AllocationScoreComponents `json:"score_components,omitempty"`
+	// CASSInjection and MemoryInjection report this assignment's prompt
+	// enrichment, as on send; absent when enrichment was not requested.
+	CASSInjection   *robot.CASSInjectionInfo `json:"cass_injection,omitempty"`
+	MemoryInjection *robot.CMInjectionInfo   `json:"memory_injection,omitempty"`
 }
 
 // AssignAllocationView is a compact JSON summary of the pressure-aware
@@ -1312,6 +1347,11 @@ type DirectAssignItem struct {
 	PaneWasBusy  bool     `json:"pane_was_busy,omitempty"`
 	DepsIgnored  bool     `json:"deps_ignored,omitempty"`
 	BlockedByIDs []string `json:"blocked_by_ids,omitempty"`
+	// CASSInjection and MemoryInjection report the prompt enrichment of a
+	// fresh intent; absent when not requested or when a recorded intent was
+	// replayed without re-querying.
+	CASSInjection   *robot.CASSInjectionInfo `json:"cass_injection,omitempty"`
+	MemoryInjection *robot.CMInjectionInfo   `json:"memory_injection,omitempty"`
 }
 
 // DirectAssignFileReservations holds file reservation details for direct assignment.
@@ -2683,6 +2723,7 @@ func executeAssignmentsEnhanced(ctx context.Context, session string, out *Assign
 		}
 	}
 	atomicCoordinator := newCLIAtomicAssignmentCoordinator(store, projectDir, reservationMgr, opts.Force)
+	promptContext := resolvePromptContextOptions(opts.WithCASS, opts.NoCASS, opts.WithMemory, cfg)
 	activeBeads := make(map[string]struct{})
 	for _, active := range store.ListActive() {
 		if active != nil && strings.TrimSpace(active.BeadID) != "" {
@@ -2708,7 +2749,7 @@ func executeAssignmentsEnhanced(ctx context.Context, session string, out *Assign
 		}
 		item := &out.Assignments[i]
 		detailsCtx, detailsCancel := context.WithTimeout(ctx, resolveAssignTimeout(opts.Timeout))
-		liveDetails, detailsErr := bv.GetBeadAssignmentDetailsContext(detailsCtx, projectDir, item.BeadID)
+		liveDetails, detailsErr := getBeadAssignmentDetailsForAssignment(detailsCtx, projectDir, item.BeadID)
 		detailsCancel()
 		if err := ctx.Err(); err != nil {
 			return fmt.Errorf("assignment execution canceled while validating %s: %w", item.BeadID, err)
@@ -2784,6 +2825,18 @@ func executeAssignmentsEnhanced(ctx context.Context, session string, out *Assign
 			continue
 		}
 
+		// Enrich the fresh intent with CASS history and CM rules before
+		// Execute records it (each item mints a new idempotency key), so the
+		// ledger holds exactly the prompt the agent receives. Enrichment never
+		// blocks: an unavailable cass or cm leaves a recorded skip.
+		var baseIntentSHA256 string
+		prompt, baseIntentSHA256, item.CASSInjection, item.MemoryInjection = enrichAssignmentPrompt(ctx, promptContext, robot.AssignmentPrompt{
+			Prompt: prompt, Title: rawBeadTitle, AgentType: item.AgentType, Session: session, ProjectDir: projectDir,
+		}, item.BeadID, liveDetails, opts.Timeout)
+		if !opts.Quiet {
+			printAssignmentPromptContext(item.BeadID, item.CASSInjection, item.MemoryInjection)
+		}
+
 		// Stamp the per-pane NTM-Pane work-token instruction (#199). No-op when
 		// the semantic feature is off, so the dispatched prompt is unchanged. Use
 		// the same window.pane addressing --robot-is-working reports so the token
@@ -2819,6 +2872,7 @@ func executeAssignmentsEnhanced(ctx context.Context, session string, out *Assign
 			Actor:              actor,
 			Prompt:             promptForPane,
 			IdempotencyKey:     idempotencyKey,
+			BaseIntentSHA256:   baseIntentSHA256,
 			RequireReservation: opts.ReserveFiles,
 			RequestedPaths:     requestedPaths,
 			ReservationTTL:     time.Hour,
@@ -3258,6 +3312,62 @@ func expandPromptTemplate(beadID, title, templateName, templateFile string) stri
 	return renderPromptTemplate(beadID, title, promptTemplateSource(templateName, templateFile))
 }
 
+// enrichAssignmentPrompt prepends CASS history and CM rules to one fresh
+// assignment prompt through the pipeline --robot-send uses
+// (robot.EnrichAssignmentPrompt). Callers run it before the atomic
+// coordinator records the intent, so the ledger hashes and persists the
+// enriched prompt, and never for a recorded intent being recovered or
+// replayed. details supplies the bead's labels and description for the
+// retrieval query; when nil they are read best-effort, and a failed read only
+// narrows the query to the title. The returned pre-enrichment checksum is
+// empty when no enrichment was requested.
+func enrichAssignmentPrompt(
+	ctx context.Context,
+	opts robot.PromptContextOptions,
+	request robot.AssignmentPrompt,
+	beadID string,
+	details *bv.BeadAssignmentDetails,
+	timeout time.Duration,
+) (string, string, *robot.CASSInjectionInfo, *robot.CMInjectionInfo) {
+	if !opts.Enabled() {
+		return request.Prompt, "", nil, nil
+	}
+	if details == nil {
+		detailsCtx, cancel := context.WithTimeout(ctx, resolveAssignTimeout(timeout))
+		details, _ = getBeadAssignmentDetailsForAssignment(detailsCtx, request.ProjectDir, beadID)
+		cancel()
+	}
+	if details != nil {
+		if strings.TrimSpace(request.Title) == "" {
+			request.Title = details.Title
+		}
+		request.Labels, request.Description = details.Labels, details.Description
+	}
+	enriched, cassInjection, memoryInjection := robot.EnrichAssignmentPrompt(ctx, request, opts)
+	return enriched, assignment.PromptSHA256(request.Prompt), cassInjection, memoryInjection
+}
+
+// printAssignmentPromptContext reports one assignment's enrichment in human
+// output, worded like `ntm send`.
+func printAssignmentPromptContext(beadID string, cassInjection *robot.CASSInjectionInfo, memoryInjection *robot.CMInjectionInfo) {
+	if cassInjection != nil {
+		switch {
+		case cassInjection.ItemsInjected > 0:
+			fmt.Printf("  CASS context injected for %s: %d item(s), ~%d tokens\n", beadID, cassInjection.ItemsInjected, cassInjection.TokensAdded)
+		case cassInjection.SkippedReason != "":
+			fmt.Printf("  CASS context injection skipped for %s: %s\n", beadID, cassInjection.SkippedReason)
+		}
+	}
+	if memoryInjection != nil {
+		switch {
+		case memoryInjection.TokensAdded > 0:
+			fmt.Printf("  CM rules injected for %s: ~%d tokens\n", beadID, memoryInjection.TokensAdded)
+		case memoryInjection.SkippedReason != "":
+			fmt.Printf("  CM rule injection skipped for %s: %s\n", beadID, memoryInjection.SkippedReason)
+		}
+	}
+}
+
 // ============================================================================
 // Clear Assignments - --clear and --clear-pane functionality
 // ============================================================================
@@ -3358,6 +3468,10 @@ type ReassignData struct {
 	FileReservationsTransferred  bool   `json:"file_reservations_transferred"`
 	FileReservationsReleasedFrom int    `json:"file_reservations_released_from,omitempty"`
 	FileReservationsCreatedFor   int    `json:"file_reservations_created_for,omitempty"`
+	// CASSInjection and MemoryInjection report the replacement prompt's
+	// enrichment; absent when enrichment was not requested.
+	CASSInjection   *robot.CASSInjectionInfo `json:"cass_injection,omitempty"`
+	MemoryInjection *robot.CMInjectionInfo   `json:"memory_injection,omitempty"`
 }
 
 // ReassignError represents an error in the reassignment envelope.
@@ -3393,6 +3507,11 @@ type RetryItem struct {
 	PreviousAgent      string `json:"previous_agent,omitempty"`
 	PreviousFailReason string `json:"previous_fail_reason,omitempty"`
 	RetryCount         int    `json:"retry_count"`
+	// CASSInjection and MemoryInjection report the prompt enrichment of a new
+	// attempt; absent when not requested or when a pending intent was
+	// recovered with its recorded prompt.
+	CASSInjection   *robot.CASSInjectionInfo `json:"cass_injection,omitempty"`
+	MemoryInjection *robot.CMInjectionInfo   `json:"memory_injection,omitempty"`
 }
 
 // RetrySkippedItem holds data for a skipped retry.
@@ -3555,6 +3674,7 @@ func runRetryAssignments(ctx context.Context, session string) error {
 		return emitRetryFailure(session, "PROJECT_ERROR", fmt.Errorf("resolve bead project for atomic retry: %w", err))
 	}
 	multiWindow := tmux.PanesSpanMultipleWindows(panes)
+	promptContext := resolvePromptContextOptions(assignWithCASS, assignNoCASS, assignWithMemory, cfg)
 
 	// Pending atomic retries are already bound to a physical pane, and an
 	// explicit --to-pane selects one directly. Observe the whole idle pool only
@@ -3724,7 +3844,12 @@ func runRetryAssignments(ctx context.Context, session string) error {
 		prompt := expandPromptTemplate(failed.BeadID, beadTitle, assignTemplate, assignTemplateFile)
 		actor := newAgentName
 		idempotencyKey := ""
+		baseIntentSHA256 := ""
+		var cassInjection *robot.CASSInjectionInfo
+		var memoryInjection *robot.CMInjectionInfo
 		if recoverAtomic {
+			// Recovery replays the recorded (possibly enriched) prompt exactly;
+			// cass and cm are never queried again for a recorded intent.
 			newAgentName = failed.AgentName
 			actor = failed.ClaimActor
 			idempotencyKey = failed.IdempotencyKey
@@ -3735,6 +3860,9 @@ func runRetryAssignments(ctx context.Context, session string) error {
 				skippedItems = append(skippedItems, RetrySkippedItem{BeadID: failed.BeadID, Reason: err.Error()})
 				continue
 			}
+			prompt, baseIntentSHA256, cassInjection, memoryInjection = enrichAssignmentPrompt(ctx, promptContext, robot.AssignmentPrompt{
+				Prompt: prompt, Title: beadTitle, AgentType: targetAgentType, Session: session, ProjectDir: projectDir,
+			}, failed.BeadID, nil, assignTimeout)
 		}
 		reservationRequired := assignReserveFiles
 		reservationDiscovery := assignReserveFiles
@@ -3777,6 +3905,7 @@ func runRetryAssignments(ctx context.Context, session string) error {
 			Prompt:                    prompt,
 			IdempotencyKey:            idempotencyKey,
 			RecoveredIntentSHA256:     recoveredIntentSHA256,
+			BaseIntentSHA256:          baseIntentSHA256,
 			RequireReservation:        reservationRequired,
 			AllowReservationDiscovery: reservationDiscovery,
 			ReservationTTL:            time.Hour,
@@ -3816,6 +3945,8 @@ func runRetryAssignments(ctx context.Context, session string) error {
 			PreviousAgent:      failed.AgentName,
 			PreviousFailReason: failed.FailReason,
 			RetryCount:         failed.RetryCount + 1,
+			CASSInjection:      cassInjection,
+			MemoryInjection:    memoryInjection,
 		})
 	}
 
@@ -4595,6 +4726,13 @@ func runReassignment(ctx context.Context, session string) error {
 	if err != nil {
 		return emitReassignFailure(session, "STORE_ERROR", fmt.Sprintf("generate reassignment identity: %v", err), nil)
 	}
+	// The replacement generation is a fresh intent: the new agent starts the
+	// bead without its predecessor's context, so it gets the history too.
+	prompt, baseIntentSHA256, cassInjection, memoryInjection := enrichAssignmentPrompt(
+		ctx, resolvePromptContextOptions(assignWithCASS, assignNoCASS, assignWithMemory, cfg),
+		robot.AssignmentPrompt{Prompt: prompt, Title: beadTitle, AgentType: targetAgentType, Session: session, ProjectDir: projectDir},
+		beadID, nil, assignTimeout,
+	)
 
 	reservationRequired := currentAssignment.ReservationRequired || assignReserveFiles
 	reservationDiscovery := currentAssignment.ReservationDiscovery || assignReserveFiles
@@ -4629,6 +4767,7 @@ func runReassignment(ctx context.Context, session string) error {
 		Actor:                     currentAssignment.ClaimActor,
 		Prompt:                    prompt,
 		IdempotencyKey:            idempotencyKey,
+		BaseIntentSHA256:          baseIntentSHA256,
 		RequireReservation:        reservationRequired,
 		AllowReservationDiscovery: reservationDiscovery,
 		RequestedPaths:            requestedPaths,
@@ -4671,6 +4810,8 @@ func runReassignment(ctx context.Context, session string) error {
 		FileReservationsTransferred:  releasedReservationCount > 0 || len(atomicResult.Lease.Granted) > 0,
 		FileReservationsReleasedFrom: releasedReservationCount,
 		FileReservationsCreatedFor:   len(atomicResult.Lease.Granted),
+		CASSInjection:                cassInjection,
+		MemoryInjection:              memoryInjection,
 	}
 	if IsJSONOutput() {
 		return json.NewEncoder(os.Stdout).Encode(ReassignEnvelope{
@@ -5649,6 +5790,7 @@ func runDirectPaneAssignment(ctx context.Context, opts *AssignCommandOptions) er
 		DepsIgnored: opts.IgnoreDeps,
 	}
 
+	baseIntentSHA256 := ""
 	if !executeBeforePreflight {
 		if agentType == "user" || agentType == "unknown" {
 			err = fmt.Errorf("pane %s is not an agent pane (type: %s)", canonicalTarget, agentType)
@@ -5727,8 +5869,10 @@ func runDirectPaneAssignment(ctx context.Context, opts *AssignCommandOptions) er
 		// description before the claim, as assign --auto does (ntm#336): a
 		// bead that names no files is refused here, unclaimed. When the
 		// details cannot be read, the coordinator's discovery decides.
+		var liveDetails *bv.BeadAssignmentDetails
 		if opts.ReserveFiles {
 			if details, detailsErr := getBeadAssignmentDetailsForAssignment(ctx, projectDir, beadID); detailsErr == nil && details != nil {
+				liveDetails = details
 				paths, pathsErr := assign.ReservationPathsForAssignment(details.Title, details.Description)
 				if pathsErr != nil {
 					errMsg := fmt.Sprintf("not assigning %s: %v", beadID, pathsErr)
@@ -5739,6 +5883,18 @@ func runDirectPaneAssignment(ctx context.Context, opts *AssignCommandOptions) er
 				}
 				directRequestedPaths = paths
 			}
+		}
+
+		// Only a fresh intent is enriched. A same-intent re-run replays the
+		// recorded prompt through RecoveredIntentSHA256 below and never
+		// queries cass or cm again.
+		prompt, baseIntentSHA256, assignItem.CASSInjection, assignItem.MemoryInjection = enrichAssignmentPrompt(
+			ctx, resolvePromptContextOptions(opts.WithCASS, opts.NoCASS, opts.WithMemory, cfg),
+			robot.AssignmentPrompt{Prompt: prompt, Title: beadTitle, AgentType: agentType, Session: opts.Session, ProjectDir: projectDir},
+			beadID, liveDetails, opts.Timeout,
+		)
+		if !opts.Quiet && !IsJSONOutput() {
+			printAssignmentPromptContext(beadID, assignItem.CASSInjection, assignItem.MemoryInjection)
 		}
 	}
 
@@ -5753,6 +5909,7 @@ func runDirectPaneAssignment(ctx context.Context, opts *AssignCommandOptions) er
 		Actor:                     directAssignmentActor(opts.Session, targetPane.ID),
 		Prompt:                    prompt,
 		IdempotencyKey:            idempotencyKey,
+		BaseIntentSHA256:          baseIntentSHA256,
 		RequireReservation:        opts.ReserveFiles,
 		RequestedPaths:            directRequestedPaths,
 		AllowReservationDiscovery: opts.ReserveFiles,
@@ -5914,7 +6071,7 @@ func runDirectPaneAssignment(ctx context.Context, opts *AssignCommandOptions) er
 
 // getBeadBlockers returns the list of beads blocking the given bead
 func getBeadBlockers(ctx context.Context, projectDir, beadID string) ([]string, error) {
-	details, err := bv.GetBeadAssignmentDetailsContext(ctx, projectDir, beadID)
+	details, err := getBeadAssignmentDetailsForAssignment(ctx, projectDir, beadID)
 	if err != nil {
 		return nil, err
 	}
@@ -5923,7 +6080,7 @@ func getBeadBlockers(ctx context.Context, projectDir, beadID string) ([]string, 
 
 // getBeadTitle retrieves the title for a bead
 func getBeadTitle(ctx context.Context, projectDir, beadID string) (string, error) {
-	details, err := bv.GetBeadAssignmentDetailsContext(ctx, projectDir, beadID)
+	details, err := getBeadAssignmentDetailsForAssignment(ctx, projectDir, beadID)
 	if err != nil {
 		return "", err
 	}
@@ -5958,6 +6115,10 @@ type AutoReassignOptions struct {
 	// fails quietly-working agents (silent while an external subprocess runs)
 	// and then injects the next bead's prompt into them mid-task.
 	IdleThreshold time.Duration
+	// Prompt-context flags carried into every watch-mode assignment pass.
+	WithCASS   bool
+	NoCASS     bool
+	WithMemory bool
 
 	// policyProject records the exact authoritative project whose assignment
 	// policy was already installed during this command path.
@@ -6144,6 +6305,9 @@ func PerformAutoReassignment(ctx context.Context, completedBeadID string, opts *
 		Quiet:           opts.Quiet,
 		Timeout:         opts.Timeout,
 		ReserveFiles:    opts.ReserveFiles,
+		WithCASS:        opts.WithCASS,
+		NoCASS:          opts.NoCASS,
+		WithMemory:      opts.WithMemory,
 		policyProject:   opts.policyProject,
 	}
 
@@ -6525,6 +6689,9 @@ func NewWatchLoop(session string, store *assignment.AssignmentStore, opts *AutoR
 			Quiet:           opts.Quiet,
 			Timeout:         opts.Timeout,
 			ReserveFiles:    opts.ReserveFiles,
+			WithCASS:        opts.WithCASS,
+			NoCASS:          opts.NoCASS,
+			WithMemory:      opts.WithMemory,
 			policyProject:   opts.policyProject,
 		},
 		stopCh:                  make(chan struct{}),
