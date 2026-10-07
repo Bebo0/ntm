@@ -3210,12 +3210,69 @@ func DecodeJSON(data string, v interface{}) error {
 // Send Operations (idempotent robot actuations: send #245, interrupt)
 // =============================================================================
 
+// ErrSendOperationClaimLost means the caller no longer owns an operation in
+// the required phase. It must not actuate panes, discard another claim, or
+// report a receipt as saved after receiving this error.
+var ErrSendOperationClaimLost = errors.New("send operation claim is no longer owned in the required phase")
+
+const sendOperationSelectColumns = `
+	operation_id, session_name, kind, binding_hash, payload_sha256,
+	payload_bytes, status, COALESCE(outcome_json, ''), created_at, completed_at,
+	claim_token, dispatch_started_at, targets_json`
+
+type sendOperationScanner interface {
+	Scan(dest ...interface{}) error
+}
+
+func scanSendOperation(scanner sendOperationScanner) (*SendOperation, error) {
+	op := &SendOperation{}
+	var targetsJSON string
+	err := scanner.Scan(
+		&op.OperationID, &op.SessionName, &op.Kind, &op.BindingHash, &op.PayloadSHA256,
+		&op.PayloadBytes, &op.Status, &op.OutcomeJSON, &op.CreatedAt, &op.CompletedAt,
+		&op.ClaimToken, &op.DispatchStartedAt, &targetsJSON,
+	)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	if err := json.Unmarshal([]byte(targetsJSON), &op.Targets); err != nil {
+		return nil, fmt.Errorf("decode send operation targets: %w", err)
+	}
+	if op.Targets == nil {
+		op.Targets = []string{}
+	}
+	return op, nil
+}
+
+func newSendOperationClaimToken() (string, error) {
+	var token [32]byte
+	if _, err := rand.Read(token[:]); err != nil {
+		return "", fmt.Errorf("generate send operation claim token: %w", err)
+	}
+	return fmt.Sprintf("%x", token), nil
+}
+
+func sendOperationTargetsJSON(targets []string) (string, error) {
+	if targets == nil {
+		targets = []string{}
+	}
+	data, err := json.Marshal(targets)
+	if err != nil {
+		return "", fmt.Errorf("encode send operation targets: %w", err)
+	}
+	return string(data), nil
+}
+
 // ClaimSendOperation atomically claims a (session, operation ID) pair for
-// execution. The INSERT OR IGNORE makes the claim race-safe across
+// execution. INSERT ... ON CONFLICT makes the claim race-safe across
 // processes: exactly one caller creates the row (claimed=true) and every
 // other caller observes the existing row, whose kind and binding it must
 // validate before deciding between replay and conflict. An empty Kind claims
-// as OperationKindSend.
+// as OperationKindSend. RETURNING captures the winning claim itself instead
+// of a later row that another process may have changed or replaced.
 func (s *Store) ClaimSendOperation(op *SendOperation) (existing *SendOperation, claimed bool, err error) {
 	if op == nil || op.OperationID == "" {
 		return nil, false, fmt.Errorf("claim send operation: operation ID is required")
@@ -3227,101 +3284,150 @@ func (s *Store) ClaimSendOperation(op *SendOperation) (existing *SendOperation, 
 	if kind == "" {
 		kind = OperationKindSend
 	}
+	claimToken, err := newSendOperationClaimToken()
+	if err != nil {
+		return nil, false, err
+	}
+	targetsJSON, err := sendOperationTargetsJSON(op.Targets)
+	if err != nil {
+		return nil, false, err
+	}
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	createdAt := op.CreatedAt
+	createdAt := op.CreatedAt.UTC()
 	if createdAt.IsZero() {
 		createdAt = time.Now().UTC()
 	}
-	result, err := s.db.Exec(`
-		INSERT OR IGNORE INTO send_operations (
+	stored, err := scanSendOperation(s.db.QueryRow(`
+		INSERT INTO send_operations (
 			operation_id, session_name, kind, binding_hash, payload_sha256,
-			payload_bytes, status, outcome_json, created_at
-		) VALUES (?, ?, ?, ?, ?, ?, ?, '', ?)`,
+			payload_bytes, status, outcome_json, created_at, claim_token, targets_json
+		) VALUES (?, ?, ?, ?, ?, ?, ?, '', ?, ?, ?)
+		ON CONFLICT (operation_id, session_name) DO NOTHING
+		RETURNING `+sendOperationSelectColumns,
 		op.OperationID, op.SessionName, kind, op.BindingHash, op.PayloadSHA256,
-		op.PayloadBytes, SendOperationInProgress, createdAt,
-	)
+		op.PayloadBytes, SendOperationInProgress, createdAt, claimToken, targetsJSON,
+	))
 	if err != nil {
 		return nil, false, fmt.Errorf("claim send operation: %w", err)
 	}
-	rows, err := result.RowsAffected()
-	if err != nil {
-		return nil, false, fmt.Errorf("claim send operation: %w", err)
+	if stored != nil {
+		return stored, true, nil
 	}
 
-	stored, err := s.getSendOperationLocked(op.OperationID, op.SessionName)
+	// No row was inserted, so this is an observation, never execution
+	// authority. A subsequent takeover must compare its token atomically.
+	stored, err = s.getSendOperationLocked(op.OperationID, op.SessionName)
 	if err != nil {
 		return nil, false, err
 	}
 	if stored == nil {
 		return nil, false, fmt.Errorf("claim send operation: row vanished after claim")
 	}
-	return stored, rows > 0, nil
+	return stored, false, nil
 }
 
-// TakeOverStaleSendOperation re-claims an in_progress operation whose
-// original claimant is presumed dead (crashed before recording an outcome).
-// The takeover only succeeds when the row is still in_progress, carries the
-// same binding, and was claimed before staleBefore — so a live concurrent
-// sender inside the staleness window is never usurped. Returns whether the
-// takeover won.
-func (s *Store) TakeOverStaleSendOperation(operationID, sessionName, bindingHash string, staleBefore time.Time) (bool, error) {
-	if operationID == "" || sessionName == "" {
-		return false, fmt.Errorf("take over send operation: operation ID and session are required")
+// TakeOverStaleSendOperation reclaims only an observed, stale attempt that
+// has not crossed the durable dispatch boundary. Age alone never proves
+// that no input was delivered. A fresh token fences the previous claimant;
+// the atomic returned row is the successor's authority. Nil means no claim
+// matched, including when another contender already won.
+func (s *Store) TakeOverStaleSendOperation(operationID, sessionName, bindingHash, expectedClaimToken string, staleBefore time.Time) (*SendOperation, error) {
+	if operationID == "" || sessionName == "" || expectedClaimToken == "" {
+		return nil, fmt.Errorf("take over send operation: operation ID, session, and observed claim token are required")
+	}
+	claimToken, err := newSendOperationClaimToken()
+	if err != nil {
+		return nil, err
 	}
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	result, err := s.db.Exec(`
+	stored, err := scanSendOperation(s.db.QueryRow(`
 		UPDATE send_operations
-		SET created_at = ?
+		SET created_at = ?, claim_token = ?
 		WHERE operation_id = ? AND session_name = ? AND binding_hash = ?
-			AND status = ? AND created_at < ?`,
-		time.Now().UTC(), operationID, sessionName, bindingHash,
-		SendOperationInProgress, staleBefore.UTC(),
-	)
+			AND claim_token = ? AND status = ? AND created_at < ?
+			AND dispatch_started_at IS NULL
+		RETURNING `+sendOperationSelectColumns,
+		time.Now().UTC(), claimToken, operationID, sessionName, bindingHash,
+		expectedClaimToken, SendOperationInProgress, staleBefore.UTC(),
+	))
 	if err != nil {
-		return false, fmt.Errorf("take over send operation: %w", err)
+		return nil, fmt.Errorf("take over send operation: %w", err)
 	}
-	rows, err := result.RowsAffected()
-	if err != nil {
-		return false, fmt.Errorf("take over send operation: %w", err)
-	}
-	return rows > 0, nil
+	return stored, nil
 }
 
-// ReleaseSendOperation deletes a still-in_progress claim. Used when the
-// operation failed BEFORE any delivery was attempted (preflight errors), so
-// a later retry with the same operation ID gets a fresh attempt instead of
-// replaying a transient failure forever. Completed rows are never released.
-func (s *Store) ReleaseSendOperation(operationID, sessionName string) error {
-	if operationID == "" || sessionName == "" {
-		return fmt.Errorf("release send operation: operation ID and session are required")
+// StartSendOperation freezes the exact prepared payload digest and targets
+// and records the dispatch boundary before the caller mutates any pane.
+// An attempt may start only once. Any later retry must reconcile the durable
+// result instead of repeating a possibly delivered actuation.
+func (s *Store) StartSendOperation(op *SendOperation) (*SendOperation, error) {
+	if op == nil || op.OperationID == "" || op.SessionName == "" || op.ClaimToken == "" {
+		return nil, fmt.Errorf("start send operation: operation ID, session, and claim token are required")
+	}
+	targetsJSON, err := sendOperationTargetsJSON(op.Targets)
+	if err != nil {
+		return nil, err
 	}
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	_, err := s.db.Exec(`
+	stored, err := scanSendOperation(s.db.QueryRow(`
+		UPDATE send_operations
+		SET dispatch_started_at = ?, payload_sha256 = ?, payload_bytes = ?, targets_json = ?
+		WHERE operation_id = ? AND session_name = ? AND claim_token = ?
+			AND status = ? AND dispatch_started_at IS NULL
+		RETURNING `+sendOperationSelectColumns,
+		time.Now().UTC(), op.PayloadSHA256, op.PayloadBytes, targetsJSON,
+		op.OperationID, op.SessionName, op.ClaimToken, SendOperationInProgress,
+	))
+	if err != nil {
+		return nil, fmt.Errorf("start send operation: %w", err)
+	}
+	if stored == nil {
+		return nil, fmt.Errorf("start send operation: %w", ErrSendOperationClaimLost)
+	}
+	return stored, nil
+}
+
+// ReleaseSendOperation relinquishes the caller's unstarted claim after a
+// preflight failure, leaving the ID retryable. Started claims and receipts
+// must remain durable; an old claimant cannot release a successor's row.
+func (s *Store) ReleaseSendOperation(operationID, sessionName, claimToken string) error {
+	if operationID == "" || sessionName == "" || claimToken == "" {
+		return fmt.Errorf("release send operation: operation ID, session, and claim token are required")
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	affected, err := execRowsAffected(s.db, `
 		DELETE FROM send_operations
-		WHERE operation_id = ? AND session_name = ? AND status = ?`,
-		operationID, sessionName, SendOperationInProgress,
+		WHERE operation_id = ? AND session_name = ? AND claim_token = ?
+			AND status = ? AND dispatch_started_at IS NULL`,
+		"release send operation", operationID, sessionName, claimToken, SendOperationInProgress,
 	)
 	if err != nil {
-		return fmt.Errorf("release send operation: %w", err)
+		return err
+	}
+	if affected != 1 {
+		return fmt.Errorf("release send operation: %w", ErrSendOperationClaimLost)
 	}
 	return nil
 }
 
 // CompleteSendOperation records the outcome of a claimed operation. The
 // outcome JSON is the durable receipt returned verbatim on replays and by
-// receipt queries.
-func (s *Store) CompleteSendOperation(operationID, sessionName, outcomeJSON string, completedAt time.Time) error {
-	if operationID == "" || sessionName == "" {
-		return fmt.Errorf("complete send operation: operation ID and session are required")
+// receipt queries. Failed ownership is an error, never a false success.
+func (s *Store) CompleteSendOperation(operationID, sessionName, claimToken, outcomeJSON string, completedAt time.Time) error {
+	if operationID == "" || sessionName == "" || claimToken == "" {
+		return fmt.Errorf("complete send operation: operation ID, session, and claim token are required")
 	}
 	if completedAt.IsZero() {
 		completedAt = time.Now().UTC()
@@ -3330,15 +3436,19 @@ func (s *Store) CompleteSendOperation(operationID, sessionName, outcomeJSON stri
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	_, err := s.db.Exec(`
+	affected, err := execRowsAffected(s.db, `
 		UPDATE send_operations
 		SET status = ?, outcome_json = ?, completed_at = ?
-		WHERE operation_id = ? AND session_name = ? AND status = ?`,
+		WHERE operation_id = ? AND session_name = ? AND claim_token = ? AND status = ?`,
+		"complete send operation",
 		SendOperationCompleted, outcomeJSON, completedAt.UTC(),
-		operationID, sessionName, SendOperationInProgress,
+		operationID, sessionName, claimToken, SendOperationInProgress,
 	)
 	if err != nil {
-		return fmt.Errorf("complete send operation: %w", err)
+		return err
+	}
+	if affected != 1 {
+		return fmt.Errorf("complete send operation: %w", ErrSendOperationClaimLost)
 	}
 	return nil
 }
@@ -3358,9 +3468,7 @@ func (s *Store) GetSendOperationsByID(operationID string) ([]SendOperation, erro
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
-	rows, err := s.db.Query(`
-		SELECT operation_id, session_name, kind, binding_hash, payload_sha256,
-			payload_bytes, status, COALESCE(outcome_json, ''), created_at, completed_at
+	rows, err := s.db.Query(`SELECT `+sendOperationSelectColumns+`
 		FROM send_operations WHERE operation_id = ?
 		ORDER BY created_at DESC`,
 		operationID,
@@ -3372,14 +3480,11 @@ func (s *Store) GetSendOperationsByID(operationID string) ([]SendOperation, erro
 
 	var ops []SendOperation
 	for rows.Next() {
-		var op SendOperation
-		if err := rows.Scan(
-			&op.OperationID, &op.SessionName, &op.Kind, &op.BindingHash, &op.PayloadSHA256,
-			&op.PayloadBytes, &op.Status, &op.OutcomeJSON, &op.CreatedAt, &op.CompletedAt,
-		); err != nil {
+		op, err := scanSendOperation(rows)
+		if err != nil {
 			return nil, fmt.Errorf("scan send operation: %w", err)
 		}
-		ops = append(ops, op)
+		ops = append(ops, *op)
 	}
 	return ops, rows.Err()
 }
@@ -3401,19 +3506,10 @@ func (s *Store) GCCompletedSendOperations(retention time.Duration) (int64, error
 }
 
 func (s *Store) getSendOperationLocked(operationID, sessionName string) (*SendOperation, error) {
-	op := &SendOperation{}
-	err := s.db.QueryRow(`
-		SELECT operation_id, session_name, kind, binding_hash, payload_sha256,
-			payload_bytes, status, COALESCE(outcome_json, ''), created_at, completed_at
+	op, err := scanSendOperation(s.db.QueryRow(`SELECT `+sendOperationSelectColumns+`
 		FROM send_operations WHERE operation_id = ? AND session_name = ?`,
 		operationID, sessionName,
-	).Scan(
-		&op.OperationID, &op.SessionName, &op.Kind, &op.BindingHash, &op.PayloadSHA256,
-		&op.PayloadBytes, &op.Status, &op.OutcomeJSON, &op.CreatedAt, &op.CompletedAt,
-	)
-	if err == sql.ErrNoRows {
-		return nil, nil
-	}
+	))
 	if err != nil {
 		return nil, fmt.Errorf("get send operation: %w", err)
 	}

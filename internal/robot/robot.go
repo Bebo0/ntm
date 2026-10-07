@@ -7278,10 +7278,11 @@ func GetSend(opts SendOptions) (*SendOutput, error) {
 	// caller's canonical selector spec plus input-message digest; the
 	// receipt's payload digest records the exact bytes about to be delivered
 	// (post CASS injection). Identical retries replay the recorded outcome;
-	// conflicting reuse is rejected; a claim abandoned by a crashed process
-	// is taken over after a staleness window; preflight failures release the
-	// claim so the ID stays retryable.
+	// conflicting reuse is rejected; only a stale claim with durable proof
+	// that dispatch never started may be taken over. Preflight failures
+	// release the claim so the ID stays retryable.
 	dispatchAttempted := false
+	var owned *durableOperation
 	if trace.IdempotencyKey != "" && !opts.DryRun {
 		claim := claimRobotOperation(operationClaimRequest{
 			Kind:        state.OperationKindSend,
@@ -7304,7 +7305,7 @@ func GetSend(opts SendOptions) (*SendOutput, error) {
 			output.AgentHints = generateSendHints(output)
 			return finalizeTerminalSendActuation(trace, opts, &output), nil
 		}
-		owned := claim.Owned
+		owned = claim.Owned
 		defer func() {
 			// After a dispatch attempt the outcome is terminal: record it so
 			// the receipt survives caller timeouts. Before any dispatch
@@ -7360,6 +7361,20 @@ func GetSend(opts SendOptions) (*SendOutput, error) {
 		output.WouldSendTo = append(output.WouldSendTo, output.Targets...)
 		output.Success = result.Success
 		return &output, nil
+	}
+
+	if owned != nil {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		// The redactor memoizes the exact final message shared by all
+		// prepared targets. Persist its digest after redaction, together
+		// with the ownership-fenced dispatch boundary, before any input.
+		if err := owned.start(finalRedactor.result.Message, output.Targets); err != nil {
+			output.RobotResponse = operationStartErrorResponse(err)
+			return finalizeTerminalSendActuation(trace, opts, &output), nil
+		}
+		output.Operation = operationInfoFromRecord(owned.record, false)
 	}
 
 	publishSendActuationRequest(trace, opts, output.Targets, output.MessagePreview)

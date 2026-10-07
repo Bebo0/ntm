@@ -168,14 +168,17 @@ and interrupt endpoints take the same ID as the `Idempotency-Key` header.
 
 | Property | Behavior |
 |----------|----------|
-| Claim point | The ID is claimed durably (runtime state DB, `send_operations`) after preflight validation and **before any pane is touched** — before the first keystroke (send) or the first Ctrl+C (interrupt). Dry runs never claim. |
+| Claim point | The ID is claimed durably (runtime state DB, `send_operations`) before any pane is touched. After preparation, a second atomic write records `operation.dispatch_started_at`, the final redacted payload digest, and the selected targets before the first keystroke or interrupt key. Both writes must succeed. Dry runs never claim. |
 | Scope | One namespace per session, shared across actuation kinds: the same ID may be used in two sessions independently, but not for a send and an interrupt in one session. |
 | Binding | The ID is bound to the actuation kind plus the caller's command spec. Send: session, `--pane/--panes/--type/--exclude/--all`, `--enter`, `--clear-input`, `--with-cass`/`--with-memory` toggles, input-message digest. Interrupt: session, `--panes`, `--type` (aliases canonicalized), `--all`, `--force`, input-message digest. Selector lists are order-insensitive; interrupt wait behavior (`--no-wait`, `--timeout`) is not bound, so a retry may lengthen the timeout. |
 | Identical retry of a completed operation | Replays the recorded outcome (`operation.replayed: true`) without sending or interrupting again. A replayed failure carries a hint to use a new ID. |
 | Conflicting reuse | `IDEMPOTENCY_CONFLICT` (REST 409); nothing is touched. |
-| Retry while the first attempt is still running | `OPERATION_IN_PROGRESS` (REST 409) with per-target admissions `unknown`; reconcile with the receipt. A claim abandoned by a crashed process is taken over after 10 minutes. |
-| Preflight failure after the claim (send) | The claim is released, so the ID stays retryable. Once an interrupt passes its claim every step may touch a pane, so its outcome is always recorded. |
-| Receipt | `--robot-send-receipt=<ID>` returns `operation` (with `kind`) plus `outcome` (send) or `interrupt_outcome` (interrupt). Receipts keep payload digests and states only — never message bytes or pane output — and are pruned 7 days after completion. |
+| Retry while the first attempt is still running | `OPERATION_IN_PROGRESS` (REST 409) with the recorded targets' admissions `unknown`; reconcile with the receipt. |
+| Recovery before dispatch | After 10 minutes, a claim with no dispatch marker can be recovered. Takeover replaces its ownership token, so a paused original caller cannot deliver input, release the replacement claim, or overwrite its receipt. |
+| Recovery after dispatch may have started | A stale started operation returns `OPERATION_OUTCOME_UNKNOWN` (REST 409). Age never authorizes redelivery: the prior input may already have arrived, or the original caller may still be running. Inspect the receipt and the original panes; use a new operation ID only after deciding another delivery is needed. A late completion from the original owner can still settle the receipt. |
+| Preflight or dispatch-boundary persistence failure | No input is sent. An unstarted claim is released so the ID remains retryable. After the durable dispatch boundary, the claim is retained until its owner records a terminal outcome. |
+| Receipt | `--robot-send-receipt=<ID>` returns `operation` (with `kind`, original target admissions, and `dispatch_started_at` when applicable) plus `outcome` (send) or `interrupt_outcome` (interrupt). HTTP actuation errors preserve the same receipt under `details.operation`. Receipts expose payload digests and states, not message bytes or pane output, and completed records are pruned after 7 days. Unresolved started records are retained. |
+| Upgrade with an unfinished legacy operation | Preexisting in-progress records are treated as possibly started because their delivery history cannot be reconstructed. They require reconciliation instead of automatic takeover. Completed receipts remain replayable. |
 | No state store | Supplying an ID without the runtime state store fails closed with `NOT_IMPLEMENTED` before anything is touched. |
 
 ```bash

@@ -703,13 +703,20 @@ type SendOperation struct {
 
 	// Binding — BindingHash covers canonical targets + payload digest so a
 	// conflicting reuse of the same operation ID is detectable.
-	BindingHash   string `json:"binding_hash"`
-	PayloadSHA256 string `json:"payload_sha256"`
-	PayloadBytes  int64  `json:"payload_bytes"`
+	BindingHash   string   `json:"binding_hash"`
+	PayloadSHA256 string   `json:"payload_sha256"`
+	PayloadBytes  int64    `json:"payload_bytes"`
+	Targets       []string `json:"targets"`
+
+	// ClaimToken fences each execution attempt. It is replaced on takeover
+	// and never exposed in public receipts. A stale claimant cannot start,
+	// release, or complete a successor's operation.
+	ClaimToken string `json:"-"`
 
 	// Lifecycle
-	Status      string     `json:"status"` // in_progress | completed
-	OutcomeJSON string     `json:"outcome_json,omitempty"`
-	CreatedAt   time.Time  `json:"created_at"`
-	CompletedAt *time.Time `json:"completed_at,omitempty"`
+	Status            string     `json:"status"` // in_progress | completed
+	OutcomeJSON       string     `json:"outcome_json,omitempty"`
+	CreatedAt         time.Time  `json:"created_at"`
+	DispatchStartedAt *time.Time `json:"dispatch_started_at,omitempty"`
+	CompletedAt       *time.Time `json:"completed_at,omitempty"`
 }

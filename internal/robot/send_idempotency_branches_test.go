@@ -248,7 +248,7 @@ func seedCompletedSendOperation(t *testing.T, store *state.Store, opID, session,
 	t.Helper()
 
 	payloadSHA, payloadBytes := operationPayloadDigest("seeded payload")
-	_, claimed, err := store.ClaimSendOperation(&state.SendOperation{
+	claim, claimed, err := store.ClaimSendOperation(&state.SendOperation{
 		OperationID:   opID,
 		SessionName:   session,
 		BindingHash:   bindingHash,
@@ -265,7 +265,7 @@ func seedCompletedSendOperation(t *testing.T, store *state.Store, opID, session,
 	if err != nil {
 		t.Fatalf("marshal seeded outcome: %v", err)
 	}
-	if err := store.CompleteSendOperation(opID, session, string(data), time.Now().UTC()); err != nil {
+	if err := store.CompleteSendOperation(opID, session, claim.ClaimToken, string(data), time.Now().UTC()); err != nil {
 		t.Fatalf("seed CompleteSendOperation: %v", err)
 	}
 	row := mustGetSendOperation(t, store, opID, session)
@@ -481,6 +481,7 @@ func TestGetSendIdempotency_FreshInProgressClaimReportsInProgress(t *testing.T) 
 		BindingHash:   sendOperationBindingHash(opts),
 		PayloadSHA256: payloadSHA,
 		PayloadBytes:  payloadBytes,
+		Targets:       []string{targetKey},
 	})
 	if err != nil || !claimed {
 		t.Fatalf("seed fresh claim: claimed=%v err=%v", claimed, err)

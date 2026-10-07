@@ -1,10 +1,22 @@
 package robot
 
 import (
+	"bytes"
+	"context"
+	"crypto/sha256"
 	"encoding/json"
+	"fmt"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"runtime"
+	"slices"
+	"strconv"
+	"strings"
 	"testing"
 	"time"
 
+	"github.com/Dicklesworthstone/ntm/internal/redaction"
 	"github.com/Dicklesworthstone/ntm/internal/state"
 )
 
@@ -199,5 +211,299 @@ func TestUnknownAdmissions(t *testing.T) {
 	admissions := unknownAdmissions([]string{"a", "b"})
 	if len(admissions) != 2 || admissions[0].State != AdmissionUnknown || admissions[1].State != AdmissionUnknown {
 		t.Errorf("unknown admissions = %+v", admissions)
+	}
+}
+
+// Exercise both public actuation engines against real SQLite and a recording
+// tmux executable. The transport records actual input commands, so a refusal
+// envelope cannot hide duplicate keystrokes. These tests run under -short and
+// need neither a live tmux server nor an agent installation.
+func TestOperationCrashRecoveryTransport(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("recording tmux transport requires a POSIX shell")
+	}
+	for _, kind := range []string{state.OperationKindSend, state.OperationKindInterrupt} {
+		for _, scenario := range []string{"stale-started", "fresh-started", "stale-unstarted", "start-failure", "completion-failure"} {
+			t.Run(kind+"/"+scenario, func(t *testing.T) {
+				root := t.TempDir()
+				const transport = `#!/bin/sh
+set -eu
+printf '%s\n' "$*" >> "$NTM_OPERATION_TEST_ROOT/calls"
+case "$1" in
+  -V) printf 'tmux 3.4\n' ;;
+  has-session) ;;
+  list-panes)
+    activity=
+    case "$*" in *'#{window_activity}'*) activity=0_NTM_SEP_ ;; esac
+    printf '%s_NTM_SEP_%s_NTM_SEP_proj__aider_1_NTM_SEP_aider_NTM_SEP_120_NTM_SEP_40_NTM_SEP_1_NTM_SEP_%s%s_NTM_SEP_0_NTM_SEP_aider_NTM_SEP__NTM_SEP__NTM_SEP_0\n' "$NTM_OPERATION_PANE_ID" "$NTM_OPERATION_PANE_INDEX" "$activity" "$NTM_OPERATION_TEST_PID"
+    ;;
+  display-message) printf '%s\n' "$NTM_OPERATION_TEST_ROOT" ;;
+  capture-pane) printf 'Ready for work\n' ;;
+  load-buffer)
+    printf '%s\n' "$*" >> "$NTM_OPERATION_TEST_ROOT/mutations"
+    cat >> "$NTM_OPERATION_TEST_ROOT/payload"
+    ;;
+  paste-buffer)
+    printf '%s\n' "$*" >> "$NTM_OPERATION_TEST_ROOT/mutations"
+    ;;
+  send-keys)
+    printf '%s\n' "$*" >> "$NTM_OPERATION_TEST_ROOT/mutations"
+    literal=0
+    for argument do
+      if [ "$argument" = -l ]; then literal=1; fi
+    done
+    if [ "$literal" = 1 ]; then
+      printf '%s' "$argument" >> "$NTM_OPERATION_TEST_ROOT/payload"
+    fi
+    ;;
+  delete-buffer) ;;
+  *) printf 'unexpected tmux command: %s\n' "$*" >&2; exit 21 ;;
+esac
+`
+				binary := filepath.Join(root, "tmux")
+				if err := os.WriteFile(binary, []byte(transport), 0o700); err != nil {
+					t.Fatal(err)
+				}
+				ctx, cancel := context.WithTimeout(t.Context(), 20*time.Second)
+				defer cancel()
+				cmd := exec.CommandContext(ctx, os.Args[0], "-test.run=^TestOperationCrashRecoveryTransportHelper$", "-test.short", "-test.v")
+				cmd.Env = append(os.Environ(),
+					"NTM_TEST_TMUX_ENV_OWNED=1", "NTM_TMUX_BINARY="+binary,
+					"NTM_OPERATION_TEST_ROOT="+root, "NTM_OPERATION_TEST_KIND="+kind,
+					"NTM_OPERATION_TEST_SCENARIO="+scenario,
+				)
+				if output, err := cmd.CombinedOutput(); err != nil {
+					t.Fatalf("operation transport regression: %v\n%s", err, output)
+				}
+			})
+		}
+	}
+}
+
+func TestOperationCrashRecoveryTransportHelper(t *testing.T) {
+	root := os.Getenv("NTM_OPERATION_TEST_ROOT")
+	if root == "" {
+		return
+	}
+	kind := os.Getenv("NTM_OPERATION_TEST_KIND")
+	scenario := os.Getenv("NTM_OPERATION_TEST_SCENARIO")
+	t.Chdir(root)
+	t.Setenv("NTM_CONFIG", filepath.Join(root, "config.toml"))
+	t.Setenv("NTM_OPERATION_TEST_PID", strconv.Itoa(os.Getpid()))
+	t.Setenv("NTM_OPERATION_PANE_ID", "%7")
+	t.Setenv("NTM_OPERATION_PANE_INDEX", "1")
+	installIdempotencyBranchFeed(t)
+	store := installIdempotencyBranchStore(t)
+	const operationID = "crash-recovery-operation"
+	const session = "proj"
+	const message = "prefix password=hunter2hunter2 suffix"
+	redactionConfig := redaction.Config{Mode: redaction.ModeRedact}
+	sendOptions := SendOptions{
+		Session: session, All: true, Message: message,
+		IdempotencyKey: operationID, Redaction: redactionConfig,
+	}
+	interruptOptions := InterruptOptions{
+		Session: session, All: true, Force: true, NoWait: true,
+		Message: message, IdempotencyKey: operationID, Redaction: redactionConfig,
+		TimeoutMs: 10000, PollMs: 300,
+	}
+
+	type actuationResult struct {
+		response  RobotResponse
+		operation *OperationInfo
+		warnings  []string
+	}
+	invoke := func() actuationResult {
+		t.Helper()
+		switch kind {
+		case state.OperationKindSend:
+			output, err := GetSend(sendOptions)
+			if err != nil || output == nil {
+				t.Fatalf("GetSend returned (%+v, %v)", output, err)
+			}
+			return actuationResult{output.RobotResponse, output.Operation, output.Warnings}
+		case state.OperationKindInterrupt:
+			output, err := GetInterrupt(interruptOptions)
+			if err != nil || output == nil {
+				t.Fatalf("GetInterrupt returned (%+v, %v)", output, err)
+			}
+			return actuationResult{output.RobotResponse, output.Operation, output.Warnings}
+		default:
+			t.Fatalf("unknown actuation kind %q", kind)
+			return actuationResult{}
+		}
+	}
+	readLog := func(name string) []byte {
+		t.Helper()
+		data, err := os.ReadFile(filepath.Join(root, name))
+		if os.IsNotExist(err) {
+			return nil
+		}
+		if err != nil {
+			t.Fatalf("read transport %s: %v", name, err)
+		}
+		return data
+	}
+	execSQL := func(statement string, args ...any) {
+		t.Helper()
+		if _, err := store.DB().Exec(statement, args...); err != nil {
+			t.Fatalf("prepare durable crash fixture: %v", err)
+		}
+	}
+	readOperation := func() *state.SendOperation {
+		t.Helper()
+		op, err := store.GetSendOperation(operationID, session)
+		if err != nil || op == nil {
+			t.Fatalf("read operation: (%+v, %v)", op, err)
+		}
+		return op
+	}
+	assertMetadata := func(info *OperationInfo, original *state.SendOperation, admission string) {
+		t.Helper()
+		if info == nil || info.OperationID != operationID || info.Kind != kind ||
+			info.Status != original.Status || info.PayloadSHA256 != original.PayloadSHA256 ||
+			info.PayloadBytes != original.PayloadBytes || info.DispatchStartedAt == nil ||
+			original.DispatchStartedAt == nil || !info.DispatchStartedAt.Equal(*original.DispatchStartedAt) {
+			t.Fatalf("operation metadata = %+v, want frozen record %+v", info, original)
+		}
+		if len(info.Admissions) != len(original.Targets) {
+			t.Fatalf("admissions = %+v, want original targets %v", info.Admissions, original.Targets)
+		}
+		for i, target := range original.Targets {
+			if info.Admissions[i].Target != target || info.Admissions[i].State != admission {
+				t.Fatalf("admission[%d] = %+v, want original target %s state %s", i, info.Admissions[i], target, admission)
+			}
+		}
+	}
+	assertDelivered := func(result actuationResult, status string) *state.SendOperation {
+		t.Helper()
+		if !result.response.Success {
+			t.Fatalf("initial actuation failed: %+v, warnings=%v, calls=%s", result.response, result.warnings, readLog("calls"))
+		}
+		mutations, payload := readLog("mutations"), readLog("payload")
+		if len(mutations) == 0 || len(payload) == 0 {
+			t.Fatalf("actuation did not reach tmux: mutations=%q payload=%q", mutations, payload)
+		}
+		if kind == state.OperationKindInterrupt && !bytes.Contains(mutations, []byte("C-c")) {
+			t.Fatalf("interrupt did not deliver its control key: %q", mutations)
+		}
+		if bytes.Contains(payload, []byte("hunter2hunter2")) {
+			t.Fatalf("recording transport received the unredacted payload: %q", payload)
+		}
+		op := readOperation()
+		if op.Status != status || op.DispatchStartedAt == nil || op.ClaimToken == "" || !slices.Equal(op.Targets, []string{"1"}) {
+			t.Fatalf("delivered operation lost its boundary or targets: %+v", op)
+		}
+		if op.PayloadSHA256 != fmt.Sprintf("%x", sha256.Sum256(payload)) || op.PayloadBytes != int64(len(payload)) {
+			t.Fatalf("receipt digest does not describe actual transport payload %q: %+v", payload, op)
+		}
+		admission := AdmissionSubmitted
+		if status == state.SendOperationInProgress {
+			admission = AdmissionUnknown
+		}
+		assertMetadata(result.operation, op, admission)
+		return op
+	}
+	assertRefusedWithoutInput := func(original *state.SendOperation, code string, mutations []byte) {
+		t.Helper()
+		for attempt := 0; attempt < 2; attempt++ {
+			result := invoke()
+			if result.response.Success || result.response.ErrorCode != code {
+				t.Fatalf("retry %d = %+v, want %s", attempt, result.response, code)
+			}
+			if code == ErrCodeOperationOutcomeUnknown && !strings.Contains(result.response.Hint, "--robot-send-receipt="+operationID) {
+				t.Fatalf("unknown outcome has no reconciliation hint: %+v", result.response)
+			}
+			if current := readLog("mutations"); !bytes.Equal(current, mutations) {
+				t.Fatalf("retry %d repeated pane input: before=%q after=%q", attempt, mutations, current)
+			}
+			assertMetadata(result.operation, original, AdmissionUnknown)
+			stored := readOperation()
+			if stored.Status != state.SendOperationInProgress || stored.ClaimToken != original.ClaimToken ||
+				stored.PayloadSHA256 != original.PayloadSHA256 || stored.PayloadBytes != original.PayloadBytes ||
+				!stored.CreatedAt.Equal(original.CreatedAt) || !slices.Equal(stored.Targets, original.Targets) ||
+				stored.DispatchStartedAt == nil || !stored.DispatchStartedAt.Equal(*original.DispatchStartedAt) || stored.OutcomeJSON != "" {
+				t.Fatalf("retry changed the original crash evidence: got %+v, original %+v", stored, original)
+			}
+			receipt, err := GetSendReceipt(operationID)
+			if err != nil || receipt == nil || !receipt.Success || receipt.Outcome != nil || receipt.InterruptOutcome != nil {
+				t.Fatalf("unknown receipt = (%+v, %v), want pending evidence without invented outcome", receipt, err)
+			}
+			assertMetadata(receipt.Operation, original, AdmissionUnknown)
+		}
+	}
+
+	switch scenario {
+	case "stale-started", "fresh-started":
+		assertDelivered(invoke(), state.SendOperationCompleted)
+		mutations := readLog("mutations")
+		createdAt := time.Now().UTC()
+		code := ErrCodeOperationInProgress
+		if scenario == "stale-started" {
+			createdAt = createdAt.Add(-2 * operationStaleClaimWindow)
+			code = ErrCodeOperationOutcomeUnknown
+		}
+		// Model a caller dying after transport accepted input but before its
+		// completion persisted. Keep the original dispatch marker and payload.
+		execSQL(`UPDATE send_operations SET status = ?, outcome_json = '', completed_at = NULL, created_at = ? WHERE operation_id = ? AND session_name = ?`,
+			state.SendOperationInProgress, createdAt, operationID, session)
+		original := readOperation()
+		// The same --all selector now resolves to a replacement pane. The
+		// refusal and receipt must still describe the original target.
+		t.Setenv("NTM_OPERATION_PANE_ID", "%8")
+		t.Setenv("NTM_OPERATION_PANE_INDEX", "2")
+		assertRefusedWithoutInput(original, code, mutations)
+	case "stale-unstarted":
+		binding := sendOperationBindingHash(sendOptions)
+		if kind == state.OperationKindInterrupt {
+			binding = interruptOperationBindingHash(interruptOptions)
+		}
+		original, claimed, err := store.ClaimSendOperation(&state.SendOperation{
+			OperationID: operationID, SessionName: session, Kind: kind, BindingHash: binding,
+			PayloadSHA256: "preflight-digest", PayloadBytes: 123, Targets: []string{"previous-topology"},
+			CreatedAt: time.Now().UTC().Add(-2 * operationStaleClaimWindow),
+		})
+		if err != nil || !claimed {
+			t.Fatalf("seed unstarted claim: claimed=%t err=%v", claimed, err)
+		}
+		completed := assertDelivered(invoke(), state.SendOperationCompleted)
+		if completed.ClaimToken == original.ClaimToken || !completed.CreatedAt.After(original.CreatedAt) {
+			t.Fatalf("unstarted recovery did not fence the old owner: original=%+v completed=%+v", original, completed)
+		}
+		mutations := readLog("mutations")
+		replayed := invoke()
+		if !replayed.response.Success || replayed.operation == nil || !replayed.operation.Replayed || !bytes.Equal(readLog("mutations"), mutations) {
+			t.Fatalf("completed recovered operation did not replay without input: %+v", replayed)
+		}
+		assertMetadata(replayed.operation, completed, AdmissionSubmitted)
+	case "start-failure":
+		execSQL(`CREATE TRIGGER fail_operation_start BEFORE UPDATE OF dispatch_started_at ON send_operations WHEN NEW.dispatch_started_at IS NOT NULL BEGIN SELECT RAISE(ABORT, 'injected dispatch boundary failure'); END`)
+		result := invoke()
+		if result.response.Success || result.response.ErrorCode != ErrCodeInternalError ||
+			!strings.Contains(result.response.Error, "injected dispatch boundary failure") || len(readLog("mutations")) != 0 {
+			t.Fatalf("failed start boundary permitted input: response=%+v mutations=%q", result.response, readLog("mutations"))
+		}
+		if op, err := store.GetSendOperation(operationID, session); err != nil || op != nil {
+			t.Fatalf("failed start did not release its unstarted claim: (%+v, %v)", op, err)
+		}
+		execSQL(`DROP TRIGGER fail_operation_start`)
+		assertDelivered(invoke(), state.SendOperationCompleted)
+	case "completion-failure":
+		execSQL(`CREATE TRIGGER fail_operation_completion BEFORE UPDATE OF status ON send_operations WHEN NEW.status = 'completed' BEGIN SELECT RAISE(ABORT, 'injected receipt persistence failure'); END`)
+		result := invoke()
+		assertDelivered(result, state.SendOperationInProgress)
+		if len(result.warnings) == 0 || !strings.Contains(strings.Join(result.warnings, " "), "outcome not recorded") {
+			t.Fatalf("lost completion did not report its persistence warning: %+v", result)
+		}
+		mutations := readLog("mutations")
+		execSQL(`DROP TRIGGER fail_operation_completion`)
+		execSQL(`UPDATE send_operations SET created_at = ? WHERE operation_id = ? AND session_name = ?`,
+			time.Now().UTC().Add(-2*operationStaleClaimWindow), operationID, session)
+		original := readOperation()
+		t.Setenv("NTM_OPERATION_PANE_ID", "%8")
+		t.Setenv("NTM_OPERATION_PANE_INDEX", "2")
+		assertRefusedWithoutInput(original, ErrCodeOperationOutcomeUnknown, mutations)
+	default:
+		t.Fatalf("unknown crash scenario %q", scenario)
 	}
 }

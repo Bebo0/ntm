@@ -17,7 +17,9 @@
 //   - A retry that races a live concurrent claimant observes the operation
 //     in progress (OPERATION_IN_PROGRESS) and is told to reconcile via
 //     --robot-send-receipt; a claim abandoned by a crashed process is taken
-//     over after a staleness window.
+//     over after a staleness window only if it never crossed the durable
+//     dispatch boundary. Once input may have been delivered, an unknown
+//     outcome requires reconciliation, never implicit redelivery.
 //   - An actuation that terminates before mutating anything releases its
 //     claim so the ID stays retryable; once a mutation was attempted, the
 //     outcome is recorded as terminal.
@@ -31,6 +33,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"hash"
 	"sort"
@@ -68,13 +71,15 @@ const ErrCodeIdempotencyConflict = "IDEMPOTENCY_CONFLICT"
 // outcome is not yet recorded (concurrent caller, or a crash mid-actuation).
 const ErrCodeOperationInProgress = "OPERATION_IN_PROGRESS"
 
+// ErrCodeOperationOutcomeUnknown means dispatch started but no terminal
+// outcome was recorded before the claim became stale. Repeating the same
+// operation must not repeat its possibly completed external side effects.
+const ErrCodeOperationOutcomeUnknown = "OPERATION_OUTCOME_UNKNOWN"
+
 // operationStaleClaimWindow is how long an in_progress claim is trusted
-// before a retry may take it over. Actuations complete in seconds; a claim
-// this old with no recorded outcome means the original claimant died before
-// its deferred completion ran. Taking over risks at most a duplicate
-// actuation when the dead process had already touched panes — the caller
-// opted into retry semantics by reusing the operation ID, and the
-// alternative is an operation ID poisoned forever.
+// before a retry may recover an unstarted claim. Age alone never proves
+// that an actuation did not happen, nor that the original caller is dead:
+// the durable dispatch marker and ownership token enforce those boundaries.
 const operationStaleClaimWindow = 10 * time.Minute
 
 // OperationAdmission is the typed per-target admission receipt.
@@ -88,15 +93,16 @@ type OperationAdmission struct {
 // attached to actuation output (send, interrupt) and returned by receipt
 // queries.
 type OperationInfo struct {
-	OperationID   string               `json:"operation_id"`
-	Kind          string               `json:"kind"`   // send | interrupt
-	Status        string               `json:"status"` // in_progress | completed
-	Replayed      bool                 `json:"replayed,omitempty"`
-	PayloadSHA256 string               `json:"payload_sha256"`
-	PayloadBytes  int64                `json:"payload_bytes"`
-	Admissions    []OperationAdmission `json:"admissions,omitempty"`
-	CreatedAt     time.Time            `json:"created_at"`
-	CompletedAt   *time.Time           `json:"completed_at,omitempty"`
+	OperationID       string               `json:"operation_id"`
+	Kind              string               `json:"kind"`   // send | interrupt
+	Status            string               `json:"status"` // in_progress | completed
+	Replayed          bool                 `json:"replayed,omitempty"`
+	PayloadSHA256     string               `json:"payload_sha256"`
+	PayloadBytes      int64                `json:"payload_bytes"`
+	Admissions        []OperationAdmission `json:"admissions,omitempty"`
+	CreatedAt         time.Time            `json:"created_at"`
+	DispatchStartedAt *time.Time           `json:"dispatch_started_at,omitempty"`
+	CompletedAt       *time.Time           `json:"completed_at,omitempty"`
 }
 
 // operationPayloadDigest returns the SHA-256 digest (hex) and byte count of
@@ -164,14 +170,18 @@ func operationInfoFromRecord(op *state.SendOperation, replayed bool) *OperationI
 		return nil
 	}
 	info := &OperationInfo{
-		OperationID:   op.OperationID,
-		Kind:          operationRecordKind(op),
-		Status:        op.Status,
-		Replayed:      replayed,
-		PayloadSHA256: op.PayloadSHA256,
-		PayloadBytes:  op.PayloadBytes,
-		CreatedAt:     op.CreatedAt,
-		CompletedAt:   op.CompletedAt,
+		OperationID:       op.OperationID,
+		Kind:              operationRecordKind(op),
+		Status:            op.Status,
+		Replayed:          replayed,
+		PayloadSHA256:     op.PayloadSHA256,
+		PayloadBytes:      op.PayloadBytes,
+		CreatedAt:         op.CreatedAt,
+		DispatchStartedAt: op.DispatchStartedAt,
+		CompletedAt:       op.CompletedAt,
+	}
+	if op.Status == state.SendOperationInProgress {
+		info.Admissions = unknownAdmissions(op.Targets)
 	}
 	if op.OutcomeJSON != "" {
 		var outcome operationAdmissionsOutcome
@@ -264,6 +274,7 @@ func claimRobotOperation(req operationClaimRequest) operationClaimResult {
 		BindingHash:   req.BindingHash,
 		PayloadSHA256: payloadSHA,
 		PayloadBytes:  payloadBytes,
+		Targets:       req.Targets,
 	}
 	stored, claimed, err := store.ClaimSendOperation(claim)
 	if err != nil {
@@ -291,24 +302,47 @@ func claimRobotOperation(req operationClaimRequest) operationClaimResult {
 		return operationClaimResult{Verdict: operationReplay, Record: stored}
 	}
 
-	// In progress. If the original claimant crashed before recording an
-	// outcome the row would otherwise stay in_progress forever, so a
-	// sufficiently stale matching claim is taken over and executed fresh. A
-	// recent claim is a live concurrent caller: report in-progress and let
-	// the caller reconcile via the receipt.
-	takenOver, takeoverErr := store.TakeOverStaleSendOperation(
-		claim.OperationID, claim.SessionName, claim.BindingHash,
-		time.Now().UTC().Add(-operationStaleClaimWindow),
-	)
-	if takeoverErr == nil && takenOver {
-		refreshed, _ := store.GetSendOperation(claim.OperationID, claim.SessionName)
-		if refreshed == nil {
-			refreshed = claim
+	staleBefore := time.Now().UTC().Add(-operationStaleClaimWindow)
+	if stored.DispatchStartedAt == nil && stored.CreatedAt.Before(staleBefore) {
+		// A stale claimant that has not started may be recovered. The CAS
+		// rotates its ownership token; a paused original caller can no longer
+		// start, complete, or release the replacement operation.
+		takenOver, takeoverErr := store.TakeOverStaleSendOperation(
+			claim.OperationID, claim.SessionName, claim.BindingHash, stored.ClaimToken, staleBefore,
+		)
+		if takeoverErr != nil {
+			return refuse(NewErrorResponse(takeoverErr, ErrCodeInternalError,
+				"Could not recover the operation claim; no input was sent"), operationInfoFromRecord(stored, false))
 		}
-		return operationClaimResult{Verdict: operationExecute, Owned: &durableOperation{store: store, record: refreshed}}
+		if takenOver != nil {
+			return operationClaimResult{Verdict: operationExecute, Owned: &durableOperation{store: store, record: takenOver}}
+		}
+		// The original caller may have completed while we attempted the CAS.
+		// Report its current receipt instead of the obsolete pre-CAS state.
+		current, readErr := store.GetSendOperation(claim.OperationID, claim.SessionName)
+		if readErr != nil {
+			return refuse(NewErrorResponse(readErr, ErrCodeInternalError,
+				"Could not read the updated operation claim; no input was sent"), nil)
+		}
+		if current != nil {
+			stored = current
+			if operationRecordKind(stored) != req.Kind || stored.BindingHash != req.BindingHash {
+				return refuse(NewErrorResponse(fmt.Errorf("operation '%s' was claimed by a different command", req.OperationID),
+					ErrCodeIdempotencyConflict, "Use the original command or a new operation ID"), operationInfoFromRecord(stored, false))
+			}
+			if stored.Status == state.SendOperationCompleted {
+				return operationClaimResult{Verdict: operationReplay, Record: stored}
+			}
+		}
 	}
 	info := operationInfoFromRecord(stored, true)
-	info.Admissions = unknownAdmissions(req.Targets)
+	if stored.DispatchStartedAt != nil && stored.CreatedAt.Before(staleBefore) {
+		return refuse(NewErrorResponse(
+			fmt.Errorf("operation '%s' started dispatch but its outcome is unknown", req.OperationID),
+			ErrCodeOperationOutcomeUnknown,
+			unresolvedOperationHint(req.OperationID),
+		), info)
+	}
 	return refuse(NewErrorResponse(
 		fmt.Errorf("operation '%s' is in progress", req.OperationID),
 		ErrCodeOperationInProgress,
@@ -324,12 +358,40 @@ type durableOperation struct {
 	record *state.SendOperation
 }
 
+// start records the exact prepared payload and targets before any pane can
+// be mutated. Losing the ownership fence or failing this write stops the
+// actuation. A crash after this point leaves evidence that replay is unsafe.
+func (op *durableOperation) start(payload string, targets []string) error {
+	prepared := *op.record
+	prepared.PayloadSHA256, prepared.PayloadBytes = operationPayloadDigest(payload)
+	prepared.Targets = append([]string{}, targets...)
+	started, err := op.store.StartSendOperation(&prepared)
+	if err != nil {
+		return err
+	}
+	op.record = started
+	return nil
+}
+
+func operationStartErrorResponse(err error) RobotResponse {
+	if errors.Is(err, state.ErrSendOperationClaimLost) {
+		return NewErrorResponse(err, ErrCodeOperationInProgress,
+			"Operation ownership changed before dispatch; query its durable receipt before retrying")
+	}
+	return NewErrorResponse(err, ErrCodeInternalError,
+		"The dispatch boundary could not be recorded; no input was sent")
+}
+
+func unresolvedOperationHint(operationID string) string {
+	return fmt.Sprintf("Inspect --robot-send-receipt=%s and the original panes to resolve the prior delivery; this operation ID will not dispatch again. Use a new ID only after deciding that another delivery is needed", operationID)
+}
+
 // release frees the claim when the actuation terminated BEFORE any pane was
 // touched (preflight failure). A retry with the same operation ID must get a
 // fresh attempt rather than a stored transient failure. Best-effort: the
 // returned warning is empty on success.
 func (op *durableOperation) release() string {
-	if err := op.store.ReleaseSendOperation(op.record.OperationID, op.record.SessionName); err != nil {
+	if err := op.store.ReleaseSendOperation(op.record.OperationID, op.record.SessionName, op.record.ClaimToken); err != nil {
 		return fmt.Sprintf("%s operation %s claim not released: %v (retry may report in-progress until taken over)",
 			operationRecordKind(op.record), op.record.OperationID, err)
 	}
@@ -347,7 +409,7 @@ func (op *durableOperation) complete(outcome any, admissions []OperationAdmissio
 		return nil, fmt.Sprintf("%s operation %s outcome not recorded: %v", kind, op.record.OperationID, err)
 	}
 	completedAt := time.Now().UTC()
-	if err := op.store.CompleteSendOperation(op.record.OperationID, op.record.SessionName, string(data), completedAt); err != nil {
+	if err := op.store.CompleteSendOperation(op.record.OperationID, op.record.SessionName, op.record.ClaimToken, string(data), completedAt); err != nil {
 		return nil, fmt.Sprintf("%s operation %s outcome not recorded: %v", kind, op.record.OperationID, err)
 	}
 	op.record.Status = state.SendOperationCompleted
@@ -434,6 +496,9 @@ func GetSendReceipt(operationID string) (*SendReceiptOutput, error) {
 	output.Session = op.SessionName
 	output.Operation = operationInfoFromRecord(op, false)
 	if op.Status != state.SendOperationCompleted || op.OutcomeJSON == "" {
+		if op.DispatchStartedAt != nil && op.CreatedAt.Before(time.Now().UTC().Add(-operationStaleClaimWindow)) {
+			output.Hint = unresolvedOperationHint(op.OperationID)
+		}
 		return output, nil
 	}
 	var decodeErr error

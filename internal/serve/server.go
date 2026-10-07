@@ -2191,7 +2191,7 @@ func robotErrorHTTPStatus(code string) int {
 		return http.StatusForbidden
 	case robot.ErrCodeResourceBusy, robot.ErrCodeStaleWorkCoordination:
 		return http.StatusConflict
-	case robot.ErrCodeIdempotencyConflict, robot.ErrCodeOperationInProgress:
+	case robot.ErrCodeIdempotencyConflict, robot.ErrCodeOperationInProgress, robot.ErrCodeOperationOutcomeUnknown:
 		// The operation ID (Idempotency-Key) is bound to a different command,
 		// or another request holding it is still running: a client-side
 		// conflict to reconcile via the receipt, never a server fault.
@@ -4617,6 +4617,12 @@ func (s *Server) handleAgentSendV1(w http.ResponseWriter, r *http.Request) {
 		if result.Hint != "" {
 			details["hint"] = result.Hint
 		}
+		if result.Operation != nil {
+			details["operation"] = result.Operation
+		}
+		if len(result.Warnings) > 0 {
+			details["warnings"] = result.Warnings
+		}
 		writeErrorResponse(w, robotErrorHTTPStatus(result.ErrorCode), result.ErrorCode, result.Error, details, reqID)
 		return
 	}
@@ -4697,6 +4703,12 @@ func (s *Server) handleAgentInterruptV1(w http.ResponseWriter, r *http.Request) 
 		details := map[string]interface{}{}
 		if result.Hint != "" {
 			details["hint"] = result.Hint
+		}
+		if result.Operation != nil {
+			details["operation"] = result.Operation
+		}
+		if len(result.Warnings) > 0 {
+			details["warnings"] = result.Warnings
 		}
 		writeErrorResponse(w, robotErrorHTTPStatus(result.ErrorCode), result.ErrorCode, result.Error, details, reqID)
 		return

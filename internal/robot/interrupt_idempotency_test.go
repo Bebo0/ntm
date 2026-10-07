@@ -246,6 +246,7 @@ func TestGetInterruptIdempotency_InProgressClaimNotInterrupted(t *testing.T) {
 		BindingHash:   interruptOperationBindingHash(opts),
 		PayloadSHA256: payloadSHA,
 		PayloadBytes:  payloadBytes,
+		Targets:       []string{expectedSendTargetKey(t, session, paneID)},
 	}); err != nil || !claimed {
 		t.Fatalf("seed live claim = (claimed=%v, err=%v)", claimed, err)
 	}
@@ -451,9 +452,10 @@ func TestApplyReplayedInterruptOutcomeRestoresRecordedFailure(t *testing.T) {
 func TestGetSendReceiptReportsInterruptOperation(t *testing.T) {
 	store := installIdempotencyBranchStore(t)
 
-	if _, claimed, err := store.ClaimSendOperation(&state.SendOperation{
+	claim, claimed, err := store.ClaimSendOperation(&state.SendOperation{
 		OperationID: "op-int-receipt", SessionName: "proj", Kind: state.OperationKindInterrupt, BindingHash: "bind",
-	}); err != nil || !claimed {
+	})
+	if err != nil || !claimed {
 		t.Fatalf("claim = (claimed=%v, err=%v)", claimed, err)
 	}
 	pending, err := GetSendReceipt("op-int-receipt")
@@ -471,7 +473,7 @@ func TestGetSendReceiptReportsInterruptOperation(t *testing.T) {
 	if err != nil {
 		t.Fatalf("marshal outcome: %v", err)
 	}
-	if err := store.CompleteSendOperation("op-int-receipt", "proj", string(data), time.Now().UTC()); err != nil {
+	if err := store.CompleteSendOperation("op-int-receipt", "proj", claim.ClaimToken, string(data), time.Now().UTC()); err != nil {
 		t.Fatalf("complete: %v", err)
 	}
 	receipt, err := GetSendReceipt("op-int-receipt")

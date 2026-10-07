@@ -22,7 +22,7 @@ import (
 func TestHandleAgentInterruptV1IdempotencyRefusalsAreConflicts(t *testing.T) {
 	srv, _ := setupTestServer(t)
 
-	for _, code := range []string{robot.ErrCodeIdempotencyConflict, robot.ErrCodeOperationInProgress} {
+	for _, code := range []string{robot.ErrCodeIdempotencyConflict, robot.ErrCodeOperationInProgress, robot.ErrCodeOperationOutcomeUnknown} {
 		t.Run(code, func(t *testing.T) {
 			var gotKey string
 			srv.interruptAgents = func(opts robot.InterruptOptions) (*robot.InterruptOutput, error) {
@@ -54,6 +54,75 @@ func TestHandleAgentInterruptV1IdempotencyRefusalsAreConflicts(t *testing.T) {
 			}
 			if response.Success || response.ErrorCode != code {
 				t.Fatalf("response = %+v, want error_code %s", response, code)
+			}
+		})
+	}
+}
+
+// Both HTTP actuation adapters must retain the durable receipt on errors.
+// Without it, a caller recovering from a timeout loses the original targets
+// and cannot distinguish an unstarted operation from ambiguous delivery.
+func TestHandleAgentActuationV1PreservesUnknownOperationReceipt(t *testing.T) {
+	for _, kind := range []string{"send", "interrupt"} {
+		t.Run(kind, func(t *testing.T) {
+			srv, _ := setupTestServer(t)
+			started := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
+			op := &robot.OperationInfo{
+				OperationID: "recover-7", Kind: kind, Status: "in_progress",
+				PayloadSHA256: strings.Repeat("a", 64), PayloadBytes: 19,
+				CreatedAt: started.Add(-time.Minute), DispatchStartedAt: &started,
+				Admissions: []robot.OperationAdmission{{Target: "0.8", State: robot.AdmissionUnknown}},
+			}
+			response := robot.NewErrorResponse(fmt.Errorf("prior delivery is unresolved"),
+				robot.ErrCodeOperationOutcomeUnknown, "Inspect --robot-send-receipt=recover-7 before deciding to send again")
+			srv.sendAgents = func(opts robot.SendOptions) (*robot.SendOutput, error) {
+				if opts.IdempotencyKey != op.OperationID {
+					t.Fatalf("operation ID = %q", opts.IdempotencyKey)
+				}
+				return &robot.SendOutput{RobotResponse: response, Operation: op, Warnings: []string{"prior outcome not recorded"}}, nil
+			}
+			srv.interruptAgents = func(opts robot.InterruptOptions) (*robot.InterruptOutput, error) {
+				if opts.IdempotencyKey != op.OperationID {
+					t.Fatalf("operation ID = %q", opts.IdempotencyKey)
+				}
+				return &robot.InterruptOutput{RobotResponse: response, Operation: op, Warnings: []string{"prior outcome not recorded"}}, nil
+			}
+
+			req := httptest.NewRequest(http.MethodPost, "/api/v1/sessions/proj/agents/"+kind,
+				strings.NewReader(`{"message":"resume requested work"}`))
+			req.Header.Set("Idempotency-Key", op.OperationID)
+			rctx := chi.NewRouteContext()
+			rctx.URLParams.Add("sessionId", "proj")
+			req = req.WithContext(context.WithValue(req.Context(), chi.RouteCtxKey, rctx))
+			rec := httptest.NewRecorder()
+			if kind == "send" {
+				srv.handleAgentSendV1(rec, req)
+			} else {
+				srv.handleAgentInterruptV1(rec, req)
+			}
+			var body struct {
+				ErrorCode string `json:"error_code"`
+				Hint      string `json:"hint"`
+				Details   struct {
+					Operation *robot.OperationInfo `json:"operation"`
+					Warnings  []string             `json:"warnings"`
+				} `json:"details"`
+			}
+			if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+				t.Fatal(err)
+			}
+			if rec.Code != http.StatusConflict || body.ErrorCode != robot.ErrCodeOperationOutcomeUnknown {
+				t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+			}
+			got := body.Details.Operation
+			if got == nil || got.OperationID != op.OperationID || got.Kind != kind || got.Status != "in_progress" ||
+				got.PayloadSHA256 != op.PayloadSHA256 || got.PayloadBytes != op.PayloadBytes ||
+				got.DispatchStartedAt == nil || !got.DispatchStartedAt.Equal(started) ||
+				len(got.Admissions) != 1 || got.Admissions[0] != op.Admissions[0] {
+				t.Fatalf("HTTP error lost the original operation receipt: %s", rec.Body.String())
+			}
+			if body.Hint != response.Hint || len(body.Details.Warnings) != 1 {
+				t.Fatalf("HTTP error lost recovery diagnostics: %s", rec.Body.String())
 			}
 		})
 	}

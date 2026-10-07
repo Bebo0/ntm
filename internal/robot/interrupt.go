@@ -88,6 +88,7 @@ func GetInterrupt(opts InterruptOptions) (*InterruptOutput, error) {
 		opts.PollMs = 300 // Default 300ms poll interval
 	}
 	trace := normalizeActuationTrace(opts.RequestID, opts.CorrelationID, opts.IdempotencyKey)
+	inputMessage := opts.Message
 	// The operation binding digests the caller's INPUT follow-up message, so
 	// it is computed before redaction rewrites opts.Message below.
 	var operationBinding string
@@ -255,6 +256,15 @@ func GetInterrupt(opts InterruptOptions) (*InterruptOutput, error) {
 			}
 			return finalizeTerminalInterruptActuation(trace, opts, targetKeys, output), nil
 		}
+		if err := claim.Owned.start(opts.Message, targetKeys); err != nil {
+			output.RobotResponse = operationStartErrorResponse(err)
+			if warning := claim.Owned.release(); warning != "" {
+				output.Warnings = append(output.Warnings, warning)
+			}
+			output.CompletedAt = time.Now().UTC()
+			return finalizeTerminalInterruptActuation(trace, opts, targetKeys, output), nil
+		}
+		output.Operation = operationInfoFromRecord(claim.Owned.record, false)
 		defer completeInterruptOperation(claim.Owned, targetKeys, opts.Message != "", output)
 	}
 
@@ -399,10 +409,13 @@ func GetInterrupt(opts InterruptOptions) (*InterruptOutput, error) {
 			if serviceErr != nil {
 				output.Failed = append(output.Failed, InterruptError{Pane: "dispatch", Reason: fmt.Sprintf("failed to initialize message dispatch: %v", serviceErr)})
 			} else {
-				sendOpts := SendOptions{Session: opts.Session, Message: opts.Message}
+				// Apply final-message policy to the original input, as in the
+				// preflight above. Re-scanning opts.Message would redact the
+				// replacement markers again and change the frozen payload.
+				sendOpts := SendOptions{Session: opts.Session, Message: inputMessage}
 				prepared, prepareErr := service.Prepare(
 					context.Background(),
-					robotPreparedDispatchRequest(dispatchPanes, messageTargets, sendOpts, opts.Message, true),
+					robotPreparedDispatchRequest(dispatchPanes, messageTargets, sendOpts, inputMessage, true),
 				)
 				if prepareErr != nil {
 					output.RobotResponse = robotDispatchPrepareErrorResponse(prepareErr)

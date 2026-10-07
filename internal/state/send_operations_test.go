@@ -2,7 +2,11 @@ package state
 
 import (
 	"database/sql"
+	"encoding/json"
+	"errors"
 	"fmt"
+	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -21,6 +25,8 @@ func TestClaimSendOperationLifecycle(t *testing.T) {
 		BindingHash:   "bind-a",
 		PayloadSHA256: "sha-a",
 		PayloadBytes:  42,
+		Targets:       []string{"proj:1", "proj:2"},
+		ClaimToken:    "caller-supplied-token",
 	}
 
 	stored, claimed, err := store.ClaimSendOperation(op)
@@ -35,6 +41,19 @@ func TestClaimSendOperationLifecycle(t *testing.T) {
 	}
 	if stored.BindingHash != "bind-a" || stored.PayloadSHA256 != "sha-a" || stored.PayloadBytes != 42 {
 		t.Errorf("claimed record lost binding fields: %+v", stored)
+	}
+	if len(stored.ClaimToken) != 64 || stored.ClaimToken == op.ClaimToken || stored.DispatchStartedAt != nil {
+		t.Fatalf("fresh claim must have its own token and no dispatch: %+v", stored)
+	}
+	if !slices.Equal(stored.Targets, op.Targets) {
+		t.Fatalf("claimed targets = %v, want %v", stored.Targets, op.Targets)
+	}
+	public, err := json.Marshal(stored)
+	if err != nil {
+		t.Fatalf("marshal operation: %v", err)
+	}
+	if strings.Contains(string(public), stored.ClaimToken) || strings.Contains(string(public), "claim_token") {
+		t.Fatalf("operation JSON exposes its private claim token: %s", public)
 	}
 
 	// A second claim with the same ID observes the existing row (race-safe
@@ -56,9 +75,33 @@ func TestClaimSendOperationLifecycle(t *testing.T) {
 	if existing.BindingHash != "bind-a" {
 		t.Errorf("duplicate claim overwrote binding: %+v", existing)
 	}
+	if existing.ClaimToken != stored.ClaimToken || !slices.Equal(existing.Targets, stored.Targets) {
+		t.Fatalf("duplicate claim changed execution ownership or targets: %+v", existing)
+	}
+
+	// The dispatch boundary freezes the prepared payload after enrichment
+	// and final redaction, even when it differs from the original claim.
+	prepared := *stored
+	prepared.PayloadSHA256 = "sha-prepared"
+	prepared.PayloadBytes = 84
+	prepared.Targets = []string{"proj:3", "proj:4"}
+	started, err := store.StartSendOperation(&prepared)
+	if err != nil {
+		t.Fatalf("start error = %v", err)
+	}
+	if started.DispatchStartedAt == nil || started.ClaimToken != stored.ClaimToken || started.BindingHash != "bind-a" {
+		t.Fatalf("start lost dispatch or binding evidence: %+v", started)
+	}
+	if started.PayloadSHA256 != prepared.PayloadSHA256 || started.PayloadBytes != prepared.PayloadBytes || !slices.Equal(started.Targets, prepared.Targets) {
+		t.Fatalf("start did not freeze prepared delivery metadata: %+v", started)
+	}
+	prepared.PayloadSHA256 = "should-not-replace-frozen-payload"
+	if _, err := store.StartSendOperation(&prepared); !errors.Is(err, ErrSendOperationClaimLost) {
+		t.Fatalf("repeated start error = %v, want claim-lost", err)
+	}
 
 	// Completion records the outcome durably.
-	if err := store.CompleteSendOperation("op-1", "proj", `{"success":true}`, time.Now()); err != nil {
+	if err := store.CompleteSendOperation("op-1", "proj", stored.ClaimToken, `{"success":true}`, time.Now()); err != nil {
 		t.Fatalf("complete error = %v", err)
 	}
 	got, err := store.GetSendOperation("op-1", "proj")
@@ -71,10 +114,18 @@ func TestClaimSendOperationLifecycle(t *testing.T) {
 	if got.CompletedAt == nil {
 		t.Error("completed record missing completed_at")
 	}
+	if got.PayloadSHA256 != started.PayloadSHA256 || got.PayloadBytes != started.PayloadBytes || !slices.Equal(got.Targets, started.Targets) || got.DispatchStartedAt == nil || !got.DispatchStartedAt.Equal(*started.DispatchStartedAt) {
+		t.Fatalf("completed receipt changed frozen delivery metadata: %+v", got)
+	}
+	byID, err := store.GetSendOperationsByID("op-1")
+	if err != nil || len(byID) != 1 || !slices.Equal(byID[0].Targets, started.Targets) || byID[0].DispatchStartedAt == nil {
+		t.Fatalf("receipt listing lost delivery metadata: %+v, %v", byID, err)
+	}
 
-	// Completing again is a no-op (status guard), preserving the original outcome.
-	if err := store.CompleteSendOperation("op-1", "proj", `{"success":false}`, time.Now()); err != nil {
-		t.Fatalf("re-complete error = %v", err)
+	// A completed operation is no longer an owned in-progress attempt.
+	// Refuse another completion honestly while preserving the first receipt.
+	if err := store.CompleteSendOperation("op-1", "proj", stored.ClaimToken, `{"success":false}`, time.Now()); !errors.Is(err, ErrSendOperationClaimLost) {
+		t.Fatalf("re-complete error = %v, want claim-lost", err)
 	}
 	got2, _ := store.GetSendOperation("op-1", "proj")
 	if got2.OutcomeJSON != `{"success":true}` {
@@ -128,10 +179,9 @@ func TestClaimSendOperationRecordsKind(t *testing.T) {
 	}
 }
 
-// A database migrated before kinds existed keeps its send rows readable and
-// replayable: migration 025 backfills kind='send' and leaves the
-// (operation_id, session_name) key the idempotency invariant depends on.
-func TestSendOperationsKindMigrationBackfillsLegacyRows(t *testing.T) {
+// sendOperationStoreAtMigration recreates a prior schema for upgrade tests.
+func sendOperationStoreAtMigration(t *testing.T, lastVersion int) *Store {
+	t.Helper()
 	db, err := sql.Open(sqliteutil.DriverName, sqliteutil.MemoryDSN("foreign_keys(1)"))
 	if err != nil {
 		t.Fatalf("open in-memory db: %v", err)
@@ -151,14 +201,14 @@ func TestSendOperationsKindMigrationBackfillsLegacyRows(t *testing.T) {
 	)`); err != nil {
 		t.Fatalf("create _migrations: %v", err)
 	}
-	// Bring the schema to the last pre-kind version exactly as an older ntm
-	// would have left it.
+	// Bring the schema to the requested version exactly as an older ntm
+	// would have left it, before any newer schema is applied.
 	for _, filename := range files {
 		var version int
 		if _, err := fmt.Sscanf(filename, "%03d_", &version); err != nil {
 			t.Fatalf("parse migration version %s: %v", filename, err)
 		}
-		if version >= 25 {
+		if version > lastVersion {
 			break
 		}
 		content, err := ReadMigration(filename)
@@ -172,6 +222,15 @@ func TestSendOperationsKindMigrationBackfillsLegacyRows(t *testing.T) {
 			t.Fatalf("record %s: %v", filename, err)
 		}
 	}
+	return &Store{db: db, path: ":memory:"}
+}
+
+// A database migrated before kinds existed keeps its send rows readable and
+// replayable: migration 025 backfills kind='send' and leaves the
+// (operation_id, session_name) key the idempotency invariant depends on.
+func TestSendOperationsKindMigrationBackfillsLegacyRows(t *testing.T) {
+	store := sendOperationStoreAtMigration(t, 24)
+	db := store.db
 	if _, err := db.Exec(`
 		INSERT INTO send_operations (
 			operation_id, session_name, binding_hash, payload_sha256,
@@ -184,7 +243,6 @@ func TestSendOperationsKindMigrationBackfillsLegacyRows(t *testing.T) {
 	if err := ApplyMigrations(db); err != nil {
 		t.Fatalf("ApplyMigrations upgrade: %v", err)
 	}
-	store := &Store{db: db, path: ":memory:"}
 	got, err := store.GetSendOperation("op-pre", "proj")
 	if err != nil {
 		t.Fatalf("GetSendOperation after upgrade: %v", err)
@@ -199,6 +257,84 @@ func TestSendOperationsKindMigrationBackfillsLegacyRows(t *testing.T) {
 	}
 	if !strings.Contains(tableSQL, "PRIMARY KEY (operation_id, session_name)") {
 		t.Fatalf("send_operations lost its (operation_id, session_name) key after upgrade:\n%s", tableSQL)
+	}
+}
+
+func TestSendOperationsClaimFenceMigrationPreservesUnknownDelivery(t *testing.T) {
+	store := sendOperationStoreAtMigration(t, 25)
+	createdAt := time.Now().UTC().Add(-24 * time.Hour).Truncate(time.Microsecond)
+	completedAt := createdAt.Add(time.Minute)
+	const outcome = `{"success":true,"sent_to":["proj:1"]}`
+	for _, kind := range []string{OperationKindSend, OperationKindInterrupt} {
+		if _, err := store.db.Exec(`
+			INSERT INTO send_operations (
+				operation_id, session_name, kind, binding_hash, payload_sha256,
+				payload_bytes, status, created_at
+			) VALUES (?, 'proj', ?, 'legacy-binding', 'legacy-digest', 77, ?, ?)`,
+			"legacy-"+kind, kind, SendOperationInProgress, createdAt); err != nil {
+			t.Fatalf("seed legacy %s: %v", kind, err)
+		}
+	}
+	if _, err := store.db.Exec(`
+		INSERT INTO send_operations (
+			operation_id, session_name, kind, binding_hash, payload_sha256,
+			payload_bytes, status, outcome_json, created_at, completed_at
+		) VALUES ('legacy-completed', 'proj', 'send', 'completed-binding', 'completed-digest', 78, ?, ?, ?, ?)`,
+		SendOperationCompleted, outcome, createdAt, completedAt); err != nil {
+		t.Fatalf("seed completed receipt: %v", err)
+	}
+	if err := store.Migrate(); err != nil {
+		t.Fatalf("upgrade claim fence: %v", err)
+	}
+
+	tokens := make(map[string]bool)
+	for _, kind := range []string{OperationKindSend, OperationKindInterrupt} {
+		id := "legacy-" + kind
+		op, err := store.GetSendOperation(id, "proj")
+		if err != nil || op == nil {
+			t.Fatalf("read migrated %s: %+v, %v", kind, op, err)
+		}
+		if op.Kind != kind || op.Status != SendOperationInProgress || op.BindingHash != "legacy-binding" || op.PayloadSHA256 != "legacy-digest" || op.PayloadBytes != 77 || !op.CreatedAt.Equal(createdAt) {
+			t.Fatalf("migration changed legacy operation: %+v", op)
+		}
+		if op.DispatchStartedAt == nil || !op.DispatchStartedAt.Equal(createdAt) || op.CompletedAt != nil || op.Targets == nil || len(op.Targets) != 0 {
+			t.Fatalf("legacy delivery uncertainty was not preserved: %+v", op)
+		}
+		if len(op.ClaimToken) != 64 || tokens[op.ClaimToken] {
+			t.Fatalf("migration produced empty or reused ownership token for %s", id)
+		}
+		tokens[op.ClaimToken] = true
+		taken, err := store.TakeOverStaleSendOperation(id, "proj", op.BindingHash, op.ClaimToken, time.Now().UTC())
+		if err != nil || taken != nil {
+			t.Fatalf("unknown legacy delivery was taken over: %+v, %v", taken, err)
+		}
+		if _, err := store.StartSendOperation(op); !errors.Is(err, ErrSendOperationClaimLost) {
+			t.Fatalf("legacy unknown operation could start again: %v", err)
+		}
+		if err := store.ReleaseSendOperation(id, "proj", op.ClaimToken); !errors.Is(err, ErrSendOperationClaimLost) {
+			t.Fatalf("legacy unknown operation could be discarded: %v", err)
+		}
+	}
+	completed, err := store.GetSendOperation("legacy-completed", "proj")
+	if err != nil || completed == nil {
+		t.Fatalf("read migrated completed receipt: %+v, %v", completed, err)
+	}
+	if completed.Status != SendOperationCompleted || completed.OutcomeJSON != outcome || completed.BindingHash != "completed-binding" || completed.PayloadSHA256 != "completed-digest" || completed.PayloadBytes != 78 || !completed.CreatedAt.Equal(createdAt) || completed.CompletedAt == nil || !completed.CompletedAt.Equal(completedAt) || completed.DispatchStartedAt != nil {
+		t.Fatalf("migration changed a completed receipt: %+v", completed)
+	}
+	if len(completed.ClaimToken) != 64 || tokens[completed.ClaimToken] {
+		t.Fatal("completed legacy receipt has no distinct claim token")
+	}
+	if err := store.Migrate(); err != nil {
+		t.Fatalf("repeat migration: %v", err)
+	}
+	again, err := store.GetSendOperation("legacy-completed", "proj")
+	if err != nil || again == nil || again.ClaimToken != completed.ClaimToken || again.OutcomeJSON != outcome {
+		t.Fatalf("repeat migration changed receipt: %+v, %v", again, err)
+	}
+	fresh, claimed, err := store.ClaimSendOperation(&SendOperation{OperationID: "fresh-after-upgrade", SessionName: "proj"})
+	if err != nil || !claimed || fresh.DispatchStartedAt != nil || fresh.ClaimToken == "" {
+		t.Fatalf("new claim inherited legacy uncertainty: %+v, %v", fresh, err)
 	}
 }
 
@@ -253,25 +389,32 @@ func TestClaimSendOperationSessionScoped(t *testing.T) {
 func TestReleaseSendOperation(t *testing.T) {
 	store := testStore(t)
 	op := &SendOperation{OperationID: "op-r", SessionName: "proj", BindingHash: "b"}
-	if _, _, err := store.ClaimSendOperation(op); err != nil {
+	stored, _, err := store.ClaimSendOperation(op)
+	if err != nil {
 		t.Fatalf("claim error = %v", err)
 	}
 
 	// Release frees the ID for a fresh claim.
-	if err := store.ReleaseSendOperation("op-r", "proj"); err != nil {
+	if err := store.ReleaseSendOperation("op-r", "proj", stored.ClaimToken); err != nil {
 		t.Fatalf("release error = %v", err)
 	}
-	_, claimed, err := store.ClaimSendOperation(op)
+	reclaimed, claimed, err := store.ClaimSendOperation(op)
 	if err != nil || !claimed {
 		t.Fatalf("re-claim after release = (claimed=%v, err=%v), want fresh claim", claimed, err)
 	}
+	if reclaimed.ClaimToken == stored.ClaimToken {
+		t.Fatal("re-claim reused the released attempt's ownership token")
+	}
+	if err := store.ReleaseSendOperation("op-r", "proj", stored.ClaimToken); !errors.Is(err, ErrSendOperationClaimLost) {
+		t.Fatalf("released claimant could release a new row: %v", err)
+	}
 
 	// A completed row is never released.
-	if err := store.CompleteSendOperation("op-r", "proj", `{"success":true}`, time.Now()); err != nil {
+	if err := store.CompleteSendOperation("op-r", "proj", reclaimed.ClaimToken, `{"success":true}`, time.Now()); err != nil {
 		t.Fatalf("complete error = %v", err)
 	}
-	if err := store.ReleaseSendOperation("op-r", "proj"); err != nil {
-		t.Fatalf("release completed error = %v", err)
+	if err := store.ReleaseSendOperation("op-r", "proj", reclaimed.ClaimToken); !errors.Is(err, ErrSendOperationClaimLost) {
+		t.Fatalf("release completed error = %v, want claim-lost", err)
 	}
 	got, _ := store.GetSendOperation("op-r", "proj")
 	if got == nil || got.Status != SendOperationCompleted {
@@ -282,45 +425,201 @@ func TestReleaseSendOperation(t *testing.T) {
 func TestTakeOverStaleSendOperation(t *testing.T) {
 	store := testStore(t)
 	stale := time.Now().UTC().Add(-time.Hour)
-	if _, _, err := store.ClaimSendOperation(&SendOperation{
+	stored, _, err := store.ClaimSendOperation(&SendOperation{
 		OperationID: "op-t", SessionName: "proj", BindingHash: "b", CreatedAt: stale,
-	}); err != nil {
+	})
+	if err != nil {
 		t.Fatalf("claim error = %v", err)
 	}
 
 	// A fresh claim (created now) must not be usurped.
-	won, err := store.TakeOverStaleSendOperation("op-t", "proj", "b", time.Now().UTC().Add(-2*time.Hour))
+	taken, err := store.TakeOverStaleSendOperation("op-t", "proj", "b", stored.ClaimToken, time.Now().UTC().Add(-2*time.Hour))
 	if err != nil {
 		t.Fatalf("takeover error = %v", err)
 	}
-	if won {
+	if taken != nil {
 		t.Fatal("takeover won against a claim inside the staleness window")
 	}
 
 	// A stale claim with matching binding is taken over.
-	won, err = store.TakeOverStaleSendOperation("op-t", "proj", "b", time.Now().UTC().Add(-time.Minute))
-	if err != nil || !won {
-		t.Fatalf("stale takeover = (won=%v, err=%v), want success", won, err)
+	taken, err = store.TakeOverStaleSendOperation("op-t", "proj", "b", stored.ClaimToken, time.Now().UTC().Add(-time.Minute))
+	if err != nil || taken == nil {
+		t.Fatalf("stale takeover = (%+v, err=%v), want success", taken, err)
+	}
+	if taken.ClaimToken == stored.ClaimToken || !taken.CreatedAt.After(stale) || taken.DispatchStartedAt != nil {
+		t.Fatalf("takeover did not fence and refresh its claim: %+v", taken)
 	}
 
 	// Mismatched binding never takes over.
-	won, err = store.TakeOverStaleSendOperation("op-t", "proj", "OTHER", time.Now().UTC().Add(time.Hour))
+	wrongBinding, err := store.TakeOverStaleSendOperation("op-t", "proj", "OTHER", taken.ClaimToken, time.Now().UTC().Add(time.Hour))
 	if err != nil {
 		t.Fatalf("mismatched takeover error = %v", err)
 	}
-	if won {
+	if wrongBinding != nil {
 		t.Fatal("takeover won with a mismatched binding hash")
+	}
+}
+
+func TestSendOperationStaleOwnerCannotMutateSuccessorAcrossStores(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "operations.db")
+	original, err := Open(path)
+	if err != nil {
+		t.Fatalf("open original store: %v", err)
+	}
+	t.Cleanup(func() { _ = original.Close() })
+	if err := original.Migrate(); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+	successor, err := Open(path)
+	if err != nil {
+		t.Fatalf("open successor store: %v", err)
+	}
+	t.Cleanup(func() { _ = successor.Close() })
+
+	old, claimed, err := original.ClaimSendOperation(&SendOperation{
+		OperationID: "op-fenced", SessionName: "proj", Kind: OperationKindInterrupt,
+		BindingHash: "binding", PayloadSHA256: "before", PayloadBytes: 10,
+		Targets: []string{"proj:1"}, CreatedAt: time.Now().UTC().Add(-time.Hour),
+	})
+	if err != nil || !claimed {
+		t.Fatalf("initial claim: %+v, %v", old, err)
+	}
+	owned, err := successor.TakeOverStaleSendOperation(old.OperationID, old.SessionName, old.BindingHash, old.ClaimToken, time.Now().UTC().Add(-time.Minute))
+	if err != nil || owned == nil {
+		t.Fatalf("takeover: %+v, %v", owned, err)
+	}
+	if owned.ClaimToken == old.ClaimToken || owned.Kind != old.Kind || owned.BindingHash != old.BindingHash || !slices.Equal(owned.Targets, old.Targets) {
+		t.Fatalf("takeover failed to retain the operation while fencing its owner: %+v", owned)
+	}
+	// Even a cutoff that would consider the successor stale cannot reuse the
+	// old observation's token. A delayed contender must reread and retry.
+	if taken, err := original.TakeOverStaleSendOperation(old.OperationID, old.SessionName, old.BindingHash, old.ClaimToken, time.Now().UTC().Add(time.Hour)); err != nil || taken != nil {
+		t.Fatalf("old observation stole the successor: %+v, %v", taken, err)
+	}
+	old.PayloadSHA256 = "stale-writer-payload"
+	old.Targets = []string{"proj:99"}
+	if _, err := original.StartSendOperation(old); !errors.Is(err, ErrSendOperationClaimLost) {
+		t.Fatalf("stale owner start = %v, want claim-lost", err)
+	}
+	if err := original.ReleaseSendOperation(old.OperationID, old.SessionName, old.ClaimToken); !errors.Is(err, ErrSendOperationClaimLost) {
+		t.Fatalf("stale owner release = %v, want claim-lost", err)
+	}
+	if err := original.CompleteSendOperation(old.OperationID, old.SessionName, old.ClaimToken, `{"owner":"stale"}`, time.Now()); !errors.Is(err, ErrSendOperationClaimLost) {
+		t.Fatalf("stale owner completion = %v, want claim-lost", err)
+	}
+	current, err := successor.GetSendOperation(old.OperationID, old.SessionName)
+	if err != nil || current == nil || current.ClaimToken != owned.ClaimToken || current.DispatchStartedAt != nil || current.PayloadSHA256 != "before" || current.Status != SendOperationInProgress || current.OutcomeJSON != "" {
+		t.Fatalf("stale writer changed the successor: %+v, %v", current, err)
+	}
+
+	// The successor resolves new targets and freezes its own prepared bytes
+	// at the boundary. Even its current token cannot restart or discard it.
+	owned.PayloadSHA256, owned.PayloadBytes = "after", 20
+	owned.Targets = []string{"proj:2", "proj:3"}
+	started, err := successor.StartSendOperation(owned)
+	if err != nil {
+		t.Fatalf("successor start: %v", err)
+	}
+	if taken, err := original.TakeOverStaleSendOperation(started.OperationID, started.SessionName, started.BindingHash, started.ClaimToken, time.Now().UTC().Add(time.Hour)); err != nil || taken != nil {
+		t.Fatalf("started operation was taken over: %+v, %v", taken, err)
+	}
+	if err := successor.ReleaseSendOperation(started.OperationID, started.SessionName, started.ClaimToken); !errors.Is(err, ErrSendOperationClaimLost) {
+		t.Fatalf("started operation was released: %v", err)
+	}
+	if _, err := successor.StartSendOperation(owned); !errors.Is(err, ErrSendOperationClaimLost) {
+		t.Fatalf("started operation started twice: %v", err)
+	}
+	const outcome = `{"owner":"successor","success":true}`
+	if err := successor.CompleteSendOperation(started.OperationID, started.SessionName, started.ClaimToken, outcome, time.Now()); err != nil {
+		t.Fatalf("successor completion: %v", err)
+	}
+	completed, err := original.GetSendOperation(started.OperationID, started.SessionName)
+	if err != nil || completed == nil || completed.Status != SendOperationCompleted || completed.OutcomeJSON != outcome || completed.PayloadSHA256 != "after" || completed.PayloadBytes != 20 || !slices.Equal(completed.Targets, owned.Targets) || completed.DispatchStartedAt == nil {
+		t.Fatalf("receipt did not retain successor's delivery: %+v, %v", completed, err)
+	}
+}
+
+func TestSendOperationStartAndTakeoverHaveOneWinnerAcrossStores(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "operations.db")
+	owner, err := Open(path)
+	if err != nil {
+		t.Fatalf("open owner: %v", err)
+	}
+	t.Cleanup(func() { _ = owner.Close() })
+	if err := owner.Migrate(); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+	contender, err := Open(path)
+	if err != nil {
+		t.Fatalf("open contender: %v", err)
+	}
+	t.Cleanup(func() { _ = contender.Close() })
+
+	type attemptResult struct {
+		op  *SendOperation
+		err error
+	}
+	for i := 0; i < 20; i++ {
+		claimed, fresh, err := owner.ClaimSendOperation(&SendOperation{
+			OperationID: fmt.Sprintf("op-race-%d", i), SessionName: "proj",
+			BindingHash: "binding", CreatedAt: time.Now().UTC().Add(-time.Hour),
+		})
+		if err != nil || !fresh {
+			t.Fatalf("claim %d: %+v, %v", i, claimed, err)
+		}
+		ready := make(chan struct{})
+		started := make(chan attemptResult, 1)
+		taken := make(chan attemptResult, 1)
+		go func() {
+			<-ready
+			op, err := owner.StartSendOperation(claimed)
+			started <- attemptResult{op, err}
+		}()
+		go func() {
+			<-ready
+			op, err := contender.TakeOverStaleSendOperation(claimed.OperationID, claimed.SessionName, claimed.BindingHash, claimed.ClaimToken, time.Now().UTC().Add(-time.Minute))
+			taken <- attemptResult{op, err}
+		}()
+		close(ready)
+		startResult, takeoverResult := <-started, <-taken
+		if takeoverResult.err != nil {
+			t.Fatalf("race %d takeover: %v", i, takeoverResult.err)
+		}
+		if startResult.err != nil && !errors.Is(startResult.err, ErrSendOperationClaimLost) {
+			t.Fatalf("race %d start: %v", i, startResult.err)
+		}
+		startWon, takeoverWon := startResult.op != nil, takeoverResult.op != nil
+		if startWon == takeoverWon {
+			t.Fatalf("race %d has start winner=%v, takeover winner=%v; exactly one must win", i, startWon, takeoverWon)
+		}
+		if takeoverWon {
+			if _, err := contender.StartSendOperation(takeoverResult.op); err != nil {
+				t.Fatalf("race %d winning takeover could not start: %v", i, err)
+			}
+		}
+		persisted, err := owner.GetSendOperation(claimed.OperationID, claimed.SessionName)
+		if err != nil || persisted == nil || persisted.DispatchStartedAt == nil {
+			t.Fatalf("race %d winner has no durable boundary: %+v, %v", i, persisted, err)
+		}
+		wantToken := claimed.ClaimToken
+		if takeoverWon {
+			wantToken = takeoverResult.op.ClaimToken
+		}
+		if persisted.ClaimToken != wantToken {
+			t.Fatalf("race %d persisted a non-winning token", i)
+		}
 	}
 }
 
 func TestGCCompletedSendOperations(t *testing.T) {
 	store := testStore(t)
-	if _, _, err := store.ClaimSendOperation(&SendOperation{
+	stored, _, err := store.ClaimSendOperation(&SendOperation{
 		OperationID: "op-old", SessionName: "proj", BindingHash: "b",
-	}); err != nil {
+	})
+	if err != nil {
 		t.Fatalf("claim error = %v", err)
 	}
-	if err := store.CompleteSendOperation("op-old", "proj", `{}`, time.Now().UTC().Add(-30*24*time.Hour)); err != nil {
+	if err := store.CompleteSendOperation("op-old", "proj", stored.ClaimToken, `{}`, time.Now().UTC().Add(-30*24*time.Hour)); err != nil {
 		t.Fatalf("complete error = %v", err)
 	}
 	// An in_progress row is never GC'd regardless of age.

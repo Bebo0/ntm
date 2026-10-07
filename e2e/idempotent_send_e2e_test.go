@@ -24,8 +24,9 @@ package e2e
 // completion, then rewinds the completed send_operations row back to
 // in_progress via store.DB() — first with a fresh created_at (a live
 // concurrent claimant: retry must report OPERATION_IN_PROGRESS), then with
-// a created_at older than the window (a crashed claimant: retry must take
-// the claim over and deliver again for real).
+// a created_at older than the window (an unresolved started claimant: retry
+// must still not deliver again). A separately seeded unstarted operation
+// proves that recovery remains available when no dispatch could have begun.
 
 import (
 	"bytes"
@@ -55,12 +56,13 @@ type idemAdmission struct {
 }
 
 type idemOperation struct {
-	OperationID   string          `json:"operation_id"`
-	Status        string          `json:"status"`
-	Replayed      bool            `json:"replayed"`
-	PayloadSHA256 string          `json:"payload_sha256"`
-	PayloadBytes  int64           `json:"payload_bytes"`
-	Admissions    []idemAdmission `json:"admissions"`
+	OperationID       string          `json:"operation_id"`
+	Status            string          `json:"status"`
+	Replayed          bool            `json:"replayed"`
+	PayloadSHA256     string          `json:"payload_sha256"`
+	PayloadBytes      int64           `json:"payload_bytes"`
+	Admissions        []idemAdmission `json:"admissions"`
+	DispatchStartedAt *time.Time      `json:"dispatch_started_at"`
 }
 
 type idemSendEnvelope struct {
@@ -563,14 +565,14 @@ func TestIdempotentSendSelectorRetrySurvivesTopologyChange(t *testing.T) {
 }
 
 // =============================================================================
-// Scenario 5: in-progress claim and stale-claim takeover. See the file
+// Scenario 5: ambiguous started claims and safe unstarted recovery. See the file
 // header for why the row is seeded via store.DB() instead of a mid-dispatch
 // SIGKILL: the staleness window is not externally overridable, so the test
 // reconstructs the crashed-claimant row states directly in the SAME isolated
 // state.db the ntm child uses.
 // =============================================================================
 
-func TestIdempotentSendInProgressAndStaleTakeover(t *testing.T) {
+func TestIdempotentSendStartedCrashRefusesAndUnstartedRecovers(t *testing.T) {
 	s := newIdemScenario(t, "idem-send-5-takeover", "claude")
 	defer s.close()
 
@@ -632,17 +634,57 @@ func TestIdempotentSendInProgressAndStaleTakeover(t *testing.T) {
 	}
 	s.logger.Log("[PASS-5a] fresh in_progress claim refused with OPERATION_IN_PROGRESS, no delivery")
 
-	// Rewind again: a CRASHED claimant (created_at beyond the 10-min window).
+	// Rewind again: a claimant that may have died AFTER delivery. Retain
+	// dispatch_started_at: age cannot make the actual first submission safe
+	// to repeat under the same operation ID.
 	staleCreatedAt := time.Now().UTC().Add(-11 * time.Minute)
 	rewind(staleCreatedAt, "stale_claim")
-	takeover, takeoverExit := s.send(args...)
+	before := s.row(opID)
+	keystrokes := idemKeystrokeCount(s.pane)
+	unknown, unknownExit := s.send(args...)
+	if unknownExit == 0 || unknown.Success || unknown.ErrorCode != "OPERATION_OUTCOME_UNKNOWN" {
+		s.failf(opID, "stale started retry = exit=%d envelope=%+v, want unresolved delivery refusal", unknownExit, unknown)
+	}
+	if unknown.Operation == nil || unknown.Operation.DispatchStartedAt == nil || len(unknown.Operation.Admissions) != 1 ||
+		unknown.Operation.Admissions[0].State != "unknown" {
+		s.failf(opID, "stale started retry lost its durable dispatch evidence: %+v", unknown.Operation)
+	}
+	time.Sleep(1500 * time.Millisecond)
+	if got := s.pane.CountEvents("submit"); got != 1 || idemKeystrokeCount(s.pane) != keystrokes {
+		s.failf(opID, "ambiguous retry redelivered: submits=%d keystrokes=%d, want 1/%d", got, idemKeystrokeCount(s.pane), keystrokes)
+	}
+	row := s.row(opID)
+	if row == nil || row.ClaimToken != before.ClaimToken || row.Status != state.SendOperationInProgress ||
+		row.DispatchStartedAt == nil || !row.DispatchStartedAt.Equal(*before.DispatchStartedAt) {
+		s.failf(opID, "ambiguous retry replaced the original claim: %+v", row)
+	}
+	receipt, receiptExit := s.receipt(opID)
+	if receiptExit != 0 || receipt.Operation == nil || receipt.Operation.DispatchStartedAt == nil || receipt.Outcome != nil {
+		s.failf(opID, "unresolved receipt = exit=%d envelope=%+v", receiptExit, receipt)
+	}
+	s.logger.Log("[PASS-5b] stale started operation refused with zero new keystrokes")
+
+	// A distinct operation that never started is recoverable. Its binding
+	// matches the same message/selector; operation IDs are not part of the
+	// command binding. The copied claim is not evidence of a second send.
+	recoveryID := opID + "-unstarted"
+	unstarted, claimed, err := store.ClaimSendOperation(&state.SendOperation{
+		OperationID: recoveryID, SessionName: s.pane.Session, Kind: row.Kind,
+		BindingHash: row.BindingHash, PayloadSHA256: row.PayloadSHA256, PayloadBytes: row.PayloadBytes,
+		CreatedAt: staleCreatedAt, Targets: row.Targets,
+	})
+	if err != nil || !claimed || unstarted.DispatchStartedAt != nil {
+		s.failf(recoveryID, "seed unstarted operation: row=%+v claimed=%v err=%v", unstarted, claimed, err)
+	}
+	recoveryArgs := []string{"--robot-send=" + s.pane.Session, "--msg=" + msg, "--type=claude", "--op-id=" + recoveryID}
+	takeover, takeoverExit := s.send(recoveryArgs...)
 	if takeoverExit != 0 || !takeover.Success {
-		s.failf(opID, "stale takeover retry failed: exit=%d error=%q code=%q", takeoverExit, takeover.Error, takeover.ErrorCode)
+		s.failf(recoveryID, "unstarted recovery failed: exit=%d error=%q code=%q", takeoverExit, takeover.Error, takeover.ErrorCode)
 	}
 	if takeover.Operation == nil || takeover.Operation.Replayed || takeover.Operation.Status != state.SendOperationCompleted {
 		s.failf(opID, "takeover operation = %+v, want a FRESH completed execution (replayed=false)", takeover.Operation)
 	}
-	// Ground truth: the takeover really delivered a second time.
+	// Ground truth: the separately authorized operation delivers once.
 	if _, ok := s.pane.WaitForEvent("submit", msg, 15*time.Second); !ok {
 		s.failf(opID, "fixture has no submit events after takeover")
 	}
@@ -653,9 +695,9 @@ func TestIdempotentSendInProgressAndStaleTakeover(t *testing.T) {
 	if got := s.pane.CountEvents("submit"); got != 2 {
 		s.failf(opID, "fixture submit count = %d after takeover, want 2 (a real second delivery)", got)
 	}
-	row := s.row(opID)
+	row = s.row(recoveryID)
 	s.logger.LogJSON("state_row_after_takeover", row)
-	if row == nil || row.Status != state.SendOperationCompleted {
+	if row == nil || row.Status != state.SendOperationCompleted || row.ClaimToken == unstarted.ClaimToken {
 		s.failf(opID, "state row = %+v, want completed after takeover", row)
 	}
 	// TakeOverStaleSendOperation refreshes created_at; a row still carrying
@@ -663,7 +705,15 @@ func TestIdempotentSendInProgressAndStaleTakeover(t *testing.T) {
 	if !row.CreatedAt.After(staleCreatedAt.Add(10 * time.Minute)) {
 		s.failf(opID, "row created_at = %v, want refreshed past the stale seed %v", row.CreatedAt, staleCreatedAt)
 	}
-	s.logger.Log("[PASS-5b] stale claim taken over and executed fresh (2nd submit observed)")
+	replayed, replayExit := s.send(recoveryArgs...)
+	if replayExit != 0 || !replayed.Success || replayed.Operation == nil || !replayed.Operation.Replayed {
+		s.failf(recoveryID, "recovered operation did not replay its outcome: %+v", replayed)
+	}
+	time.Sleep(1500 * time.Millisecond)
+	if got := s.pane.CountEvents("submit"); got != 2 {
+		s.failf(recoveryID, "recovered replay submitted again: got %d, want 2 total across distinct operations", got)
+	}
+	s.logger.Log("[PASS-5c] unstarted claim recovered with a new owner, delivered once, and replayed safely")
 }
 
 // =============================================================================
