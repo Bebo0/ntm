@@ -1,19 +1,25 @@
 package tools
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"log/slog"
+	"math"
 	"os/exec"
+	"sort"
 	"strings"
 	"sync"
 	"time"
 )
 
 // PTAdapter provides integration with the process_triage tool.
-// process_triage uses Bayesian classification to identify useful, abandoned, and zombie processes.
+// The passive watch contract supplies suspected-abandonment candidates, not a
+// complete classification of every process and never authority to terminate it.
 type PTAdapter struct {
 	*BaseAdapter
 }
@@ -101,22 +107,12 @@ func (a *PTAdapter) Health(ctx context.Context) (*HealthStatus, error) {
 		}, nil
 	}
 
-	// Try a basic classify call to verify functionality
-	ctx2, cancel := context.WithTimeout(ctx, 5*time.Second)
-	defer cancel()
-
-	// Try self-classify as a sanity check (classify our own process)
-	cmd := exec.CommandContext(ctx2, path, "health", "--json")
-	cmd.WaitDelay = time.Second
-	var stdout, stderr bytes.Buffer
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
-
-	if err := cmd.Run(); err != nil {
-		// health command might not exist, try version-based health
+	// Discover the actual passive surface without scanning or creating a plan.
+	if err := ptWatchSupported(ctx, path, a.Timeout()); err != nil {
 		return &HealthStatus{
-			Healthy:     true,
-			Message:     "pt is healthy (version check passed)",
+			Healthy:     false,
+			Message:     "pt passive watch unavailable",
+			Error:       err.Error(),
 			LastChecked: time.Now(),
 			Latency:     latency,
 		}, nil
@@ -124,7 +120,7 @@ func (a *PTAdapter) Health(ctx context.Context) (*HealthStatus, error) {
 
 	return &HealthStatus{
 		Healthy:     true,
-		Message:     "pt is healthy",
+		Message:     "pt passive watch supported (no process sample collected)",
 		LastChecked: time.Now(),
 		Latency:     latency,
 	}, nil
@@ -164,6 +160,10 @@ type PTProcessResult struct {
 	Classification PTClassification `json:"classification"`
 	Confidence     float64          `json:"confidence"` // 0.0 to 1.0
 	Reason         string           `json:"reason,omitempty"`
+	Source         string           `json:"source,omitempty"`
+	Recommendation string           `json:"recommendation,omitempty"`
+	// Watch confidence is P(abandoned), not confidence that spare == useful.
+	AbandonmentProbability *float64 `json:"abandonment_probability,omitempty"`
 }
 
 var (
@@ -180,6 +180,12 @@ func ptLogger() *slog.Logger {
 
 // GetStatus returns the current pt status with caching
 func (a *PTAdapter) GetStatus(ctx context.Context) (*PTStatus, error) {
+	if ctx == nil {
+		return nil, errors.New("pt status requires a context")
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	ptStatusMutex.RLock()
 	if time.Now().Before(ptStatusExpiry) {
 		status := ptStatusCache
@@ -189,6 +195,10 @@ func (a *PTAdapter) GetStatus(ctx context.Context) (*PTStatus, error) {
 	ptStatusMutex.RUnlock()
 
 	status := a.fetchStatus(ctx)
+	// An interrupted probe must not disable every later reader for five minutes.
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 
 	ptStatusMutex.Lock()
 	ptStatusCache = *status
@@ -242,6 +252,10 @@ func (a *PTAdapter) fetchStatus(ctx context.Context) *PTStatus {
 		return status
 	}
 
+	if err := ptWatchSupported(ctx, path, a.Timeout()); err != nil {
+		status.Error = err.Error()
+		return status
+	}
 	status.Compatible = true
 	return status
 }
@@ -250,73 +264,152 @@ func ptCompatible(version Version) bool {
 	return version.AtLeast(ptMinVersion)
 }
 
-// ClassifyProcess classifies a single process by PID
+// ClassifyProcess uses the same passive snapshot as the fleet monitor.
 func (a *PTAdapter) ClassifyProcess(ctx context.Context, pid int) (*PTProcessResult, error) {
-	ctx, cancel := context.WithTimeout(ctx, a.Timeout())
-	defer cancel()
-
-	cmd := exec.CommandContext(ctx, a.BinaryName(), "classify", "--pid", fmt.Sprintf("%d", pid), "--json")
-	cmd.WaitDelay = time.Second
-	stdout := NewLimitedBuffer(10 * 1024 * 1024)
-	var stderr bytes.Buffer
-	cmd.Stdout = stdout
-	cmd.Stderr = &stderr
-
-	if err := cmd.Run(); err != nil {
-		if ctx.Err() == context.DeadlineExceeded {
-			return nil, ErrTimeout
-		}
-		return nil, fmt.Errorf("pt classify failed: %w: %s", err, stderr.String())
+	results, err := a.ClassifyProcesses(ctx, []int{pid})
+	if err != nil {
+		return nil, err
 	}
-
-	output := stdout.Bytes()
-	if !json.Valid(output) {
-		return nil, fmt.Errorf("invalid JSON output from pt classify")
-	}
-
-	var result PTProcessResult
-	if err := json.Unmarshal(output, &result); err != nil {
-		return nil, fmt.Errorf("failed to parse pt classify result: %w", err)
-	}
-
-	return &result, nil
+	return &results[0], nil
 }
 
-// ClassifyProcesses classifies multiple processes
+// ClassifyProcesses samples one non-persistent, recommendation-only PT watch
+// iteration for the entire host, then selects the requested PIDs. Unlike agent
+// plan, watch does not create a new session directory on every monitor poll.
+// Omitted PIDs, review and spare recommendations remain unknown: watch filters
+// protected/young/low-posterior processes and cannot certify their health.
 func (a *PTAdapter) ClassifyProcesses(ctx context.Context, pids []int) ([]PTProcessResult, error) {
+	if ctx == nil {
+		return nil, errors.New("pt watch requires a context")
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	wanted := make(map[int]struct{}, len(pids))
+	for _, pid := range pids {
+		if pid <= 0 || uint64(pid) > math.MaxUint32 {
+			return nil, fmt.Errorf("invalid process PID %d", pid)
+		}
+		wanted[pid] = struct{}{}
+	}
+	if len(wanted) == 0 {
+		return []PTProcessResult{}, nil
+	}
 	ctx, cancel := context.WithTimeout(ctx, a.Timeout())
 	defer cancel()
-
-	// Build PID args
-	args := []string{"classify", "--json"}
-	for _, pid := range pids {
-		args = append(args, "--pid", fmt.Sprintf("%d", pid))
-	}
-
-	cmd := exec.CommandContext(ctx, a.BinaryName(), args...)
+	started := time.Now()
+	cmd := exec.CommandContext(ctx, a.BinaryName(), "agent", "watch", "--once", "--threshold", "low", "--format", "jsonl")
 	cmd.WaitDelay = time.Second
 	stdout := NewLimitedBuffer(10 * 1024 * 1024)
-	var stderr bytes.Buffer
-	cmd.Stdout = stdout
-	cmd.Stderr = &stderr
-
-	if err := cmd.Run(); err != nil {
-		if ctx.Err() == context.DeadlineExceeded {
-			return nil, ErrTimeout
+	stderr := NewLimitedBuffer(64 * 1024)
+	// Hide bytes.Buffer's promoted ReadFrom: io.Copy would bypass Write's
+	// limit through that fast path, especially for stderr-only failures.
+	cmd.Stdout = struct{ io.Writer }{stdout}
+	cmd.Stderr = struct{ io.Writer }{stderr}
+	err := cmd.Run()
+	if ctx.Err() != nil {
+		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+			return nil, errors.Join(ErrTimeout, ctx.Err())
 		}
-		return nil, fmt.Errorf("pt classify failed: %w: %s", err, stderr.String())
+		return nil, ctx.Err()
 	}
-
-	output := stdout.Bytes()
-	if !json.Valid(output) {
-		return nil, fmt.Errorf("invalid JSON output from pt classify")
+	if err != nil {
+		// No prefix success and no raw stderr/command-line disclosure. Watch
+		// exits zero on a successful snapshot; plan's exit-one contract differs.
+		return nil, fmt.Errorf("pt passive watch failed: %w", err)
 	}
+	return parsePTWatch(stdout.Bytes(), wanted, started, time.Now())
+}
 
-	var results []PTProcessResult
-	if err := json.Unmarshal(output, &results); err != nil {
-		return nil, fmt.Errorf("failed to parse pt classify results: %w", err)
+func ptWatchSupported(ctx context.Context, path string, timeout time.Duration) error {
+	ctx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, path, "agent", "watch", "--help")
+	cmd.WaitDelay = time.Second
+	stdout, stderr := NewLimitedBuffer(64*1024), NewLimitedBuffer(64*1024)
+	cmd.Stdout, cmd.Stderr = struct{ io.Writer }{stdout}, struct{ io.Writer }{stderr}
+	err := cmd.Run()
+	if ctx.Err() != nil {
+		return ctx.Err()
 	}
+	if err != nil {
+		return fmt.Errorf("pt watch discovery failed: %w", err)
+	}
+	help := stdout.String() + stderr.String()
+	for _, flag := range []string{"--once", "--threshold", "--format"} {
+		if !strings.Contains(help, flag) {
+			return fmt.Errorf("%w: pt agent watch lacks %s", ErrCapabilityMissing, flag)
+		}
+	}
+	return nil
+}
 
+func parsePTWatch(data []byte, wanted map[int]struct{}, started, finished time.Time) ([]PTProcessResult, error) {
+	byPID := make(map[int]PTProcessResult, len(wanted))
+	seen := make(map[int]bool)
+	scanner := bufio.NewScanner(bytes.NewReader(data))
+	scanner.Buffer(make([]byte, 4096), 64*1024)
+	line := 0
+	for scanner.Scan() {
+		line++
+		if len(bytes.TrimSpace(scanner.Bytes())) == 0 {
+			continue
+		}
+		var event struct {
+			Event          string   `json:"event"`
+			PID            int      `json:"pid"`
+			Classification string   `json:"classification"`
+			Confidence     *float64 `json:"confidence"`
+			Timestamp      string   `json:"timestamp"`
+		}
+		if json.Unmarshal(scanner.Bytes(), &event) != nil {
+			return nil, fmt.Errorf("%w: invalid pt watch record %d", ErrSchemaValidation, line)
+		}
+		switch event.Event {
+		case "goal_violated", "baseline_anomaly":
+			continue // Host events are not process classifications.
+		case "candidate_detected":
+		default:
+			return nil, fmt.Errorf("%w: unexpected pt watch event on record %d", ErrSchemaValidation, line)
+		}
+		stamp, err := time.Parse(time.RFC3339Nano, event.Timestamp)
+		if err != nil || stamp.Before(started.Add(-5*time.Second)) || stamp.After(finished.Add(5*time.Second)) ||
+			event.PID <= 0 || uint64(event.PID) > math.MaxUint32 || event.Confidence == nil ||
+			math.IsNaN(*event.Confidence) || math.IsInf(*event.Confidence, 0) || *event.Confidence < 0.5 || *event.Confidence > 1 || seen[event.PID] {
+			return nil, fmt.Errorf("%w: invalid or repeated pt watch candidate on record %d", ErrSchemaValidation, line)
+		}
+		seen[event.PID] = true
+		classification := PTClassUnknown
+		confidence := 0.0
+		switch event.Classification {
+		case "kill":
+			classification, confidence = PTClassAbandoned, *event.Confidence
+		case "spare", "review":
+		default:
+			return nil, fmt.Errorf("%w: unsupported pt recommendation on record %d", ErrSchemaValidation, line)
+		}
+		if _, ok := wanted[event.PID]; ok {
+			byPID[event.PID] = PTProcessResult{
+				PID: event.PID, Classification: classification, Confidence: confidence,
+				Source: "pt_agent_watch", Recommendation: event.Classification,
+				AbandonmentProbability: event.Confidence,
+				Reason:                 fmt.Sprintf("PT watch recommends %s (abandonment probability %.3f); advisory only", event.Classification, *event.Confidence),
+			}
+		}
+	}
+	if scanner.Err() != nil {
+		return nil, fmt.Errorf("%w: pt watch record exceeds limit", ErrOutputLimitExceeded)
+	}
+	results := make([]PTProcessResult, 0, len(wanted))
+	for pid := range wanted {
+		result, ok := byPID[pid]
+		if !ok {
+			result = PTProcessResult{PID: pid, Classification: PTClassUnknown, Source: "pt_agent_watch",
+				Reason: "not reported by thresholded PT watch; health is unknown"}
+		}
+		results = append(results, result)
+	}
+	sort.Slice(results, func(i, j int) bool { return results[i].PID < results[j].PID })
 	return results, nil
 }
 

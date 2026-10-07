@@ -6,6 +6,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"sort"
 	"sync"
 	"time"
 
@@ -32,16 +33,22 @@ const (
 
 // ClassificationEvent records a single classification result.
 type ClassificationEvent struct {
-	Classification Classification `json:"classification"`
-	Confidence     float64        `json:"confidence"` // 0.0 to 1.0
-	Timestamp      time.Time      `json:"timestamp"`
-	Reason         string         `json:"reason,omitempty"`
-	NetworkActive  bool           `json:"network_active,omitempty"` // From rano if available
+	Classification         Classification `json:"classification"`
+	Confidence             float64        `json:"confidence"` // 0.0 to 1.0
+	Timestamp              time.Time      `json:"timestamp"`
+	Reason                 string         `json:"reason,omitempty"`
+	NetworkActive          bool           `json:"network_active,omitempty"` // From rano if available
+	Source                 string         `json:"source,omitempty"`
+	Recommendation         string         `json:"recommendation,omitempty"`
+	AbandonmentProbability float64        `json:"abandonment_probability,omitempty"`
 }
 
 // AgentState tracks the current state and history for an agent pane.
 type AgentState struct {
 	Pane             string                `json:"pane"`
+	Session          string                `json:"session,omitempty"`
+	WindowIndex      int                   `json:"window_index"`
+	PaneIndex        int                   `json:"pane_index"`
 	PID              int                   `json:"pid"`
 	Classification   Classification        `json:"classification"`
 	Confidence       float64               `json:"confidence"`
@@ -92,6 +99,23 @@ type StateChangeCallback func(ClassificationStateChange)
 // AlertCallback receives cycle-safe PT alerts when they are emitted.
 type AlertCallback func(Alert)
 
+type processClassifier interface {
+	IsAvailable(context.Context) bool
+	ClassifyProcesses(context.Context, []int) ([]tools.PTProcessResult, error)
+	InvalidateStatusCache()
+}
+
+type processPaneMap interface {
+	RefreshContext(context.Context) error
+	GetPIDLabels() map[int]string
+	GetPaneForPID(int) *rano.PaneIdentity
+}
+
+type processNetworkSource interface {
+	IsAvailable(context.Context) bool
+	GetAllProcessStats(context.Context) ([]tools.RanoProcessStats, error)
+}
+
 // HealthMonitor monitors agent health via process_triage.
 type HealthMonitor struct {
 	mu sync.RWMutex
@@ -99,9 +123,11 @@ type HealthMonitor struct {
 	lifecycleMu sync.Mutex
 
 	config      *config.ProcessTriageConfig
-	pidMap      *rano.PIDMap
-	ptAdapter   *tools.PTAdapter
-	ranoAdapter *tools.RanoAdapter
+	pidMap      processPaneMap
+	ptAdapter   processClassifier
+	ranoAdapter processNetworkSource
+	pollContext context.Context
+	cancelPoll  context.CancelFunc
 
 	states map[string]*AgentState // pane -> state
 	stopCh chan struct{}
@@ -145,6 +171,12 @@ func WithAlertCallback(cb AlertCallback) HealthMonitorOption {
 
 // NewHealthMonitor creates a new health monitor with the given configuration.
 func NewHealthMonitor(cfg *config.ProcessTriageConfig, opts ...HealthMonitorOption) *HealthMonitor {
+	if cfg == nil {
+		defaults := config.DefaultProcessTriageConfig()
+		cfg = &defaults
+	}
+	configCopy := *cfg
+	cfg = &configCopy
 	m := &HealthMonitor{
 		config:         cfg,
 		states:         make(map[string]*AgentState),
@@ -179,15 +211,21 @@ func (m *HealthMonitor) Start() error {
 		m.mu.Unlock()
 		return nil
 	}
+	if m.config.CheckInterval <= 0 {
+		m.mu.Unlock()
+		return fmt.Errorf("process_triage check interval must be positive")
+	}
 
 	// Verify pt is available
-	ctx := context.Background()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
 	if !m.ptAdapter.IsAvailable(ctx) {
 		m.mu.Unlock()
 		return fmt.Errorf("process_triage (pt) is not available")
 	}
 
 	m.running = true
+	m.pollContext, m.cancelPoll = context.WithCancel(context.Background())
 	m.stopCh = make(chan struct{})
 	m.doneCh = make(chan struct{})
 	m.mu.Unlock()
@@ -215,11 +253,17 @@ func (m *HealthMonitor) Stop() {
 		return
 	}
 	m.running = false
+	if m.cancelPoll != nil {
+		m.cancelPoll()
+	}
 	close(m.stopCh)
 	m.mu.Unlock()
 
 	// Wait for loop to finish
 	<-m.doneCh
+	m.mu.Lock()
+	clear(m.states)
+	m.mu.Unlock()
 
 	monitorLogger().Info("health monitor stopped")
 }
@@ -239,6 +283,7 @@ func (m *HealthMonitor) GetAllStates() map[string]*AgentState {
 	result := make(map[string]*AgentState, len(m.states))
 	for pane, state := range m.states {
 		stateCopy := *state
+		stateCopy.History = append([]ClassificationEvent(nil), state.History...)
 		result[pane] = &stateCopy
 	}
 	return result
@@ -249,16 +294,17 @@ func (m *HealthMonitor) monitorLoop() {
 	defer close(m.doneCh)
 
 	interval := time.Duration(m.config.CheckInterval) * time.Second
-	ticker := time.NewTicker(interval)
-	defer ticker.Stop()
-
 	// Do an initial check immediately
 	m.checkAll()
+	// A slow whole-host sample must not create a catch-up burst of scans.
+	timer := time.NewTimer(interval)
+	defer timer.Stop()
 
 	for {
 		select {
-		case <-ticker.C:
+		case <-timer.C:
 			m.checkAll()
+			timer.Reset(interval)
 		case <-m.stopCh:
 			return
 		}
@@ -267,8 +313,24 @@ func (m *HealthMonitor) monitorLoop() {
 
 // checkAll checks the health of all agent processes.
 func (m *HealthMonitor) checkAll() {
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	m.mu.RLock()
+	parent := m.pollContext
+	m.mu.RUnlock()
+	if parent == nil {
+		parent = context.Background()
+	}
+	ctx, cancel := context.WithTimeout(parent, 30*time.Second)
 	defer cancel()
+	completed := false
+	defer func() {
+		if !completed {
+			// Unavailable evidence must not leave a stale stuck/useful verdict
+			// visible indefinitely or accrue duration through a failed sample.
+			m.mu.Lock()
+			clear(m.states)
+			m.mu.Unlock()
+		}
+	}()
 
 	// Refresh PID map to get current pane->PID mappings
 	if err := m.pidMap.RefreshContext(ctx); err != nil {
@@ -278,6 +340,21 @@ func (m *HealthMonitor) checkAll() {
 
 	// Get all PIDs with their labels
 	pidLabels := m.pidMap.GetPIDLabels()
+	identities := make(map[int]*rano.PaneIdentity, len(pidLabels))
+	for pid := range pidLabels {
+		identity := m.pidMap.GetPaneForPID(pid)
+		if identity == nil || identity.PaneID == "" {
+			delete(pidLabels, pid)
+			continue
+		}
+		kind := string(identity.AgentType.Canonical())
+		if kind == "" || kind == "user" || kind == "unknown" {
+			delete(pidLabels, pid)
+			continue
+		}
+		identities[pid] = identity
+		pidLabels[pid] = identity.PaneID
+	}
 	if len(pidLabels) == 0 {
 		monitorLogger().Debug("no panes to monitor")
 		return
@@ -288,6 +365,7 @@ func (m *HealthMonitor) checkAll() {
 	for pid := range pidLabels {
 		pids = append(pids, pid)
 	}
+	sort.Ints(pids)
 
 	// Classify all processes at once
 	results, err := m.ptAdapter.ClassifyProcesses(ctx, pids)
@@ -308,20 +386,31 @@ func (m *HealthMonitor) checkAll() {
 		}
 	}
 
-	// Process results
+	if ctx.Err() != nil {
+		return
+	}
+	// Collapse all shell/child results to one deterministic pane observation.
+	// A quiet child cannot overwrite a sibling's abandonment signal, and one
+	// poll cannot advance ConsecutiveCount once per child or emit duplicate alerts.
 	now := time.Now()
-	seenPanes := make(map[string]bool)
+	byPID := make(map[int]tools.PTProcessResult, len(results))
+	for _, result := range results {
+		byPID[result.PID] = result
+	}
+	type paneSample struct {
+		pid   int
+		event ClassificationEvent
+	}
+	samples := make(map[string]paneSample)
 	var stateChanges []ClassificationStateChange
 	var alerts []Alert
-
-	m.mu.Lock()
-
-	for _, result := range results {
-		pane := pidLabels[result.PID]
-		if pane == "" {
-			continue
+	for _, pid := range pids {
+		result, ok := byPID[pid]
+		if !ok {
+			result = tools.PTProcessResult{PID: pid, Classification: tools.PTClassUnknown,
+				Reason: "PT returned no process observation"}
 		}
-		seenPanes[pane] = true
+		pane := pidLabels[pid]
 
 		// Convert pt classification to our classification
 		classification := mapPTClassification(result.Classification)
@@ -330,10 +419,11 @@ func (m *HealthMonitor) checkAll() {
 		networkActive := false
 		if ranoStats != nil {
 			if stats, ok := ranoStats[result.PID]; ok {
-				// Consider network active if there was a request in the last check interval
-				if stats.LastRequest != "" {
-					if lastReq, err := time.Parse(time.RFC3339, stats.LastRequest); err == nil {
-						networkActive = time.Since(lastReq) < time.Duration(m.config.CheckInterval)*time.Second
+				// Rano exports connection events, not HTTP request/byte counts.
+				if stats.LastConnection != "" {
+					if lastReq, err := time.Parse(time.RFC3339Nano, stats.LastConnection); err == nil {
+						age := now.Sub(lastReq)
+						networkActive = age >= 0 && age < time.Duration(m.config.CheckInterval)*time.Second
 					}
 				}
 			}
@@ -350,29 +440,77 @@ func (m *HealthMonitor) checkAll() {
 			Timestamp:      now,
 			Reason:         result.Reason,
 			NetworkActive:  networkActive,
+			Source:         result.Source,
+			Recommendation: result.Recommendation,
 		}
-
-		if change := m.updateState(pane, result.PID, event); change != nil {
+		if result.AbandonmentProbability != nil {
+			event.AbandonmentProbability = *result.AbandonmentProbability
+		}
+		previous, exists := samples[pane]
+		if !exists || ptStatePriority(event.Classification) > ptStatePriority(previous.event.Classification) ||
+			(ptStatePriority(event.Classification) == ptStatePriority(previous.event.Classification) &&
+				(event.Confidence > previous.event.Confidence ||
+					(event.Confidence == previous.event.Confidence && event.AbandonmentProbability > previous.event.AbandonmentProbability))) {
+			samples[pane] = paneSample{pid: pid, event: event}
+		}
+	}
+	panes := make([]string, 0, len(samples))
+	for pane := range samples {
+		panes = append(panes, pane)
+	}
+	sort.Strings(panes)
+	m.mu.Lock()
+	for _, pane := range panes {
+		sample := samples[pane]
+		identity := identities[sample.pid]
+		if change := m.updateState(pane, sample.pid, sample.event); change != nil {
+			change.Session = identity.Session
 			stateChanges = append(stateChanges, *change)
 		}
-		alerts = append(alerts, m.checkAlerts(pane)...)
+		state := m.states[pane]
+		state.Session, state.WindowIndex, state.PaneIndex = identity.Session, identity.WindowIndex, identity.PaneIndex
+		for _, alert := range m.checkAlerts(pane) {
+			alert.Session = identity.Session
+			if sample.event.Source == "pt_agent_watch" {
+				alert.Message = fmt.Sprintf("PT suspects an abandoned process in pane %s; inspect before acting", pane)
+			}
+			alerts = append(alerts, alert)
+		}
 	}
 
 	// Clean up states for panes that no longer exist
 	for pane := range m.states {
-		if !seenPanes[pane] {
+		if _, seen := samples[pane]; !seen {
 			delete(m.states, pane)
 			monitorLogger().Debug("removed stale pane state", "pane", pane)
 		}
 	}
 
 	m.mu.Unlock()
+	completed = true
 
 	for _, change := range stateChanges {
 		m.emitStateChange(change)
 	}
 	for _, alert := range alerts {
 		m.sendAlert(alert)
+	}
+}
+
+func ptStatePriority(class Classification) int {
+	switch class {
+	case ClassZombie:
+		return 5
+	case ClassStuck:
+		return 4
+	case ClassWaiting:
+		return 3
+	case ClassUseful:
+		return 2
+	case ClassIdle:
+		return 1
+	default:
+		return 0
 	}
 }
 
@@ -394,7 +532,7 @@ func mapPTClassification(ptClass tools.PTClassification) Classification {
 // Must be called with m.mu held.
 func (m *HealthMonitor) updateState(pane string, pid int, event ClassificationEvent) *ClassificationStateChange {
 	state, exists := m.states[pane]
-	if !exists {
+	if !exists || state.PID != pid {
 		state = &AgentState{
 			Pane:             pane,
 			PID:              pid,

@@ -99,12 +99,16 @@ type PTHealthSignals struct {
 
 // PTHealthInfo contains process_triage classification data for a pane.
 type PTHealthInfo struct {
-	Classification  string           `json:"classification"`             // useful, waiting, idle, stuck, zombie, unknown
-	Since           string           `json:"since,omitempty"`            // RFC3339 timestamp when classification started
-	DurationSeconds int              `json:"duration_seconds,omitempty"` // Seconds in current state
-	Signals         *PTHealthSignals `json:"signals,omitempty"`          // Underlying signals
-	Confidence      float64          `json:"confidence"`                 // 0.0 to 1.0
-	Reason          string           `json:"reason,omitempty"`           // Classification reason
+	Classification         string           `json:"classification"`             // useful, waiting, idle, stuck, zombie, unknown
+	Since                  string           `json:"since,omitempty"`            // RFC3339 timestamp when classification started
+	DurationSeconds        int              `json:"duration_seconds,omitempty"` // Seconds in current state
+	Signals                *PTHealthSignals `json:"signals,omitempty"`          // Underlying signals
+	Confidence             float64          `json:"confidence"`                 // 0.0 to 1.0
+	Reason                 string           `json:"reason,omitempty"`           // Classification reason
+	Source                 string           `json:"source,omitempty"`
+	ObservedAt             string           `json:"observed_at,omitempty"`
+	Recommendation         string           `json:"recommendation,omitempty"` // PT advice, never authorization to act
+	AbandonmentProbability *float64         `json:"abandonment_probability,omitempty"`
 }
 
 // PTHealthSummary contains counts by classification.
@@ -170,6 +174,7 @@ const (
 	PTAvailabilityUnavailable       PTAvailability = "unavailable"
 	PTAvailabilityMonitorNotRunning PTAvailability = "monitor_not_running"
 	PTAvailabilityAvailable         PTAvailability = "available"
+	PTAvailabilityNoObservations    PTAvailability = "no_observations"
 )
 
 // AgentHealthOutput is the response for --robot-agent-health.
@@ -406,7 +411,13 @@ func GetAgentHealth(opts AgentHealthOptions) (*AgentHealthOutput, error) {
 
 	// Include PT summary if we have PT data
 	if output.PTAvailable && ptSummary != nil {
-		output.PTSummary = ptSummary
+		if ptSummary.Useful+ptSummary.Waiting+ptSummary.Idle+ptSummary.Stuck+ptSummary.Zombie+ptSummary.Unknown == 0 {
+			// A running process with no matching sample is not evidence about
+			// this selection. In particular a failed monitor poll clears data.
+			output.PTStatus, output.PTAvailable = PTAvailabilityNoObservations, false
+		} else {
+			output.PTSummary = ptSummary
+		}
 	}
 
 	return output, nil
@@ -536,10 +547,34 @@ func updateProviderSummary(summary map[string]ProviderStats, provider string, pa
 	summary[provider] = stats
 }
 
-// findPTState finds the PT state for a pane by trying various identifier patterns.
+// findPTState resolves live monitor samples by session and physical topology,
+// or by exact tmux ID. A bare index matching several windows is ambiguous.
+// Metadata-bearing samples never fall back to mutable title/suffix guesses.
 func findPTState(ptStates map[string]*pt.AgentState, session, paneStr, agentType string) *pt.AgentState {
 	if ptStates == nil {
 		return nil
+	}
+	var matched *pt.AgentState
+	hasTopology := false
+	for key, state := range ptStates {
+		if state == nil || state.Session == "" {
+			continue
+		}
+		hasTopology = true
+		if state.Session != session || state.Pane != key || !strings.HasPrefix(key, "%") {
+			continue
+		}
+		if paneStr != key && paneStr != fmt.Sprintf("%d.%d", state.WindowIndex, state.PaneIndex) &&
+			paneStr != fmt.Sprint(state.PaneIndex) {
+			continue
+		}
+		if matched != nil {
+			return nil
+		}
+		matched = state
+	}
+	if hasTopology {
+		return matched
 	}
 
 	// Try direct pane string match first
@@ -598,6 +633,9 @@ func convertPTState(state *pt.AgentState, isWorking bool) *PTHealthInfo {
 		Confidence:      state.Confidence,
 		DurationSeconds: int(time.Since(state.Since).Seconds()),
 	}
+	if !state.LastCheck.IsZero() {
+		info.ObservedAt = state.LastCheck.UTC().Format(time.RFC3339Nano)
+	}
 
 	if !state.Since.IsZero() {
 		info.Since = state.Since.Format(time.RFC3339)
@@ -607,6 +645,12 @@ func convertPTState(state *pt.AgentState, isWorking bool) *PTHealthInfo {
 	if len(state.History) > 0 {
 		latest := state.History[len(state.History)-1]
 		info.Reason = latest.Reason
+		info.Source = latest.Source
+		info.Recommendation = latest.Recommendation
+		if latest.Recommendation != "" {
+			probability := latest.AbandonmentProbability
+			info.AbandonmentProbability = &probability
+		}
 		info.Signals = &PTHealthSignals{
 			NetworkActive: latest.NetworkActive,
 			OutputRecent:  isWorking, // Use local state as proxy for output activity
