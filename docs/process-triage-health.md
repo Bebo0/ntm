@@ -15,10 +15,9 @@ version string as proof that classification is supported.
 
 In `ntm serve`, monitor classification changes and alerts are published to the
 durable attention feed that `--robot-attention` and `--robot-snapshot --since`
-read from other processes. The robot agent-health reader takes
-`pt_health`/`pt_summary` only from a monitor running in its own process; a
-one-shot `ntm --robot-agent-health` has none and reports
-`pt_status: "monitor_not_running"` with `pt_available: false`.
+read from other processes. The robot agent-health reader reuses a monitor
+running in its own process, or takes a standalone passive snapshot as described
+below. Standalone snapshots do not publish monitor alerts to the attention feed.
 
 Each poll runs one bounded whole-host watch iteration and filters its results
 to the processes attributed to agent panes. It does not call `agent apply`, pass
@@ -42,8 +41,32 @@ Monitor events and robot health details retain `source: "pt_agent_watch"`, the
 raw recommendation and abandonment probability. Robot details expose
 `observed_at` from the completed monitor sample. A running monitor with no
 matching observations yields `pt_status: "no_observations"`, not an available
-healthy sample. This does not start a monitor for one-shot robot CLI invocations
-or add persistence to the process-local health cache.
+healthy sample.
+
+Standalone `ntm --robot-agent-health=<session>` reads now obtain one bounded
+passive snapshot when no resident monitor is running in the current process.
+No extra flag or daemon is required. The response identifies
+`pt_observation_mode: "snapshot"` or `"monitor"`; `source: "pt_agent_watch"`
+continues to identify the evidence provider. Snapshot histories begin at the
+current sample, so their duration starts at zero rather than inventing a prior
+stuck interval. Subsequent standalone calls do not accumulate history.
+
+A running resident monitor is reused without starting a duplicate host scan.
+Disabled PT, empty/shell-only selections, dead agent CLIs and unavailable local
+observations do not invoke PT. PT discovery and command execution share the existing
+PT timeout (10 seconds by default); a nonpositive programmatic timeout uses that
+default. Filesystem process-tree traversal remains best-effort rather than a
+hard real-time cancellation guarantee. `pt_status: "timed_out"`, `"sample_failed"`, `"unavailable"` and
+`"no_observations"` explicitly distinguish degraded reads. A PT failure does not
+discard successful local health results or attach a partial PT verdict. Raw
+subprocess errors are not returned in the robot health response.
+
+One-shot reads use the same synchronous sampler and pane aggregation as the
+resident monitor. They do not start workers, modify the global monitor, emit
+its callbacks, or persist state. They also do not query Rano: a health read must
+not incidentally open or migrate an observer database. Rano enrichment remains
+available in the configured resident monitor. There is no persistent health
+cache or automatic remediation.
 
 ## Pane and lifecycle ownership
 
@@ -54,6 +77,11 @@ evidence, then the lower PID. Counts, histories and alerts advance once per pane
 not once per child. Session/window/index metadata follows that pane into robot
 lookups; equal pane indices across windows are not silently interchangeable.
 Callbacks carry the observed session, including for the all-session monitor.
+The root `pane_pid` is retained separately from the representative child PID.
+Robot readers require it to match the local terminal observation, so respawned
+panes cannot inherit results through reused pane indices. A changed root also
+resets resident observation history. These checks do not prove historical PID
+incarnation identity or eliminate every sampling race.
 
 Recent Rano `last_connection` evidence (`use_rano_data`, read from the database
 named by `[integrations.rano] sqlite_path`; see `docs/rano-stats.md`) can

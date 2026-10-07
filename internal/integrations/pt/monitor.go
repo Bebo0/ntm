@@ -50,6 +50,7 @@ type AgentState struct {
 	WindowIndex      int                   `json:"window_index"`
 	PaneIndex        int                   `json:"pane_index"`
 	PID              int                   `json:"pid"`
+	PanePID          int                   `json:"pane_pid,omitempty"` // Root process used for pane attribution
 	Classification   Classification        `json:"classification"`
 	Confidence       float64               `json:"confidence"`
 	Since            time.Time             `json:"since"` // When this classification started
@@ -333,6 +334,15 @@ func (m *HealthMonitor) checkAll() {
 	}
 	ctx, cancel := context.WithTimeout(parent, 30*time.Second)
 	defer cancel()
+	if err := m.sample(ctx); err != nil {
+		monitorLogger().Warn("failed to sample process health", "error", err)
+	}
+}
+
+// sample is the shared synchronous collection path. The resident monitor calls
+// it serially; one-shot readers use their own private monitor with no callbacks.
+// Failed or empty samples never retain a previous verdict.
+func (m *HealthMonitor) sample(ctx context.Context) error {
 	completed := false
 	defer func() {
 		if !completed {
@@ -346,8 +356,7 @@ func (m *HealthMonitor) checkAll() {
 
 	// Refresh PID map to get current pane->PID mappings
 	if err := m.pidMap.RefreshContext(ctx); err != nil {
-		monitorLogger().Warn("failed to refresh PID map", "error", err)
-		return
+		return fmt.Errorf("refresh PT pane attribution: %w", err)
 	}
 
 	// Get all PIDs with their labels
@@ -369,7 +378,7 @@ func (m *HealthMonitor) checkAll() {
 	}
 	if len(pidLabels) == 0 {
 		monitorLogger().Debug("no panes to monitor")
-		return
+		return nil
 	}
 
 	// Collect all PIDs to classify
@@ -382,8 +391,7 @@ func (m *HealthMonitor) checkAll() {
 	// Classify all processes at once
 	results, err := m.ptAdapter.ClassifyProcesses(ctx, pids)
 	if err != nil {
-		monitorLogger().Warn("failed to classify processes", "error", err)
-		return
+		return fmt.Errorf("sample PT processes: %w", err)
 	}
 
 	// Get rano stats if enabled
@@ -398,8 +406,8 @@ func (m *HealthMonitor) checkAll() {
 		}
 	}
 
-	if ctx.Err() != nil {
-		return
+	if err := ctx.Err(); err != nil {
+		return err
 	}
 	// Collapse all shell/child results to one deterministic pane observation.
 	// A quiet child cannot overwrite a sibling's abandonment signal, and one
@@ -475,12 +483,18 @@ func (m *HealthMonitor) checkAll() {
 	for _, pane := range panes {
 		sample := samples[pane]
 		identity := identities[sample.pid]
+		if state := m.states[pane]; state != nil && state.PanePID != identity.PanePID {
+			// Even the same representative PID must not inherit another pane
+			// root's duration if attribution changed between samples.
+			delete(m.states, pane)
+		}
 		if change := m.updateState(pane, sample.pid, sample.event); change != nil {
 			change.Session = identity.Session
 			stateChanges = append(stateChanges, *change)
 		}
 		state := m.states[pane]
 		state.Session, state.WindowIndex, state.PaneIndex = identity.Session, identity.WindowIndex, identity.PaneIndex
+		state.PanePID = identity.PanePID
 		for _, alert := range m.checkAlerts(pane) {
 			alert.Session = identity.Session
 			if sample.event.Source == "pt_agent_watch" {
@@ -507,6 +521,7 @@ func (m *HealthMonitor) checkAll() {
 	for _, alert := range alerts {
 		m.sendAlert(alert)
 	}
+	return nil
 }
 
 func ptStatePriority(class Classification) int {

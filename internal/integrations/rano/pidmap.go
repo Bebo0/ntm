@@ -24,6 +24,7 @@ func pidmapLogger() *slog.Logger {
 // PaneIdentity represents a pane's identity for attribution.
 type PaneIdentity struct {
 	PaneID      string         // Durable tmux identity; titles are not unique
+	PanePID     int            // Root process; also retained on child attribution
 	WindowIndex int            // Physical window containing PaneIndex
 	Session     string         // Session name
 	PaneIndex   int            // Pane index within session
@@ -79,12 +80,9 @@ func (m *PIDMap) RefreshContext(ctx context.Context) error {
 	var err error
 
 	if m.session != "" {
-		// Get specific session
-		sess, err := tmux.GetSession(m.session)
-		if err != nil {
-			return fmt.Errorf("failed to get session %s: %w", m.session, err)
-		}
-		sessions = []tmux.Session{*sess}
+		// GetPanesContext below validates the named session. Avoid GetSession:
+		// its context-free subprocess can outlive a one-shot reader's budget.
+		sessions = []tmux.Session{{Name: m.session}}
 	} else {
 		// Get all sessions
 		sessions, err = tmux.ListSessionsContext(ctx)
@@ -112,6 +110,7 @@ func (m *PIDMap) RefreshContext(ctx context.Context) error {
 
 			identity := &PaneIdentity{
 				PaneID:      pane.ID,
+				PanePID:     pane.PID,
 				WindowIndex: pane.WindowIndex,
 				Session:     sess.Name,
 				PaneIndex:   pane.Index,

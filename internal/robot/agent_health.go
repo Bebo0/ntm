@@ -4,6 +4,7 @@ package robot
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -165,8 +166,8 @@ type AgentHealthQuery struct {
 }
 
 // PTAvailability describes whether process_triage can supply health data for
-// this response. A binary alone is not enough: the monitor must be running to
-// have observations for the current panes.
+// this response. A binary alone is not enough: a resident or one-shot sample
+// must provide observations for the current panes.
 type PTAvailability string
 
 const (
@@ -175,17 +176,20 @@ const (
 	PTAvailabilityMonitorNotRunning PTAvailability = "monitor_not_running"
 	PTAvailabilityAvailable         PTAvailability = "available"
 	PTAvailabilityNoObservations    PTAvailability = "no_observations"
+	PTAvailabilitySampleFailed      PTAvailability = "sample_failed"
+	PTAvailabilityTimedOut          PTAvailability = "timed_out"
 )
 
 // AgentHealthOutput is the response for --robot-agent-health.
 type AgentHealthOutput struct {
 	RobotResponse
-	Session       string                      `json:"session"`
-	Query         AgentHealthQuery            `json:"query"`
-	CautAvailable bool                        `json:"caut_available"`
-	PTAvailable   bool                        `json:"pt_available"` // True only when PT observations are available.
-	PTStatus      PTAvailability              `json:"pt_status"`
-	Panes         map[string]PaneHealthStatus `json:"panes"`
+	Session           string                      `json:"session"`
+	Query             AgentHealthQuery            `json:"query"`
+	CautAvailable     bool                        `json:"caut_available"`
+	PTAvailable       bool                        `json:"pt_available"` // True only when PT observations are available.
+	PTStatus          PTAvailability              `json:"pt_status"`
+	PTObservationMode string                      `json:"pt_observation_mode,omitempty"` // monitor or snapshot
+	Panes             map[string]PaneHealthStatus `json:"panes"`
 	// NonAgentPanes lists selected panes that run no agent: a plain user
 	// shell, or a pane ntm cannot attribute to an agent CLI. They carry no
 	// agent health, so they are kept out of Panes and FleetHealth instead of
@@ -289,27 +293,51 @@ func GetAgentHealth(opts AgentHealthOptions) (*AgentHealthOutput, error) {
 		}
 	}
 
-	// Step 2.5: Query process_triage for health states (if enabled)
+	// Step 2.5: Reuse a resident sample, or obtain one bounded passive sample
+	// for a standalone CLI/API reader. Neither path starts a background worker.
 	var ptStates map[string]*pt.AgentState
 	var ptSummary *PTHealthSummary
 	if opts.IncludePT {
-		ptAdapter := tools.NewPTAdapter()
-		ctx, cancel := context.WithTimeout(context.Background(), opts.PTTimeout)
-		binaryAvailable := ptAdapter.IsAvailable(ctx)
-		monitorRunning := false
-		var monitor *pt.HealthMonitor
-		if binaryAvailable {
-			monitor = pt.GetGlobalMonitor()
-			monitorRunning = monitor.Running()
+		output.PTStatus = PTAvailabilityNoObservations
+		if hasPTHealthTargets(isWorkingResult.Panes) {
+			timeout := opts.PTTimeout
+			if timeout <= 0 {
+				timeout = DefaultAgentHealthOptions().PTTimeout
+			}
+			ctx, cancel := context.WithTimeout(context.Background(), timeout)
+			ptAdapter := tools.NewPTAdapter()
+			binaryAvailable := ptAdapter.IsAvailable(ctx)
+			monitor := pt.GetGlobalMonitor()
+			monitorRunning := monitor.Running()
+			output.PTStatus, output.PTAvailable = ptAvailability(true, binaryAvailable, monitorRunning)
+			if binaryAvailable {
+				if monitorRunning {
+					output.PTObservationMode = "monitor"
+					ptStates = monitor.GetAllStates()
+				} else {
+					output.PTObservationMode = "snapshot"
+					var sampleErr error
+					ptStates, sampleErr = pt.SampleSession(ctx, opts.Session)
+					if sampleErr != nil {
+						output.PTStatus, output.PTAvailable = PTAvailabilitySampleFailed, false
+						if errors.Is(sampleErr, context.DeadlineExceeded) || errors.Is(sampleErr, tools.ErrTimeout) {
+							output.PTStatus = PTAvailabilityTimedOut
+						}
+					} else {
+						output.PTStatus, output.PTAvailable = PTAvailabilityAvailable, true
+					}
+				}
+			}
+			if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+				output.PTStatus, output.PTAvailable = PTAvailabilityTimedOut, false
+				ptStates = nil
+			}
+			if output.PTAvailable {
+				ptSummary = &PTHealthSummary{}
+			}
+			cancel()
 		}
-		output.PTStatus, output.PTAvailable = ptAvailability(true, binaryAvailable, monitorRunning)
-		if output.PTAvailable {
-			ptStates = monitor.GetAllStates()
-			ptSummary = &PTHealthSummary{}
-		}
-		cancel()
 	}
-
 	// Step 3: Build health status for each pane
 	totalScore := 0
 	for paneStr, workStatus := range isWorkingResult.Panes {
@@ -361,7 +389,7 @@ func GetAgentHealth(opts AgentHealthOptions) (*AgentHealthOutput, error) {
 		// Get PT health state if available
 		if output.PTAvailable && ptStates != nil {
 			// Try to find state by pane identifier (e.g., "myproject__cc_1")
-			if state := findPTState(ptStates, opts.Session, paneStr, workStatus.AgentType); state != nil {
+			if state := findPTState(ptStates, opts.Session, paneStr, workStatus.AgentType); ptHealthMatchesObservation(state, workStatus) {
 				healthStatus.PTHealth = convertPTState(state, workStatus.IsWorking)
 				// Update PT summary
 				if ptSummary != nil {
