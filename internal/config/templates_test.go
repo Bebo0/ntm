@@ -671,8 +671,8 @@ func TestGenerateAgentCommandAttachesClaudeSettings(t *testing.T) {
 	})
 
 	// Commands whose last command is not claude, or that already pass their
-	// own --settings, cannot take the hooks; dropping them silently would
-	// leave the agent unprotected.
+	// own --settings, cannot take the hooks: they launch unchanged and the
+	// launch paths warn (never silently) with the fix.
 	for name, tmpl := range map[string]string{
 		"pipe after claude":        `claude --verbose | tee /tmp/log`,
 		"background":               `claude --verbose &`,
@@ -683,13 +683,30 @@ func TestGenerateAgentCommandAttachesClaudeSettings(t *testing.T) {
 		"own settings flag inline": `claude --settings=/etc/claude.json`,
 		"unbalanced quote":         `claude --system-prompt 'oops`,
 	} {
-		t.Run("refuses "+name, func(t *testing.T) {
-			_, err := GenerateAgentCommand(tmpl, AgentTemplateVars{AgentType: "cc", ClaudeSettings: settings})
-			if err == nil || !strings.Contains(err.Error(), "{{.ClaudeSettings}}") || !strings.Contains(err.Error(), "claude_policy_hook") {
-				t.Fatalf("err = %v, want a refusal naming both fixes", err)
+		t.Run("leaves alone "+name, func(t *testing.T) {
+			got, err := GenerateAgentCommand(tmpl, AgentTemplateVars{AgentType: "cc", ClaudeSettings: settings})
+			if err != nil || got != tmpl {
+				t.Fatalf("rendered = %q, %v; want the command unchanged", got, err)
+			}
+			warning := ClaudeHooksNotAppliedWarning(got, settings)
+			if !strings.Contains(warning, "{{shellQuote .ClaudeSettings}}") || !strings.Contains(warning, "claude_policy_hook") {
+				t.Fatalf("warning = %q, want both fixes named", warning)
 			}
 		})
 	}
+
+	t.Run("no warning when the hooks are carried or absent", func(t *testing.T) {
+		got, err := GenerateAgentCommand(`claude --verbose`, AgentTemplateVars{AgentType: "cc", ClaudeSettings: settings})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if w := ClaudeHooksNotAppliedWarning(got, settings); w != "" {
+			t.Fatalf("warning for a command carrying the hooks: %q", w)
+		}
+		if w := ClaudeHooksNotAppliedWarning("claude --verbose | tee log", ""); w != "" {
+			t.Fatalf("warning with no hooks configured: %q", w)
+		}
+	})
 }
 
 func TestFinalShellCommand(t *testing.T) {

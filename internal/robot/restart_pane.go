@@ -1904,10 +1904,11 @@ func restartAgentLaunchCommandWithOverride(cfg *config.Config, agentType, varian
 	}
 
 	rendered, err := config.GenerateAgentCommand(tmpl, vars)
+	if err == nil {
+		policy.LogClaudeHooksNotApplied("restart", rendered, vars.ClaudeSettings)
+	}
 	if err != nil || strings.TrimSpace(rendered) == "" {
-		// Falling back to the bare alias would relaunch Claude without its
-		// safety hooks, so a hook-carrying render failure is loud.
-		if override.empty() && (vars.ClaudeSettings == "" || err == nil) {
+		if override.empty() {
 			return alias, nil
 		}
 		if err == nil {

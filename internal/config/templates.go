@@ -418,9 +418,9 @@ func GenerateAgentCommand(tmpl string, vars AgentTemplateVars) (string, error) {
 // command when its final shell command is the claude invocation — true of the
 // built-in template and of every earlier built-in template `ntm config init`
 // wrote into users' configs. A command whose last command is something else
-// (`claude ... | tee log`, a subshell) or that already passes --settings
-// cannot take the hooks safely, and dropping them silently would leave the
-// agent unprotected, so that is an error naming the two fixes.
+// (`claude ... | tee log`, a subshell, a wrapper script) or that already
+// passes its own --settings cannot take the hooks safely and is returned
+// unchanged; launch paths report that with ClaudeHooksNotAppliedWarning.
 func attachClaudeSettings(cmd, settings string) (string, error) {
 	if strings.TrimSpace(settings) == "" {
 		return cmd, nil
@@ -437,13 +437,22 @@ func attachClaudeSettings(cmd, settings string) (string, error) {
 		}
 	}
 	if !ok || !hasClaude || hasSettings {
-		return "", fmt.Errorf(
-			"ntm's Claude Code hooks (safety policy, dcg, rch) cannot be attached to this claude command: "+
-				"its final shell command is not a plain claude invocation, or it already passes --settings. "+
-				"Reference {{.ClaudeSettings}} in the template (e.g. --settings {{shellQuote .ClaudeSettings}}), "+
-				"or set [safety] claude_policy_hook = false and disable the dcg/rch integrations. Command: %s", cmd)
+		return cmd, nil
 	}
 	return strings.TrimRight(cmd, " \t") + " --settings " + ShellQuote(settings), nil
+}
+
+// ClaudeHooksNotAppliedWarning explains, for a rendered Claude launch command
+// that should carry settings (ntm's PreToolUse hooks) but does not, how to fix
+// it; it returns "" when the command carries them or there are none.
+func ClaudeHooksNotAppliedWarning(rendered, settings string) string {
+	if strings.TrimSpace(settings) == "" || strings.Contains(rendered, ShellQuote(settings)) {
+		return ""
+	}
+	return "ntm's Claude Code hooks (safety policy, dcg, rch) were not attached: the claude command's final " +
+		"shell command is not a plain claude invocation, or it passes its own --settings, so this agent runs " +
+		"without them. Add --settings {{shellQuote .ClaudeSettings}} to the [agents] claude template, or set " +
+		"[safety] claude_policy_hook = false to silence this. Command: " + rendered
 }
 
 // isClaudeProgramWord recognizes the claude binary, ntm's `cc` alias, and

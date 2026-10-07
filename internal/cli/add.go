@@ -884,7 +884,11 @@ func executeAdd(ctx context.Context, opts AddOptions, emitResult bool) error {
 		if err != nil {
 			return outputError(fmt.Errorf("generating command for %s agent: %w", agent.Type, err))
 		}
-		if len(claudeLaunch.Sources) > 0 && !IsJSONOutput() {
+		if warning := policy.LogClaudeHooksNotApplied("add", finalCmd, claudeLaunch.Settings); warning != "" {
+			if !IsJSONOutput() {
+				output.PrintWarningf("Agent %d: %s", num, warning)
+			}
+		} else if len(claudeLaunch.Sources) > 0 && !IsJSONOutput() {
 			output.PrintInfof("Claude hooks configured for agent %d (%s)", num, strings.Join(claudeLaunch.Sources, ", "))
 		}
 		launchSpec, err := captureAgentLaunchSpec(agent.Type, finalCmd, resolvedModel, agent.Model, personaName, resolvedReasoningEffort, systemPromptFile, envVars)

@@ -102,15 +102,15 @@ func (e *UnresolvedVariablesError) Error() string {
 	return fmt.Sprintf("template %q has unresolved variable(s): %s", e.Template, strings.Join(e.Names, ", "))
 }
 
-// Execute renders the template for one fully known context. A placeholder in
+// Execute renders the template for one fully known context. A {{variable}} in
 // the template body that nothing fills is an *UnresolvedVariablesError.
 func (t *Template) Execute(ctx ExecutionContext) (string, error) {
 	return t.execute(ctx, false)
 }
 
 // ExecuteShared renders everything known before send targets are resolved.
-// Per-pane placeholders ({{agent_num}}, {{agent_type}}, {{send_num}}, ...)
-// stay literal for the per-target Execute; any other unresolved placeholder is
+// Per-pane variables ({{agent_num}}, {{agent_type}}, {{send_num}}, ...)
+// stay literal for the per-target Execute; any other unresolved variable is
 // an *UnresolvedVariablesError, so missing bead context fails before a send
 // touches any pane.
 func (t *Template) ExecuteShared(ctx ExecutionContext) (string, error) {

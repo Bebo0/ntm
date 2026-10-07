@@ -871,6 +871,7 @@ func buildAgentCommands(state *session.SessionState) session.AgentCommands {
 			// sending an unrendered template into the pane.
 			return ""
 		}
+		policy.LogClaudeHooksNotApplied("restore", rendered, v.ClaudeSettings)
 		return rendered
 	}
 
@@ -926,6 +927,7 @@ func applyModelCommands(state *session.SessionState) {
 			v.ClaudeSettings = policy.ClaudeAgentLaunchSettings(cfg).Settings
 		}
 		if rendered, err := config.GenerateAgentCommand(tmpl, v); err == nil && rendered != "" {
+			policy.LogClaudeHooksNotApplied("restore", rendered, v.ClaudeSettings)
 			ps.Command = rendered
 		}
 	}

@@ -126,6 +126,9 @@ func prepareSwarmAccountRotation(ctx context.Context, plan *swarm.SwarmPlan, opt
 					vars.ClaudeSettings = policy.ClaudeAgentLaunchSettings(cfg).Settings
 				}
 				command, err := config.GenerateAgentCommand(template, vars)
+				if err == nil {
+					policy.LogClaudeHooksNotApplied("swarm-account-recovery", command, vars.ClaudeSettings)
+				}
 				if err != nil {
 					reason = fmt.Sprintf("configured launch command cannot be rendered: %v", err)
 				} else if err := agentsession.ValidateGlobalCredentialLaunchCommand(pane.AgentType, command, agentsession.ResumeLaunchOptions{}); err != nil {

@@ -308,6 +308,7 @@ func buildControllerResponse(ctx context.Context, opts ControllerInput) (*Contro
 	if err != nil {
 		return nil, fmt.Errorf("rendering agent command template: %w", err)
 	}
+	policy.LogClaudeHooksNotApplied("controller", agentCmd, vars.ClaudeSettings)
 	launchSpec, err := captureAgentLaunchSpec(AgentType(tmux.AgentType(agentTypeFull).Canonical()), agentCmd, "", "", "", "", "")
 	if err != nil {
 		return nil, fmt.Errorf("capture controller launch settings: %w", err)

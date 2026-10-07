@@ -256,6 +256,7 @@ func (o *Orchestrator) StartNewAgentSession(ctx RestartContext) error {
 	if err != nil {
 		return fmt.Errorf("generating command: %w", err)
 	}
+	policy.LogClaudeHooksNotApplied("auth-restart", agentCmd, vars.ClaudeSettings)
 	// An auth restart deliberately changes the account in the current launch
 	// environment. Replace any earlier pane record with this actual command;
 	// retaining its old CAAM profile would undo that account switch on recovery.

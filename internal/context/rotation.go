@@ -380,6 +380,7 @@ func (s *DefaultPaneSpawner) agentLaunchSpec(session, agentType string, index in
 	if err != nil {
 		return tmux.AgentLaunchSpec{}, err
 	}
+	policy.LogClaudeHooksNotApplied("rotation", command, vars.ClaudeSettings)
 	if strings.TrimSpace(command) == "" {
 		return tmux.AgentLaunchSpec{}, fmt.Errorf("configured %s agent command rendered empty", agentType)
 	}

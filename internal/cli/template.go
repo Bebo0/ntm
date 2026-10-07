@@ -68,7 +68,7 @@ Per-pane variables (ntm send renders the template once for every target pane):
   {{send_index}}    - Position of the pane in this send, 0-indexed
   {{send_total}}    - Number of panes in this send
 
-A placeholder that nothing fills is an error; it is never sent as literal
+A {{variable}} that nothing fills is an error; it is never sent as literal
 "{{name}}" text. Wrap optional values in {{#name}}...{{/name}}.
 
 Use with ntm send:

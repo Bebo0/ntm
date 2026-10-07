@@ -1861,8 +1861,11 @@ func getAgentCommandsWithOverrides(cfg *config.Config, opts SpawnOptions) (map[s
 			vars.ClaudeSettings = claudeSettings
 		}
 		rendered, err := config.GenerateAgentCommand(cmdTemplate, vars)
+		if err == nil {
+			policy.LogClaudeHooksNotApplied("robot-spawn", rendered, vars.ClaudeSettings)
+		}
 		if err != nil {
-			if launch.ModelAlias != "" || launch.ReasoningEffort != "" || vars.ClaudeSettings != "" {
+			if launch.ModelAlias != "" || launch.ReasoningEffort != "" {
 				// An explicit override must not be silently dropped
 				// (GenerateAgentCommand's guard errors describe exactly that).
 				return nil, fmt.Errorf("rendering %s launch command: %w", agentType, err)

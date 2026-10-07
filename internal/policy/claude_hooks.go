@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -199,6 +200,18 @@ func ClaudeAgentLaunchSettings(cfg *config.Config) ClaudeAgentLaunch {
 	}
 	launch.Settings = string(data)
 	return launch
+}
+
+// LogClaudeHooksNotApplied logs, for a rendered Claude launch command that
+// could not carry its hooks, that the agent runs unprotected and how to fix
+// it. It returns the warning ("" when the hooks were applied or absent) so
+// interactive surfaces can also show it.
+func LogClaudeHooksNotApplied(where, rendered, settings string) string {
+	warning := config.ClaudeHooksNotAppliedWarning(rendered, settings)
+	if warning != "" {
+		slog.Default().Warn("claude agent launched without ntm hooks", "where", where, "detail", warning)
+	}
+	return warning
 }
 
 // userSettingsRegisterNTMHook reports whether ~/.claude/settings.json already

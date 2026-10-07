@@ -3231,7 +3231,11 @@ func spawnSessionLogicContextWithOutput(ctx context.Context, opts SpawnOptions, 
 		if err != nil {
 			return outputError(fmt.Errorf("generating command for %s agent: %w", agent.Type, err))
 		}
-		if len(claudeLaunch.Sources) > 0 && !IsJSONOutput() {
+		if warning := policy.LogClaudeHooksNotApplied("spawn", agentCmd, claudeLaunch.Settings); warning != "" {
+			if !IsJSONOutput() {
+				output.PrintWarningf("Agent %d: %s", agent.Index, warning)
+			}
+		} else if len(claudeLaunch.Sources) > 0 && !IsJSONOutput() {
 			output.PrintInfof("Claude hooks configured for agent %d (%s)", agent.Index, strings.Join(claudeLaunch.Sources, ", "))
 		}
 		launchSpec, err := captureAgentLaunchSpec(agent.Type, agentCmd, resolvedModel, agent.Model, personaName, resolvedReasoningEffort, systemPromptFile, envVars, opts.PaneEnv)

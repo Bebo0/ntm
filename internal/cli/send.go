@@ -695,7 +695,7 @@ func newSendCmd() *cobra.Command {
 		{{send_num}}/{{send_index}} and {{send_total}} for that pane.
 		Use --bead <id> to fill {{bead_id}}, {{bead_title}}, {{bead_description}},
 		{{bead_priority}}, {{bead_status}} and {{bead_type}} from 'br show'.
-		A placeholder nothing fills is an error; it is never sent as literal text.
+		A {{variable}} nothing fills is an error; it is never sent as literal text.
 		See 'ntm template list' for available templates.
 
 		File Context Injection:
@@ -1541,7 +1541,7 @@ func runSendWithTemplate(templateVars []string, promptFile string, contextFiles 
 	}
 
 	// Render everything known before targeting. This fails on any
-	// placeholder that no --var, --file, --bead or builtin fills.
+	// {{variable}} that no --var, --file, --bead or builtin fills.
 	sharedText, err := tmpl.ExecuteShared(execCtx)
 	if err != nil {
 		return markCLIInvalidInput(explainSendTemplateError(err))

@@ -596,9 +596,10 @@ lists, so `ntm safety install` also registers its hook script in
 `~/.claude/settings.json` for Claude sessions started outside NTM, and `ntm safety status`
 reports the hook as installed only when it is registered. dcg and rch hooks ride on the
 same `--settings` when those integrations are enabled and installed. A custom
-`[agents] claude` command whose last shell command is not the `claude` invocation must
-place the hooks itself with `--settings {{shellQuote .ClaudeSettings}}`; NTM refuses to
-launch it otherwise rather than start an unprotected agent.
+`[agents] claude` command whose last shell command is not the `claude` invocation (a
+pipe, a subshell, a wrapper script) must place the hooks itself with
+`--settings {{shellQuote .ClaudeSettings}}`; otherwise NTM launches it without them and
+warns at every launch.
 
 With `[integrations.dcg] enabled = true`, command lines in messages bound for non-Claude
 agents are checked by dcg before delivery. `ntm send`, `--robot-send` (including `--track`)
