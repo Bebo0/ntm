@@ -53,12 +53,6 @@ type jfpShowOutput struct {
 	Prompt json.RawMessage `json:"prompt,omitempty"`
 }
 
-type jfpInstalledOutput struct {
-	jfpEnvelope
-	Count  int             `json:"count"`
-	Skills json.RawMessage `json:"skills"`
-}
-
 func runJFPCommand(t *testing.T, suite *TestSuite, ntmPath string, env []string, args ...string) ([]byte, int, time.Duration, error) {
 	t.Helper()
 
@@ -246,47 +240,6 @@ func TestE2E_RobotJFP_ListSearchShowInstalled(t *testing.T) {
 	} else {
 		suite.Logger().Log("[E2E-JFP] skipping show: no prompt ID or flag unsupported")
 	}
-
-	// Installed
-	if supportsRobotFlagInHelp(ntmPath, "--robot-jfp-installed") {
-		output, exitCode, _, err = runJFPCommand(t, suite, ntmPath, nil, "--robot-jfp-installed")
-		if err != nil {
-			t.Fatalf("[E2E-JFP] installed failed: %v", err)
-		}
-
-		var installed jfpInstalledOutput
-		parseJFPJSON(t, suite, "installed", output, &installed)
-		slog.Info(fmt.Sprintf("[E2E-JFP] cmd=robot-jfp-installed exit=%d count=%d", exitCode, installed.Count))
-
-		if !installed.Success {
-			slog.Error(fmt.Sprintf("[E2E-JFP] error=%s hint=%s", installed.Error, installed.Hint))
-			t.Fatalf("[E2E-JFP] installed failed: %s", installed.Error)
-		}
-		if !json.Valid(installed.Skills) {
-			t.Fatalf("[E2E-JFP] installed skills JSON invalid")
-		}
-	} else {
-		suite.Logger().Log("[E2E-JFP] skipping installed: flag not supported")
-	}
-}
-
-func TestE2E_RobotJFP_InstallFlagUnsupported(t *testing.T) {
-	CommonE2EPrerequisites(t)
-
-	ntmPath, err := exec.LookPath("ntm")
-	if err != nil {
-		t.Skip("ntm not found on PATH")
-	}
-
-	if supportsRobotFlagInHelp(ntmPath, "--robot-jfp-install") {
-		t.Skip("robot-jfp-install supported; install flow should be covered in a dedicated test")
-	}
-
-	suite := NewTestSuite(t, "robot_jfp_install_flag")
-	defer suite.Teardown()
-
-	suite.Logger().Log("[E2E-JFP] install flag not supported by current ntm binary")
-	slog.Info("[E2E-JFP] cmd=robot-jfp-install exit=0 count=0")
 }
 
 func supportsRobotFlagInHelp(ntmPath, flag string) bool {

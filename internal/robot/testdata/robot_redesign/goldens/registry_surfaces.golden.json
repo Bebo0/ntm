@@ -12,7 +12,7 @@
     "utility"
   ],
   "category_count": 10,
-  "schema_type_count": 136,
+  "schema_type_count": 134,
   "schema_types": [
     "account_status",
     "accounts_list",
@@ -82,8 +82,6 @@
     "jfp_bundles",
     "jfp_categories",
     "jfp_export",
-    "jfp_install",
-    "jfp_installed",
     "jfp_list",
     "jfp_search",
     "jfp_show",
@@ -152,7 +150,7 @@
     "xf_status"
   ],
   "section_count": 13,
-  "surface_count": 148,
+  "surface_count": 146,
   "surfaces": [
     {
       "category": "state",
@@ -1800,36 +1798,6 @@
       "name": "jfp-export",
       "schema_id": "ntm:robot:jfp-export:v1",
       "schema_type": "jfp_export"
-    },
-    {
-      "category": "utility",
-      "flag": "--robot-jfp-install",
-      "has_action_handoff": false,
-      "has_attention_ops": false,
-      "has_boundedness": false,
-      "has_consumer_guidance": false,
-      "has_explainability": false,
-      "has_follow_up": false,
-      "has_lifecycle": false,
-      "has_request_semantics": false,
-      "name": "jfp-install",
-      "schema_id": "ntm:robot:jfp-install:v1",
-      "schema_type": "jfp_install"
-    },
-    {
-      "category": "utility",
-      "flag": "--robot-jfp-installed",
-      "has_action_handoff": false,
-      "has_attention_ops": false,
-      "has_boundedness": false,
-      "has_consumer_guidance": false,
-      "has_explainability": false,
-      "has_follow_up": false,
-      "has_lifecycle": false,
-      "has_request_semantics": false,
-      "name": "jfp-installed",
-      "schema_id": "ntm:robot:jfp-installed:v1",
-      "schema_type": "jfp_installed"
     },
     {
       "category": "utility",

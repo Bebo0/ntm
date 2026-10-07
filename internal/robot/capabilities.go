@@ -1846,14 +1846,6 @@ func buildCommandRegistry() []RobotCommandInfo {
 			Examples: []string{"ntm --robot-jfp-suggest='build a REST API'"},
 		},
 		{
-			Name:        "jfp-installed",
-			Flag:        "--robot-jfp-installed",
-			Category:    "utility",
-			Description: "List installed Claude Code skills from JFP.",
-			Parameters:  []RobotParameter{},
-			Examples:    []string{"ntm --robot-jfp-installed"},
-		},
-		{
 			Name:        "jfp-categories",
 			Flag:        "--robot-jfp-categories",
 			Category:    "utility",
@@ -1876,18 +1868,6 @@ func buildCommandRegistry() []RobotCommandInfo {
 			Description: "List JFP bundles.",
 			Parameters:  []RobotParameter{},
 			Examples:    []string{"ntm --robot-jfp-bundles"},
-		},
-		{
-			Name:        "jfp-install",
-			Flag:        "--robot-jfp-install",
-			Category:    "utility",
-			Description: "Install JFP prompt(s) by ID.",
-			Parameters: []RobotParameter{
-				{Name: "ids", Flag: "--robot-jfp-install", Type: "string", Required: true, Description: "Prompt ID(s), comma-separated"},
-				{Name: "project", Flag: "--project", Type: "string", Required: false, Description: "Project directory override (alias: --jfp-project)"},
-				{Name: "jfp-project", Flag: "--jfp-project", Type: "string", Required: false, Description: "Optional project directory for installs"},
-			},
-			Examples: []string{"ntm --robot-jfp-install=prompt-123", "ntm --robot-jfp-install=prompt-1,prompt-2 --jfp-project=/path/to/project"},
 		},
 		{
 			Name:        "jfp-export",

@@ -185,11 +185,6 @@ func (a *JFPAdapter) Status(ctx context.Context) (json.RawMessage, error) {
 	return a.runCommand(ctx, "status", "--json")
 }
 
-// Installed returns list of installed Claude Code skills
-func (a *JFPAdapter) Installed(ctx context.Context) (json.RawMessage, error) {
-	return a.runCommand(ctx, "installed", "--json")
-}
-
 // Categories returns all categories with counts
 func (a *JFPAdapter) Categories(ctx context.Context) (json.RawMessage, error) {
 	return a.runCommand(ctx, "categories", "--json")
@@ -208,17 +203,6 @@ func (a *JFPAdapter) Bundles(ctx context.Context) (json.RawMessage, error) {
 // Bundle returns details for a specific bundle
 func (a *JFPAdapter) Bundle(ctx context.Context, id string) (json.RawMessage, error) {
 	return a.runCommand(ctx, "bundle", id, "--json")
-}
-
-// Install installs one or more prompts by ID.
-func (a *JFPAdapter) Install(ctx context.Context, ids []string, projectDir string) (json.RawMessage, error) {
-	args := []string{"install"}
-	if projectDir != "" {
-		args = append(args, "--project", projectDir)
-	}
-	args = append(args, ids...)
-	args = append(args, "--json")
-	return a.runCommand(ctx, args...)
 }
 
 // Export exports one or more prompts by ID.

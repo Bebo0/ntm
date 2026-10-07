@@ -94,7 +94,6 @@ var SchemaPagination = map[string]SchemaPaginationFlag{
 	"inspect_work":     {Reason: "bounded: single work-item detail"},
 	"interrupt":        {Reason: "bounded: per-request interrupt results for addressed panes"},
 	"jfp_export":       {Reason: "bounded: per-request export file list"},
-	"jfp_install":      {Reason: "bounded: per-request install results"},
 	"kill_agent":       {Reason: "bounded: per-request kill results"},
 	"kill_pane":        {Reason: "bounded: per-request kill results"},
 	"logs":             {Reason: "bounded: recent log lines capped by --limit truncation"},

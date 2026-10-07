@@ -181,8 +181,6 @@ func TestOutputTypesEmbedRobotResponse(t *testing.T) {
 		{"JFPBundlesOutput", reflect.TypeOf(JFPBundlesOutput{})},
 		{"JFPCategoriesOutput", reflect.TypeOf(JFPCategoriesOutput{})},
 		{"JFPExportOutput", reflect.TypeOf(JFPExportOutput{})},
-		{"JFPInstalledOutput", reflect.TypeOf(JFPInstalledOutput{})},
-		{"JFPInstallOutput", reflect.TypeOf(JFPInstallOutput{})},
 		{"JFPListOutput", reflect.TypeOf(JFPListOutput{})},
 		{"JFPSearchOutput", reflect.TypeOf(JFPSearchOutput{})},
 		{"JFPShowOutput", reflect.TypeOf(JFPShowOutput{})},

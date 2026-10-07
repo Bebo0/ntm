@@ -374,9 +374,6 @@ func TestJFPAdapterMethods(t *testing.T) {
 	}
 
 	// Skill management moved from jfp to jsm; jfp answers with deprecated_command.
-	if _, err = adapter.Install(ctx, []string{"test-prompt"}, ""); !errors.Is(err, ErrJFPCommandMoved) {
-		t.Fatalf("Install() error = %v, want ErrJFPCommandMoved", err)
-	}
 	if _, err = adapter.Export(ctx, []string{"test-prompt"}, "skill"); !errors.Is(err, ErrJFPCommandMoved) {
 		t.Fatalf("Export(skill) error = %v, want ErrJFPCommandMoved", err)
 	}

@@ -796,10 +796,6 @@ func TestRobotJFPReadsInstalledJFP(t *testing.T) {
 	}
 	arrayLen(suggest.Suggestions)
 
-	installed, err := GetJFPInstalled()
-	if err != nil || installed.Success || installed.ErrorCode != ErrCodeNotImplemented {
-		t.Fatalf("GetJFPInstalled = success:%t code:%q err:%q, want NOT_IMPLEMENTED (moved to jsm)", installed.Success, installed.ErrorCode, installed.Error)
-	}
 	skillExport, err := GetJFPExport("idea-wizard", "skill")
 	if err != nil || skillExport.Success || skillExport.ErrorCode != ErrCodeNotImplemented {
 		t.Fatalf("GetJFPExport(skill) = success:%t code:%q err:%q, want NOT_IMPLEMENTED", skillExport.Success, skillExport.ErrorCode, skillExport.Error)

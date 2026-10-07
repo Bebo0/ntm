@@ -1404,32 +1404,6 @@
       "schema_source": "built_in"
     },
     {
-      "name": "jfp-install",
-      "flag": "--robot-jfp-install",
-      "category": "utility",
-      "summary": "Install JFP prompt(s) by ID.",
-      "output_formats": [
-        "json"
-      ],
-      "default_output_format": "json",
-      "schema_id": "ntm:robot:jfp-install:v1",
-      "schema_type": "jfp_install",
-      "schema_source": "built_in"
-    },
-    {
-      "name": "jfp-installed",
-      "flag": "--robot-jfp-installed",
-      "category": "utility",
-      "summary": "List installed Claude Code skills from JFP.",
-      "output_formats": [
-        "json"
-      ],
-      "default_output_format": "json",
-      "schema_id": "ntm:robot:jfp-installed:v1",
-      "schema_type": "jfp_installed",
-      "schema_source": "built_in"
-    },
-    {
       "name": "jfp-list",
       "flag": "--robot-jfp-list",
       "category": "utility",

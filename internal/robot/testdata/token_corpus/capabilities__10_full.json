@@ -5524,76 +5524,6 @@
       ]
     },
     {
-      "name": "jfp-install",
-      "flag": "--robot-jfp-install",
-      "category": "utility",
-      "summary": "Install JFP prompt(s) by ID.",
-      "description": "Install JFP prompt(s) by ID.",
-      "output_formats": [
-        "json"
-      ],
-      "default_output_format": "json",
-      "schema_id": "ntm:robot:jfp-install:v1",
-      "schema_type": "jfp_install",
-      "schema_source": "built_in",
-      "parameters": [
-        {
-          "name": "ids",
-          "flag": "--robot-jfp-install",
-          "type": "string",
-          "required": true,
-          "description": "Prompt ID(s), comma-separated"
-        },
-        {
-          "name": "project",
-          "flag": "--project",
-          "type": "string",
-          "required": false,
-          "description": "Project directory override (alias: --jfp-project)"
-        },
-        {
-          "name": "jfp-project",
-          "flag": "--jfp-project",
-          "type": "string",
-          "required": false,
-          "description": "Optional project directory for installs"
-        }
-      ],
-      "examples": [
-        "ntm --robot-jfp-install=prompt-123",
-        "ntm --robot-jfp-install=prompt-1,prompt-2 --jfp-project=/path/to/project"
-      ],
-      "transports": [
-        {
-          "type": "cli",
-          "endpoint": "ntm --robot-jfp-install"
-        }
-      ]
-    },
-    {
-      "name": "jfp-installed",
-      "flag": "--robot-jfp-installed",
-      "category": "utility",
-      "summary": "List installed Claude Code skills from JFP.",
-      "description": "List installed Claude Code skills from JFP.",
-      "output_formats": [
-        "json"
-      ],
-      "default_output_format": "json",
-      "schema_id": "ntm:robot:jfp-installed:v1",
-      "schema_type": "jfp_installed",
-      "schema_source": "built_in",
-      "examples": [
-        "ntm --robot-jfp-installed"
-      ],
-      "transports": [
-        {
-          "type": "cli",
-          "endpoint": "ntm --robot-jfp-installed"
-        }
-      ]
-    },
-    {
       "name": "jfp-list",
       "flag": "--robot-jfp-list",
       "category": "utility",
@@ -7821,14 +7751,6 @@
       "name": "jfp-export",
       "paginated": false,
       "paginated_reason": "bounded: per-request export file list"
-    },
-    {
-      "name": "jfp-install",
-      "paginated": false,
-      "paginated_reason": "bounded: per-request install results"
-    },
-    {
-      "name": "jfp-installed"
     },
     {
       "name": "jfp-list"

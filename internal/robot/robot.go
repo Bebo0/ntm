@@ -587,13 +587,6 @@ type JFPSuggestOutput struct {
 	Suggestions json.RawMessage `json:"suggestions"`
 }
 
-// JFPInstalledOutput represents the output for --robot-jfp-installed
-type JFPInstalledOutput struct {
-	RobotResponse
-	Count  int             `json:"count"`
-	Skills json.RawMessage `json:"skills"`
-}
-
 // JFPCategoriesOutput represents the output for --robot-jfp-categories
 type JFPCategoriesOutput struct {
 	RobotResponse
@@ -613,14 +606,6 @@ type JFPBundlesOutput struct {
 	RobotResponse
 	Count   int             `json:"count"`
 	Bundles json.RawMessage `json:"bundles"`
-}
-
-// JFPInstallOutput represents the output for --robot-jfp-install
-type JFPInstallOutput struct {
-	RobotResponse
-	IDs     []string        `json:"ids"`
-	Project string          `json:"project,omitempty"`
-	Result  json.RawMessage `json:"result,omitempty"`
 }
 
 // JFPExportOutput represents the output for --robot-jfp-export
@@ -974,63 +959,6 @@ func PrintJFPSuggest(task string) error {
 	return encodeTerminalRobotOutput(output, output.RobotResponse, "robot JFP suggest failed")
 }
 
-// GetJFPInstalled returns installed Claude Code skills.
-// This function returns the data struct directly, enabling CLI/REST parity.
-func GetJFPInstalled() (*JFPInstalledOutput, error) {
-	adapter := tools.NewJFPAdapter()
-
-	output := &JFPInstalledOutput{
-		RobotResponse: NewRobotResponse(true),
-	}
-
-	// Check if jfp is installed
-	_, installed := adapter.Detect()
-	if !installed {
-		output.RobotResponse = NewErrorResponse(
-			fmt.Errorf("jfp not installed"),
-			ErrCodeDependencyMissing,
-			"Install jfp with: npm install -g jeffreysprompts",
-		)
-		return output, nil
-	}
-
-	ctx := context.Background()
-	data, err := adapter.Installed(ctx)
-
-	if errors.Is(err, tools.ErrJFPCommandMoved) {
-		output.RobotResponse = jfpMovedResponse(err)
-		return output, nil
-	}
-	if err != nil {
-		output.RobotResponse = NewErrorResponse(
-			err,
-			"INSTALLED_FAILED",
-			"Check if Claude Code skills directory exists",
-		)
-		return output, nil
-	}
-
-	output.Skills = data
-
-	// Try to count items
-	var items []interface{}
-	if json.Unmarshal(data, &items) == nil {
-		output.Count = len(items)
-	}
-
-	return output, nil
-}
-
-// PrintJFPInstalled outputs installed Claude Code skills as JSON.
-// This is a thin wrapper around GetJFPInstalled() for CLI output.
-func PrintJFPInstalled() error {
-	output, err := GetJFPInstalled()
-	if err != nil {
-		return err
-	}
-	return encodeTerminalRobotOutput(output, output.RobotResponse, "robot JFP installed failed")
-}
-
 // GetJFPCategories returns all categories with counts.
 // This function returns the data struct directly, enabling CLI/REST parity.
 func GetJFPCategories() (*JFPCategoriesOutput, error) {
@@ -1211,67 +1139,6 @@ func parseJFPIDs(raw string) []string {
 		ids = append(ids, part)
 	}
 	return ids
-}
-
-// GetJFPInstall installs one or more prompts by ID.
-// This function returns the data struct directly, enabling CLI/REST parity.
-func GetJFPInstall(rawIDs, project string) (*JFPInstallOutput, error) {
-	adapter := tools.NewJFPAdapter()
-	ids := parseJFPIDs(rawIDs)
-
-	output := &JFPInstallOutput{
-		RobotResponse: NewRobotResponse(true),
-		IDs:           ids,
-		Project:       project,
-	}
-
-	// Check if jfp is installed
-	_, installed := adapter.Detect()
-	if !installed {
-		output.RobotResponse = NewErrorResponse(
-			fmt.Errorf("jfp not installed"),
-			ErrCodeDependencyMissing,
-			"Install jfp with: npm install -g jeffreysprompts",
-		)
-		return output, nil
-	}
-
-	if len(ids) == 0 {
-		output.RobotResponse = NewErrorResponse(
-			fmt.Errorf("prompt ID is required"),
-			ErrCodeInvalidFlag,
-			"Provide prompt IDs, e.g., --robot-jfp-install=prompt-123",
-		)
-		return output, nil
-	}
-
-	ctx := context.Background()
-	data, err := adapter.Install(ctx, ids, project)
-	if errors.Is(err, tools.ErrJFPCommandMoved) {
-		output.RobotResponse = jfpMovedResponse(err)
-		return output, nil
-	}
-	if err != nil {
-		output.RobotResponse = NewErrorResponse(
-			err,
-			"INSTALL_FAILED",
-			"Check prompt IDs and try again",
-		)
-		return output, nil
-	}
-
-	output.Result = data
-	return output, nil
-}
-
-// PrintJFPInstall outputs install results as JSON.
-// This is a thin wrapper around GetJFPInstall() for CLI output.
-func PrintJFPInstall(rawIDs, project string) error {
-	output, err := GetJFPInstall(rawIDs, project)
-	if err != nil {
-		return err
-	}
-	return encodeTerminalRobotOutput(output, output.RobotResponse, "robot JFP install failed")
 }
 
 // GetJFPExport exports one or more prompts by ID.
@@ -1999,7 +1866,6 @@ Use --all to include the user pane (index depends on tmux pane-base-index).
 			"profile-show",
 			"giil-fetch",
 			"jfp-search",
-			"jfp-install",
 			"jfp-export",
 			"jfp-update",
 			"ms-search",

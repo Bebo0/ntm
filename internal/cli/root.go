@@ -1388,16 +1388,6 @@ Shell Integration:
 			}
 			return
 		}
-		if robotJFPInstall != "" {
-			project := jfpProject
-			if project == "" {
-				project = robotEnsembleProject
-			}
-			if err := robot.PrintJFPInstall(robotJFPInstall, project); err != nil {
-				recordRobotProcessExit(err)
-			}
-			return
-		}
 		if robotJFPExport != "" {
 			if err := robot.PrintJFPExport(robotJFPExport, jfpFormat); err != nil {
 				recordRobotProcessExit(err)
@@ -1406,12 +1396,6 @@ Shell Integration:
 		}
 		if robotJFPUpdate {
 			if err := robot.PrintJFPUpdate(); err != nil {
-				recordRobotProcessExit(err)
-			}
-			return
-		}
-		if robotJFPInstalled {
-			if err := robot.PrintJFPInstalled(); err != nil {
 				recordRobotProcessExit(err)
 			}
 			return
@@ -4119,16 +4103,13 @@ var (
 	robotJFPSearch     string // search query
 	robotJFPShow       string // prompt ID to show
 	robotJFPSuggest    string // task for suggestions
-	robotJFPInstall    string // prompt IDs to install
 	robotJFPExport     string // prompt IDs to export
 	robotJFPUpdate     bool   // update JFP registry cache
-	robotJFPInstalled  bool   // list installed skills
 	robotJFPCategories bool   // list categories
 	robotJFPTags       bool   // list tags
 	robotJFPBundles    bool   // list bundles
 	jfpCategory        string // filter by category
 	jfpTag             string // filter by tag
-	jfpProject         string // project directory for install
 	jfpFormat          string // export format
 
 	// Robot-ms flags for Meta Skill integration
@@ -4822,10 +4803,8 @@ func init() {
 	rootCmd.Flags().StringVar(&robotJFPSearch, "robot-jfp-search", "", "Search prompts. Required: QUERY. Example: ntm --robot-jfp-search='debugging'")
 	rootCmd.Flags().StringVar(&robotJFPShow, "robot-jfp-show", "", "Show prompt details. Required: ID. Example: ntm --robot-jfp-show='prompt-123'")
 	rootCmd.Flags().StringVar(&robotJFPSuggest, "robot-jfp-suggest", "", "Get prompt suggestions for a task. Required: TASK. Example: ntm --robot-jfp-suggest='build a REST API'")
-	rootCmd.Flags().StringVar(&robotJFPInstall, "robot-jfp-install", "", "Install JFP prompt(s). Required: ID(s). Example: ntm --robot-jfp-install='prompt-123'")
 	rootCmd.Flags().StringVar(&robotJFPExport, "robot-jfp-export", "", "Export JFP prompt(s). Required: ID(s). Example: ntm --robot-jfp-export='prompt-123'")
 	rootCmd.Flags().BoolVar(&robotJFPUpdate, "robot-jfp-update", false, "Update JFP registry cache (JSON)")
-	rootCmd.Flags().BoolVar(&robotJFPInstalled, "robot-jfp-installed", false, "List installed Claude Code skills (JSON)")
 	rootCmd.Flags().BoolVar(&robotJFPCategories, "robot-jfp-categories", false, "List all prompt categories with counts (JSON)")
 	rootCmd.Flags().BoolVar(&robotJFPTags, "robot-jfp-tags", false, "List all prompt tags with counts (JSON)")
 	rootCmd.Flags().BoolVar(&robotJFPBundles, "robot-jfp-bundles", false, "List all prompt bundles (JSON)")
@@ -4833,7 +4812,6 @@ func init() {
 	// JFP filters - work with --robot-jfp-list
 	rootCmd.Flags().StringVar(&jfpCategory, "jfp-category", "", "Filter JFP list by category. Example: --jfp-category=coding")
 	rootCmd.Flags().StringVar(&jfpTag, "jfp-tag", "", "Filter JFP list by tag. Example: --jfp-tag=debugging")
-	rootCmd.Flags().StringVar(&jfpProject, "jfp-project", "", "Project directory for JFP installs (optional)")
 	rootCmd.Flags().StringVar(&jfpFormat, "jfp-format", "", "Export format for JFP export (skill or md)")
 
 	// MS (Meta Skill) robot flags
