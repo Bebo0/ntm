@@ -2696,6 +2696,13 @@
           "description": "Max wait for ready state after interrupt"
         },
         {
+          "name": "op-id",
+          "flag": "--op-id",
+          "type": "string",
+          "required": false,
+          "description": "Durable idempotent operation ID, scoped per session and shared with --robot-send: claimed before any Ctrl+C, so an identical retry (same panes/all/force/message) replays the recorded outcome without interrupting or re-sending the task; conflicting reuse is rejected (IDEMPOTENCY_CONFLICT); the receipt is queryable via --robot-send-receipt"
+        },
+        {
           "name": "dry-run",
           "flag": "--dry-run",
           "type": "bool",
@@ -2705,7 +2712,8 @@
       ],
       "examples": [
         "ntm --robot-interrupt=proj --msg='Stop and fix bug'",
-        "ntm --robot-interrupt=proj --panes=1.0,%7 --force --timeout=15s"
+        "ntm --robot-interrupt=proj --panes=1.0,%7 --force --timeout=15s",
+        "ntm --robot-interrupt=proj --msg='Stop and fix bug' --op-id=retask-42"
       ],
       "transports": [
         {
@@ -3184,8 +3192,8 @@
       "name": "send-receipt",
       "flag": "--robot-send-receipt",
       "category": "control",
-      "summary": "Query the durable receipt of an idempotent send by operation ID: binding digest, byte count, per-target admission states, and the recorded outcome.",
-      "description": "Query the durable receipt of an idempotent send by operation ID: binding digest, byte count, per-target admission states, and the recorded outcome. Receipts survive caller timeouts and crashes.",
+      "summary": "Query the durable receipt of an idempotent --robot-send or --robot-interrupt by operation ID: operation kind, payload digest, byte count, per-target admission states, and the recorded outcome (outcome for sends, interrupt_outcome for interrupts).",
+      "description": "Query the durable receipt of an idempotent --robot-send or --robot-interrupt by operation ID: operation kind, payload digest, byte count, per-target admission states, and the recorded outcome (outcome for sends, interrupt_outcome for interrupts). Receipts survive caller timeouts and crashes.",
       "output_formats": [
         "json"
       ],
@@ -3199,7 +3207,7 @@
           "flag": "--robot-send-receipt",
           "type": "string",
           "required": true,
-          "description": "Operation ID supplied to --robot-send --op-id"
+          "description": "Operation ID supplied via --op-id to --robot-send or --robot-interrupt (or a REST Idempotency-Key)"
         }
       ],
       "examples": [
@@ -7502,7 +7510,7 @@
     {
       "name": "send-receipt",
       "paginated": false,
-      "paginated_reason": "bounded: delivery receipt for one send"
+      "paginated_reason": "bounded: receipt for one idempotent send or interrupt"
     },
     {
       "name": "smart-restart",

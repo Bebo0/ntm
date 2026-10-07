@@ -999,9 +999,9 @@ func buildCommandRegistry() []RobotCommandInfo {
 			Name:        "send-receipt",
 			Flag:        "--robot-send-receipt",
 			Category:    "control",
-			Description: "Query the durable receipt of an idempotent send by operation ID: binding digest, byte count, per-target admission states, and the recorded outcome. Receipts survive caller timeouts and crashes.",
+			Description: "Query the durable receipt of an idempotent --robot-send or --robot-interrupt by operation ID: operation kind, payload digest, byte count, per-target admission states, and the recorded outcome (outcome for sends, interrupt_outcome for interrupts). Receipts survive caller timeouts and crashes.",
 			Parameters: []RobotParameter{
-				{Name: "operation-id", Flag: "--robot-send-receipt", Type: "string", Required: true, Description: "Operation ID supplied to --robot-send --op-id"},
+				{Name: "operation-id", Flag: "--robot-send-receipt", Type: "string", Required: true, Description: "Operation ID supplied via --op-id to --robot-send or --robot-interrupt (or a REST Idempotency-Key)"},
 			},
 			Examples: []string{
 				"ntm --robot-send-receipt=deploy-42",
@@ -1035,11 +1035,13 @@ func buildCommandRegistry() []RobotCommandInfo {
 				{Name: "panes", Flag: "--panes", Type: "string", Required: false, Description: "Filter by N, W.P, or %N pane selectors"},
 				{Name: "no-wait", Flag: "--no-wait", Type: "bool", Required: false, Description: "Return immediately after Ctrl+C without closed-loop verification"},
 				{Name: "timeout", Flag: "--timeout", Type: "string", Required: false, Default: "10s", Description: "Max wait for ready state after interrupt"},
+				{Name: "op-id", Flag: "--op-id", Type: "string", Required: false, Description: "Durable idempotent operation ID, scoped per session and shared with --robot-send: claimed before any Ctrl+C, so an identical retry (same panes/all/force/message) replays the recorded outcome without interrupting or re-sending the task; conflicting reuse is rejected (IDEMPOTENCY_CONFLICT); the receipt is queryable via --robot-send-receipt"},
 				{Name: "dry-run", Flag: "--dry-run", Type: "bool", Required: false, Description: "Preview without executing"},
 			},
 			Examples: []string{
 				"ntm --robot-interrupt=proj --msg='Stop and fix bug'",
 				"ntm --robot-interrupt=proj --panes=1.0,%7 --force --timeout=15s",
+				"ntm --robot-interrupt=proj --msg='Stop and fix bug' --op-id=retask-42",
 			},
 		},
 		{

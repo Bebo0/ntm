@@ -1,0 +1,462 @@
+// Package robot: operation_idempotency.go implements the durable idempotent
+// operation protocol shared by every retry-safe robot actuation: --robot-send
+// (#245) and --robot-interrupt with --op-id, plus their REST Idempotency-Key
+// equivalents.
+//
+// A caller may supply an operation ID. The operation is claimed atomically
+// in the runtime projection store BEFORE the actuation mutates any pane and
+// is durably bound to the actuation kind plus a kind-specific digest of the
+// caller's command spec (sendOperationBindingHash,
+// interruptOperationBindingHash).
+//
+//   - An identical retry of a completed operation returns the original
+//     recorded outcome without touching any pane again.
+//   - Reusing an operation ID with a different command spec — or for a
+//     different actuation kind — is rejected as IDEMPOTENCY_CONFLICT.
+//     Operation IDs form one namespace per session across kinds.
+//   - A retry that races a live concurrent claimant observes the operation
+//     in progress (OPERATION_IN_PROGRESS) and is told to reconcile via
+//     --robot-send-receipt; a claim abandoned by a crashed process is taken
+//     over after a staleness window.
+//   - An actuation that terminates before mutating anything releases its
+//     claim so the ID stays retryable; once a mutation was attempted, the
+//     outcome is recorded as terminal.
+//
+// Receipts expose only a payload digest and byte count — never the payload
+// bytes — so ordinary logs gain an audit trail without retaining message
+// contents.
+package robot
+
+import (
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
+	"fmt"
+	"hash"
+	"sort"
+	"strings"
+	"time"
+
+	"github.com/Dicklesworthstone/ntm/internal/state"
+)
+
+// Typed per-target admission states. Admission is about whether the target
+// pane accepted the actuation's submission — it deliberately claims nothing
+// about agent comprehension (see --verify-render for rendered-output
+// evidence).
+const (
+	// AdmissionNotAttempted: the operation terminated before this target
+	// was attempted (preflight failure, selector error, block), or the
+	// actuation had nothing to submit to it (an interrupt target that was
+	// already ready and received no follow-up message).
+	AdmissionNotAttempted = "not_attempted"
+	// AdmissionSubmitted: the pane accepted the submission.
+	AdmissionSubmitted = "submitted"
+	// AdmissionRejected: the pane was attempted and delivery failed.
+	AdmissionRejected = "rejected"
+	// AdmissionUnknown: the outcome could not be determined (crash or
+	// in-flight operation); reconcile via the receipt query.
+	AdmissionUnknown = "unknown"
+)
+
+// ErrCodeIdempotencyConflict signals that an operation ID was reused with a
+// different command spec (selector, delivery toggles, or input message) or
+// for a different actuation kind than the one it is durably bound to.
+const ErrCodeIdempotencyConflict = "IDEMPOTENCY_CONFLICT"
+
+// ErrCodeOperationInProgress signals that the operation is claimed but its
+// outcome is not yet recorded (concurrent caller, or a crash mid-actuation).
+const ErrCodeOperationInProgress = "OPERATION_IN_PROGRESS"
+
+// operationStaleClaimWindow is how long an in_progress claim is trusted
+// before a retry may take it over. Actuations complete in seconds; a claim
+// this old with no recorded outcome means the original claimant died before
+// its deferred completion ran. Taking over risks at most a duplicate
+// actuation when the dead process had already touched panes — the caller
+// opted into retry semantics by reusing the operation ID, and the
+// alternative is an operation ID poisoned forever.
+const operationStaleClaimWindow = 10 * time.Minute
+
+// OperationAdmission is the typed per-target admission receipt.
+type OperationAdmission struct {
+	Target string `json:"target"`
+	State  string `json:"state"` // not_attempted | submitted | rejected | unknown
+	Error  string `json:"error,omitempty"`
+}
+
+// OperationInfo is the public view of a durable idempotent operation
+// attached to actuation output (send, interrupt) and returned by receipt
+// queries.
+type OperationInfo struct {
+	OperationID   string               `json:"operation_id"`
+	Kind          string               `json:"kind"`   // send | interrupt
+	Status        string               `json:"status"` // in_progress | completed
+	Replayed      bool                 `json:"replayed,omitempty"`
+	PayloadSHA256 string               `json:"payload_sha256"`
+	PayloadBytes  int64                `json:"payload_bytes"`
+	Admissions    []OperationAdmission `json:"admissions,omitempty"`
+	CreatedAt     time.Time            `json:"created_at"`
+	CompletedAt   *time.Time           `json:"completed_at,omitempty"`
+}
+
+// operationPayloadDigest returns the SHA-256 digest (hex) and byte count of
+// the exact payload string NTM attempts to deliver.
+func operationPayloadDigest(payload string) (string, int64) {
+	sum := sha256.Sum256([]byte(payload))
+	return hex.EncodeToString(sum[:]), int64(len(payload))
+}
+
+// operationBindingHasher accumulates a caller's canonical command spec into
+// a binding digest. A field is its bytes followed by NUL; a list is its
+// trimmed, non-empty members in sorted order followed by 0x01, so logically
+// identical selector lists bind identically. The encoding is load-bearing:
+// changing it turns every recorded operation ID into a conflict
+// (TestSendOperationBindingHashIsStableAcrossVersions pins it).
+type operationBindingHasher struct {
+	h hash.Hash
+}
+
+func newOperationBindingHasher() *operationBindingHasher {
+	return &operationBindingHasher{h: sha256.New()}
+}
+
+func (b *operationBindingHasher) field(value string) {
+	b.h.Write([]byte(value))
+	b.h.Write([]byte{0})
+}
+
+func (b *operationBindingHasher) list(values []string) {
+	sorted := make([]string, 0, len(values))
+	for _, v := range values {
+		v = strings.TrimSpace(v)
+		if v != "" {
+			sorted = append(sorted, v)
+		}
+	}
+	sort.Strings(sorted)
+	for _, v := range sorted {
+		b.field(v)
+	}
+	b.h.Write([]byte{1})
+}
+
+func (b *operationBindingHasher) sum() string {
+	return hex.EncodeToString(b.h.Sum(nil))
+}
+
+// operationRecordKind returns the actuation kind of a stored record; rows
+// written before kinds existed were all sends.
+func operationRecordKind(op *state.SendOperation) string {
+	if op == nil || op.Kind == "" {
+		return state.OperationKindSend
+	}
+	return op.Kind
+}
+
+// operationAdmissionsOutcome is the admissions subset every recorded outcome
+// carries, decoded generically for operation views.
+type operationAdmissionsOutcome struct {
+	Admissions []OperationAdmission `json:"admissions"`
+}
+
+func operationInfoFromRecord(op *state.SendOperation, replayed bool) *OperationInfo {
+	if op == nil {
+		return nil
+	}
+	info := &OperationInfo{
+		OperationID:   op.OperationID,
+		Kind:          operationRecordKind(op),
+		Status:        op.Status,
+		Replayed:      replayed,
+		PayloadSHA256: op.PayloadSHA256,
+		PayloadBytes:  op.PayloadBytes,
+		CreatedAt:     op.CreatedAt,
+		CompletedAt:   op.CompletedAt,
+	}
+	if op.OutcomeJSON != "" {
+		var outcome operationAdmissionsOutcome
+		if err := json.Unmarshal([]byte(op.OutcomeJSON), &outcome); err == nil {
+			info.Admissions = outcome.Admissions
+		}
+	}
+	return info
+}
+
+// unknownAdmissions marks every target as outcome-unknown; used when an
+// operation is observed in progress.
+func unknownAdmissions(targets []string) []OperationAdmission {
+	admissions := make([]OperationAdmission, 0, len(targets))
+	for _, target := range targets {
+		admissions = append(admissions, OperationAdmission{Target: target, State: AdmissionUnknown})
+	}
+	return admissions
+}
+
+// operationClaimRequest describes one idempotent actuation about to mutate
+// panes.
+type operationClaimRequest struct {
+	Kind        string // state.OperationKindSend | state.OperationKindInterrupt
+	OperationID string
+	Session     string
+	// BindingHash is the kind-specific digest of the caller's command spec.
+	BindingHash string
+	// Payload is the exact post-transformation payload about to be
+	// delivered; only its digest and byte count are persisted.
+	Payload string
+	// Targets are the resolved targets, reported as outcome-unknown when a
+	// live claimant holds the operation.
+	Targets []string
+}
+
+// operationClaimVerdict tells an actuation how to proceed after a claim.
+type operationClaimVerdict int
+
+const (
+	// operationExecute: this caller owns the claim (fresh, or a stale claim
+	// taken over) and must execute, then finish the claim exactly once via
+	// durableOperation.complete or durableOperation.release.
+	operationExecute operationClaimVerdict = iota
+	// operationReplay: an identical operation already completed; replay its
+	// recorded outcome without mutating anything.
+	operationReplay
+	// operationRefused: the actuation must not run — the store is
+	// unavailable or failed, the binding conflicts, or a live claimant holds
+	// the operation. Response carries the typed error envelope.
+	operationRefused
+)
+
+// operationClaimResult is the outcome of claimRobotOperation.
+type operationClaimResult struct {
+	Verdict operationClaimVerdict
+	// Record is the completed row to replay (operationReplay).
+	Record *state.SendOperation
+	// Owned is the claim the caller must finish (operationExecute).
+	Owned *durableOperation
+	// Response is the refusal envelope (operationRefused).
+	Response RobotResponse
+	// Info is the operation view to attach to a refusal, or nil when no
+	// record applies (store unavailable or failed).
+	Info *OperationInfo
+}
+
+// claimRobotOperation runs the durable claim protocol shared by every
+// idempotent robot actuation. It must be called after the actuation's
+// preflight validation and BEFORE its first pane mutation.
+func claimRobotOperation(req operationClaimRequest) operationClaimResult {
+	refuse := func(resp RobotResponse, info *OperationInfo) operationClaimResult {
+		return operationClaimResult{Verdict: operationRefused, Response: resp, Info: info}
+	}
+
+	store := currentProjectionStore()
+	if store == nil {
+		return refuse(NewErrorResponse(
+			fmt.Errorf("idempotent %s requires the runtime projection store", req.Kind),
+			ErrCodeNotImplemented,
+			"Re-run without an operation ID, or ensure the runtime state store is available",
+		), nil)
+	}
+
+	payloadSHA, payloadBytes := operationPayloadDigest(req.Payload)
+	claim := &state.SendOperation{
+		OperationID:   req.OperationID,
+		SessionName:   req.Session,
+		Kind:          req.Kind,
+		BindingHash:   req.BindingHash,
+		PayloadSHA256: payloadSHA,
+		PayloadBytes:  payloadBytes,
+	}
+	stored, claimed, err := store.ClaimSendOperation(claim)
+	if err != nil {
+		return refuse(NewErrorResponse(err, ErrCodeInternalError, fmt.Sprintf("Failed to claim %s operation", req.Kind)), nil)
+	}
+	if claimed {
+		return operationClaimResult{Verdict: operationExecute, Owned: &durableOperation{store: store, record: stored}}
+	}
+
+	if storedKind := operationRecordKind(stored); storedKind != req.Kind {
+		return refuse(NewErrorResponse(
+			fmt.Errorf("operation ID '%s' is already bound to a %s operation in session '%s'", req.OperationID, storedKind, req.Session),
+			ErrCodeIdempotencyConflict,
+			fmt.Sprintf("Use a fresh operation ID for this %s; operation IDs share one namespace per session across actuations", req.Kind),
+		), operationInfoFromRecord(stored, false))
+	}
+	if stored.BindingHash != req.BindingHash {
+		return refuse(NewErrorResponse(
+			fmt.Errorf("operation ID '%s' is already bound to a different selector or payload in session '%s'", req.OperationID, req.Session),
+			ErrCodeIdempotencyConflict,
+			fmt.Sprintf("Use a fresh operation ID for a different %s, or repeat the original command exactly", req.Kind),
+		), operationInfoFromRecord(stored, false))
+	}
+	if stored.Status == state.SendOperationCompleted {
+		return operationClaimResult{Verdict: operationReplay, Record: stored}
+	}
+
+	// In progress. If the original claimant crashed before recording an
+	// outcome the row would otherwise stay in_progress forever, so a
+	// sufficiently stale matching claim is taken over and executed fresh. A
+	// recent claim is a live concurrent caller: report in-progress and let
+	// the caller reconcile via the receipt.
+	takenOver, takeoverErr := store.TakeOverStaleSendOperation(
+		claim.OperationID, claim.SessionName, claim.BindingHash,
+		time.Now().UTC().Add(-operationStaleClaimWindow),
+	)
+	if takeoverErr == nil && takenOver {
+		refreshed, _ := store.GetSendOperation(claim.OperationID, claim.SessionName)
+		if refreshed == nil {
+			refreshed = claim
+		}
+		return operationClaimResult{Verdict: operationExecute, Owned: &durableOperation{store: store, record: refreshed}}
+	}
+	info := operationInfoFromRecord(stored, true)
+	info.Admissions = unknownAdmissions(req.Targets)
+	return refuse(NewErrorResponse(
+		fmt.Errorf("operation '%s' is in progress", req.OperationID),
+		ErrCodeOperationInProgress,
+		fmt.Sprintf("Query the durable receipt with --robot-send-receipt=%s before retrying", req.OperationID),
+	), info)
+}
+
+// durableOperation is a claim owned by the current actuation. It must be
+// finished exactly once: complete after any pane mutation was attempted,
+// release when the actuation terminated before mutating anything.
+type durableOperation struct {
+	store  *state.Store
+	record *state.SendOperation
+}
+
+// release frees the claim when the actuation terminated BEFORE any pane was
+// touched (preflight failure). A retry with the same operation ID must get a
+// fresh attempt rather than a stored transient failure. Best-effort: the
+// returned warning is empty on success.
+func (op *durableOperation) release() string {
+	if err := op.store.ReleaseSendOperation(op.record.OperationID, op.record.SessionName); err != nil {
+		return fmt.Sprintf("%s operation %s claim not released: %v (retry may report in-progress until taken over)",
+			operationRecordKind(op.record), op.record.OperationID, err)
+	}
+	return ""
+}
+
+// complete persists the terminal outcome (a kind-specific outcome record
+// that embeds its admissions) and returns the completed operation view.
+// Best-effort: a persistence failure is returned as a warning rather than
+// failing an actuation that already happened, and the view is then nil.
+func (op *durableOperation) complete(outcome any, admissions []OperationAdmission) (*OperationInfo, string) {
+	kind := operationRecordKind(op.record)
+	data, err := json.Marshal(outcome)
+	if err != nil {
+		return nil, fmt.Sprintf("%s operation %s outcome not recorded: %v", kind, op.record.OperationID, err)
+	}
+	completedAt := time.Now().UTC()
+	if err := op.store.CompleteSendOperation(op.record.OperationID, op.record.SessionName, string(data), completedAt); err != nil {
+		return nil, fmt.Sprintf("%s operation %s outcome not recorded: %v", kind, op.record.OperationID, err)
+	}
+	op.record.Status = state.SendOperationCompleted
+	op.record.CompletedAt = &completedAt
+	info := operationInfoFromRecord(op.record, false)
+	info.Admissions = admissions
+	return info, ""
+}
+
+// replayedOperationInfo is the operation view attached to a replayed
+// outcome: the stored record, flagged replayed, with the recorded admissions.
+func replayedOperationInfo(op *state.SendOperation, admissions []OperationAdmission) *OperationInfo {
+	info := operationInfoFromRecord(op, true)
+	info.Admissions = admissions
+	return info
+}
+
+// SendReceiptOutput is the structured output for --robot-send-receipt, the
+// durable receipt of any idempotent robot operation (send or interrupt).
+type SendReceiptOutput struct {
+	RobotResponse
+	Session   string         `json:"session,omitempty"`
+	Warnings  []string       `json:"warnings,omitempty"`
+	Operation *OperationInfo `json:"operation,omitempty"`
+	// Outcome carries the recorded terminal result of a completed send
+	// operation (operation.kind == "send").
+	Outcome *SendReceiptOutcome `json:"outcome,omitempty"`
+	// InterruptOutcome carries the recorded terminal result of a completed
+	// interrupt operation (operation.kind == "interrupt").
+	InterruptOutcome *InterruptReceiptOutcome `json:"interrupt_outcome,omitempty"`
+}
+
+// GetSendReceipt returns the durable receipt for an operation ID, whichever
+// actuation (send or interrupt) claimed it.
+func GetSendReceipt(operationID string) (*SendReceiptOutput, error) {
+	operationID = strings.TrimSpace(operationID)
+	output := &SendReceiptOutput{RobotResponse: NewRobotResponse(true)}
+	if operationID == "" {
+		output.RobotResponse = NewErrorResponse(
+			fmt.Errorf("operation ID is required"),
+			ErrCodeInvalidFlag,
+			"Pass the operation ID supplied to --robot-send or --robot-interrupt via --op-id",
+		)
+		return output, nil
+	}
+
+	store := currentProjectionStore()
+	if store == nil {
+		output.RobotResponse = NewErrorResponse(
+			fmt.Errorf("operation receipts require the runtime projection store"),
+			ErrCodeNotImplemented,
+			"The runtime state store is unavailable in this invocation",
+		)
+		return output, nil
+	}
+
+	ops, err := store.GetSendOperationsByID(operationID)
+	if err != nil {
+		output.RobotResponse = NewErrorResponse(err, ErrCodeInternalError, "Failed to read operation record")
+		return output, nil
+	}
+	if len(ops) == 0 {
+		output.RobotResponse = NewErrorResponse(
+			fmt.Errorf("operation '%s' not found", operationID),
+			ErrCodeNotFound,
+			"Unknown operation ID; receipts exist only for --robot-send/--robot-interrupt calls that supplied --op-id (or a REST Idempotency-Key)",
+		)
+		return output, nil
+	}
+	// Operation IDs are scoped per session; the same ID may exist in several
+	// sessions. Report the newest and surface the others so the caller can
+	// disambiguate.
+	op := &ops[0]
+	if len(ops) > 1 {
+		sessions := make([]string, 0, len(ops))
+		for _, other := range ops {
+			sessions = append(sessions, other.SessionName)
+		}
+		output.Warnings = append(output.Warnings, fmt.Sprintf(
+			"operation ID %q exists in %d sessions (%s); showing the most recent (%s)",
+			operationID, len(ops), strings.Join(sessions, ", "), op.SessionName))
+	}
+
+	output.Session = op.SessionName
+	output.Operation = operationInfoFromRecord(op, false)
+	if op.Status != state.SendOperationCompleted || op.OutcomeJSON == "" {
+		return output, nil
+	}
+	var decodeErr error
+	switch kind := operationRecordKind(op); kind {
+	case state.OperationKindSend:
+		output.Outcome, decodeErr = sendReceiptOutcomeFromJSON(op.OutcomeJSON)
+	case state.OperationKindInterrupt:
+		output.InterruptOutcome, decodeErr = interruptReceiptOutcomeFromJSON(op.OutcomeJSON)
+	default:
+		output.Warnings = append(output.Warnings, fmt.Sprintf(
+			"operation kind %q is not known to this ntm; the recorded outcome is omitted", kind))
+	}
+	if decodeErr != nil {
+		output.Warnings = append(output.Warnings, fmt.Sprintf("recorded outcome could not be decoded: %v", decodeErr))
+	}
+	return output, nil
+}
+
+// PrintSendReceipt handles the --robot-send-receipt command.
+func PrintSendReceipt(operationID string) error {
+	output, err := GetSendReceipt(operationID)
+	if err != nil {
+		return err
+	}
+	return encodeTerminalRobotOutput(output, output.RobotResponse, "robot send-receipt failed")
+}

@@ -247,7 +247,7 @@ func TestGetSendIdempotency_FreshClaimRecordsCompletedOutcome(t *testing.T) {
 func seedCompletedSendOperation(t *testing.T, store *state.Store, opID, session, bindingHash string, outcome sendOperationOutcome) *state.SendOperation {
 	t.Helper()
 
-	payloadSHA, payloadBytes := sendPayloadDigest("seeded payload")
+	payloadSHA, payloadBytes := operationPayloadDigest("seeded payload")
 	_, claimed, err := store.ClaimSendOperation(&state.SendOperation{
 		OperationID:   opID,
 		SessionName:   session,
@@ -301,7 +301,7 @@ func TestGetSendIdempotency_ReplaysCompletedSuccessWithoutDispatch(t *testing.T)
 		Targets:    []string{"sentinel-target"},
 		Successful: []string{"sentinel-target"},
 		Failed:     []SendError{},
-		Admissions: []SendAdmission{{Target: "sentinel-target", State: AdmissionSubmitted}},
+		Admissions: []OperationAdmission{{Target: "sentinel-target", State: AdmissionSubmitted}},
 	})
 	logSeededSendOperation(t, "seeded row", seeded)
 
@@ -368,7 +368,7 @@ func TestGetSendIdempotency_ReplaysCompletedFailureWithNewIDHint(t *testing.T) {
 		Targets:    []string{"sentinel-target"},
 		Successful: []string{},
 		Failed:     []SendError{{Pane: "sentinel-target", Error: "seeded delivery failure"}},
-		Admissions: []SendAdmission{{Target: "sentinel-target", State: AdmissionRejected, Error: "seeded delivery failure"}},
+		Admissions: []OperationAdmission{{Target: "sentinel-target", State: AdmissionRejected, Error: "seeded delivery failure"}},
 		Error:      "seeded delivery failure",
 		ErrorCode:  ErrCodeInternalError,
 	})
@@ -474,7 +474,7 @@ func TestGetSendIdempotency_FreshInProgressClaimReportsInProgress(t *testing.T) 
 		IdempotencyKey: opID,
 	}
 
-	payloadSHA, payloadBytes := sendPayloadDigest(opts.Message)
+	payloadSHA, payloadBytes := operationPayloadDigest(opts.Message)
 	seeded, claimed, err := store.ClaimSendOperation(&state.SendOperation{
 		OperationID:   opID,
 		SessionName:   session,
@@ -539,8 +539,8 @@ func TestGetSendIdempotency_StaleInProgressClaimTakenOver(t *testing.T) {
 		IdempotencyKey: opID,
 	}
 
-	staleCreatedAt := time.Now().UTC().Add(-(sendOperationStaleClaimWindow + 10*time.Minute))
-	payloadSHA, payloadBytes := sendPayloadDigest(opts.Message)
+	staleCreatedAt := time.Now().UTC().Add(-(operationStaleClaimWindow + 10*time.Minute))
+	payloadSHA, payloadBytes := operationPayloadDigest(opts.Message)
 	seeded, claimed, err := store.ClaimSendOperation(&state.SendOperation{
 		OperationID:   opID,
 		SessionName:   session,
@@ -581,7 +581,7 @@ func TestGetSendIdempotency_StaleInProgressClaimTakenOver(t *testing.T) {
 	}
 	// TakeOverStaleSendOperation refreshes created_at to now; a row still
 	// carrying the stale timestamp means the takeover path never ran.
-	if !row.CreatedAt.After(staleCreatedAt.Add(sendOperationStaleClaimWindow)) {
+	if !row.CreatedAt.After(staleCreatedAt.Add(operationStaleClaimWindow)) {
 		t.Fatalf("row.CreatedAt = %v, want refreshed past the stale seed %v", row.CreatedAt, staleCreatedAt)
 	}
 	var outcome sendOperationOutcome
@@ -638,7 +638,7 @@ func TestGetSendIdempotency_PreflightFailureReleasesClaim(t *testing.T) {
 	}
 
 	// And the operation ID is immediately reusable: a fresh claim wins.
-	payloadSHA, payloadBytes := sendPayloadDigest(opts.Message)
+	payloadSHA, payloadBytes := operationPayloadDigest(opts.Message)
 	_, reclaimed, err := store.ClaimSendOperation(&state.SendOperation{
 		OperationID:   opID,
 		SessionName:   session,

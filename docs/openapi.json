@@ -14179,6 +14179,10 @@
             "type": "string",
             "description": "Method"
           },
+          "operation": {
+            "description": "Operation",
+            "$ref": "#/components/schemas/OperationInfo"
+          },
           "output_format": {
             "type": "string",
             "description": "Output format"
@@ -14321,6 +14325,81 @@
         "required": [
           "ID",
           "Value"
+        ]
+      },
+      "OperationAdmission": {
+        "type": "object",
+        "properties": {
+          "error": {
+            "type": "string",
+            "description": "Error"
+          },
+          "state": {
+            "type": "string",
+            "description": "State"
+          },
+          "target": {
+            "type": "string",
+            "description": "Target"
+          }
+        },
+        "required": [
+          "target",
+          "state"
+        ]
+      },
+      "OperationInfo": {
+        "type": "object",
+        "properties": {
+          "admissions": {
+            "type": "array",
+            "description": "Admissions",
+            "items": {
+              "$ref": "#/components/schemas/OperationAdmission"
+            }
+          },
+          "completed_at": {
+            "type": "string",
+            "format": "date-time",
+            "description": "RFC3339 timestamp"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time",
+            "description": "RFC3339 timestamp"
+          },
+          "kind": {
+            "type": "string",
+            "description": "Kind"
+          },
+          "operation_id": {
+            "type": "string",
+            "description": "Operation i d"
+          },
+          "payload_bytes": {
+            "type": "integer",
+            "description": "Payload bytes"
+          },
+          "payload_sha256": {
+            "type": "string",
+            "description": "Payload s h a256"
+          },
+          "replayed": {
+            "type": "boolean",
+            "description": "Replayed"
+          },
+          "status": {
+            "type": "string",
+            "description": "Status"
+          }
+        },
+        "required": [
+          "operation_id",
+          "kind",
+          "status",
+          "payload_sha256",
+          "payload_bytes",
+          "created_at"
         ]
       },
       "OperatorLoopGuardrail": {
@@ -15475,27 +15554,6 @@
           "evidence_complete"
         ]
       },
-      "SendAdmission": {
-        "type": "object",
-        "properties": {
-          "error": {
-            "type": "string",
-            "description": "Error"
-          },
-          "state": {
-            "type": "string",
-            "description": "State"
-          },
-          "target": {
-            "type": "string",
-            "description": "Target"
-          }
-        },
-        "required": [
-          "target",
-          "state"
-        ]
-      },
       "SendAgentHints": {
         "type": "object",
         "properties": {
@@ -15527,55 +15585,6 @@
         "required": [
           "pane",
           "error"
-        ]
-      },
-      "SendOperationInfo": {
-        "type": "object",
-        "properties": {
-          "admissions": {
-            "type": "array",
-            "description": "Admissions",
-            "items": {
-              "$ref": "#/components/schemas/SendAdmission"
-            }
-          },
-          "completed_at": {
-            "type": "string",
-            "format": "date-time",
-            "description": "RFC3339 timestamp"
-          },
-          "created_at": {
-            "type": "string",
-            "format": "date-time",
-            "description": "RFC3339 timestamp"
-          },
-          "operation_id": {
-            "type": "string",
-            "description": "Operation i d"
-          },
-          "payload_bytes": {
-            "type": "integer",
-            "description": "Payload bytes"
-          },
-          "payload_sha256": {
-            "type": "string",
-            "description": "Payload s h a256"
-          },
-          "replayed": {
-            "type": "boolean",
-            "description": "Replayed"
-          },
-          "status": {
-            "type": "string",
-            "description": "Status"
-          }
-        },
-        "required": [
-          "operation_id",
-          "status",
-          "payload_sha256",
-          "payload_bytes",
-          "created_at"
         ]
       },
       "SendOutput": {
@@ -15631,7 +15640,7 @@
           },
           "operation": {
             "description": "Operation",
-            "$ref": "#/components/schemas/SendOperationInfo"
+            "$ref": "#/components/schemas/OperationInfo"
           },
           "output_format": {
             "type": "string",

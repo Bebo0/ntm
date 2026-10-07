@@ -2123,6 +2123,7 @@ Tips for AI Agents:
 - Snapshot returns latest_cursor plus replay_window metadata for mechanical resync.
 - Prefer --robot-capabilities for schema discovery over parsing help text.
 - Use --robot-send --verify-render when a bounded before/after pane capture must confirm delivery changed rendered output; inspect render_evidence and require delivered_and_rendered for every target. This confirms rendered delivery, not agent comprehension.
+- Pass --op-id=ID to --robot-send or --robot-interrupt when you may retry after a timeout: an identical retry replays the recorded outcome instead of sending (or interrupting) again, a conflicting reuse fails IDEMPOTENCY_CONFLICT, and --robot-send-receipt=ID reports the outcome.
 - Profiles reduce filter boilerplate: --profile=operator is the default.
 - Attention feed is a sensing/actuation surface, not a planner: it does not assign beads, infer intent, or replace beads, bv, or Agent Mail.
 
@@ -6242,7 +6243,7 @@ type SendOutput struct {
 
 	// Operation is the durable idempotent-operation receipt (#245), present
 	// when the caller supplied an operation ID (--op-id / Idempotency-Key).
-	Operation *SendOperationInfo `json:"operation,omitempty"`
+	Operation *OperationInfo `json:"operation,omitempty"`
 }
 
 // SendRenderEvidence records bounded before/after terminal observations for one
@@ -7447,97 +7448,48 @@ func GetSend(opts SendOptions) (*SendOutput, error) {
 		return finalizeTerminalSendActuation(trace, opts, &output), nil
 	}
 
-	// Durable idempotent operation claim (#245). The claim happens BEFORE
-	// any keystroke is injected and binds the operation ID to the caller's
-	// canonical selector spec plus the digest of the exact payload about to
-	// be delivered (post CASS injection). Identical retries replay the
-	// recorded outcome; conflicting reuse is rejected; a claim abandoned by
-	// a crashed process is taken over after a staleness window; preflight
-	// failures release the claim so the ID stays retryable.
-	var claimedOp *state.SendOperation
-	var claimedStore *state.Store
+	// Durable idempotent operation claim (#245; protocol shared with
+	// --robot-interrupt in operation_idempotency.go). The claim happens
+	// BEFORE any keystroke is injected and binds the operation ID to the
+	// caller's canonical selector spec plus input-message digest; the
+	// receipt's payload digest records the exact bytes about to be delivered
+	// (post CASS injection). Identical retries replay the recorded outcome;
+	// conflicting reuse is rejected; a claim abandoned by a crashed process
+	// is taken over after a staleness window; preflight failures release the
+	// claim so the ID stays retryable.
 	dispatchAttempted := false
 	if trace.IdempotencyKey != "" && !opts.DryRun {
-		store := currentProjectionStore()
-		if store == nil {
-			output.RobotResponse = NewErrorResponse(
-				fmt.Errorf("idempotent send requires the runtime projection store"),
-				ErrCodeNotImplemented,
-				"Re-run without an operation ID, or ensure the runtime state store is available",
-			)
+		claim := claimRobotOperation(operationClaimRequest{
+			Kind:        state.OperationKindSend,
+			OperationID: trace.IdempotencyKey,
+			Session:     opts.Session,
+			BindingHash: sendOperationBindingHash(opts),
+			Payload:     messageToSend,
+			Targets:     output.Targets,
+		})
+		switch claim.Verdict {
+		case operationRefused:
+			output.RobotResponse = claim.Response
+			output.Operation = claim.Info
+			return finalizeTerminalSendActuation(trace, opts, &output), nil
+		case operationReplay:
+			if err := applyReplayedSendOutcome(&output, claim.Record); err != nil {
+				output.RobotResponse = NewErrorResponse(err, ErrCodeInternalError, "Stored send outcome could not be decoded")
+				return finalizeTerminalSendActuation(trace, opts, &output), nil
+			}
+			output.AgentHints = generateSendHints(output)
 			return finalizeTerminalSendActuation(trace, opts, &output), nil
 		}
-		// The binding covers the caller's input command (selector + input
-		// message); PayloadSHA256 records the exact post-transformation
-		// bytes about to be delivered. They differ under CASS injection.
-		payloadSHA, payloadBytes := sendPayloadDigest(messageToSend)
-		claim := &state.SendOperation{
-			OperationID:   trace.IdempotencyKey,
-			SessionName:   opts.Session,
-			BindingHash:   sendOperationBindingHash(opts),
-			PayloadSHA256: payloadSHA,
-			PayloadBytes:  payloadBytes,
-		}
-		stored, claimed, claimErr := store.ClaimSendOperation(claim)
-		if claimErr != nil {
-			output.RobotResponse = NewErrorResponse(claimErr, ErrCodeInternalError, "Failed to claim send operation")
-			return finalizeTerminalSendActuation(trace, opts, &output), nil
-		}
-		if !claimed {
-			if stored.BindingHash != claim.BindingHash {
-				output.RobotResponse = NewErrorResponse(
-					fmt.Errorf("operation ID '%s' is already bound to a different selector or payload in session '%s'", trace.IdempotencyKey, opts.Session),
-					ErrCodeIdempotencyConflict,
-					"Use a fresh operation ID for a different send, or repeat the original command exactly",
-				)
-				output.Operation = sendOperationInfoFromRecord(stored, false)
-				return finalizeTerminalSendActuation(trace, opts, &output), nil
-			}
-			if stored.Status == state.SendOperationCompleted {
-				if err := applyReplayedOutcome(&output, stored); err != nil {
-					output.RobotResponse = NewErrorResponse(err, ErrCodeInternalError, "Stored send outcome could not be decoded")
-					return finalizeTerminalSendActuation(trace, opts, &output), nil
-				}
-				output.AgentHints = generateSendHints(output)
-				return finalizeTerminalSendActuation(trace, opts, &output), nil
-			}
-			// In progress. If the original claimant crashed before recording
-			// an outcome the row would otherwise stay in_progress forever, so
-			// a sufficiently stale matching claim is taken over and executed
-			// fresh. A recent claim is a live concurrent sender: report
-			// in-progress and let the caller reconcile via the receipt.
-			takenOver, takeoverErr := store.TakeOverStaleSendOperation(
-				claim.OperationID, claim.SessionName, claim.BindingHash,
-				time.Now().UTC().Add(-sendOperationStaleClaimWindow),
-			)
-			if takeoverErr == nil && takenOver {
-				stored, _ = store.GetSendOperation(claim.OperationID, claim.SessionName)
-				if stored == nil {
-					stored = claim
-				}
-			} else {
-				output.RobotResponse = NewErrorResponse(
-					fmt.Errorf("operation '%s' is in progress", trace.IdempotencyKey),
-					ErrCodeOperationInProgress,
-					fmt.Sprintf("Query the durable receipt with --robot-send-receipt=%s before retrying", trace.IdempotencyKey),
-				)
-				info := sendOperationInfoFromRecord(stored, true)
-				info.Admissions = unknownAdmissions(output.Targets)
-				output.Operation = info
-				return finalizeTerminalSendActuation(trace, opts, &output), nil
-			}
-		}
-		claimedOp = stored
-		claimedStore = store
+		owned := claim.Owned
 		defer func() {
 			// After a dispatch attempt the outcome is terminal: record it so
 			// the receipt survives caller timeouts. Before any dispatch
 			// attempt (preflight failure) nothing was typed, so the claim is
 			// released and the operation ID stays retryable.
 			if dispatchAttempted {
-				completeSendOperationRecord(claimedStore, claimedOp, &output)
-			} else {
-				releaseSendOperationClaim(claimedStore, claimedOp, &output)
+				completeSendOperation(owned, &output)
+			} else if warning := owned.release(); warning != "" {
+				output.Warnings = append(output.Warnings, warning)
 			}
 		}()
 	}

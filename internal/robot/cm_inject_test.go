@@ -632,7 +632,7 @@ func TestSendOptions_BindingHashStableAcrossVersionsWithoutMemory(t *testing.T) 
 		writeField(enter)
 		writeField(strconv.FormatBool(opts.ClearInput))
 		writeField(strconv.FormatBool(opts.WithCASS))
-		inputSHA, _ := sendPayloadDigest(opts.Message)
+		inputSHA, _ := operationPayloadDigest(opts.Message)
 		writeField(inputSHA)
 		return hex.EncodeToString(h.Sum(nil))
 	}

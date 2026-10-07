@@ -7,11 +7,17 @@
 **Bead:** bd-j9jo3.1.10
 **Created:** 2026-03-22
 
-> **Shipping status:** the shipped CLI mechanism for request identity is the
-> durable idempotent send: `--robot-send ... --op-id=<ID>` plus
-> `--robot-send-receipt=<ID>` for outcome retrieval, and
+> **Shipping status:** the shipped mechanism for request identity is the
+> durable idempotent operation, available on the two non-idempotent
+> actuations: `--robot-send ... --op-id=<ID>` and
+> `--robot-interrupt ... --op-id=<ID>` (and their REST endpoints,
+> `POST /api/v1/sessions/{id}/agents/send|interrupt`, via the
+> `Idempotency-Key` header), plus `--robot-send-receipt=<ID>` for outcome
+> retrieval of either kind, and
 > `ntm --robot-causality --causality-chain=<ID>` for correlation queries.
-> The `request_id`/`idempotency_key`/`correlation_id` field family and the
+> Both actuations share one claim/replay/conflict protocol and one durable
+> store (§3.5). The `request_id`/`idempotency_key`/`correlation_id` field
+> family and the
 > `--robot-action-status`/`--robot-wait-request`/`--robot-cancel-request`
 > surfaces described below are design, not shipped; CLI examples in this
 > document use the shipped shapes.
@@ -155,6 +161,32 @@ Examples:
   idem_workflow_bd-xyz_step3
 ```
 
+### 3.5 Shipped Semantics (`--op-id` / `Idempotency-Key`)
+
+`--robot-send` and `--robot-interrupt` accept `--op-id=<ID>`; the REST send
+and interrupt endpoints take the same ID as the `Idempotency-Key` header.
+
+| Property | Behavior |
+|----------|----------|
+| Claim point | The ID is claimed durably (runtime state DB, `send_operations`) after preflight validation and **before any pane is touched** — before the first keystroke (send) or the first Ctrl+C (interrupt). Dry runs never claim. |
+| Scope | One namespace per session, shared across actuation kinds: the same ID may be used in two sessions independently, but not for a send and an interrupt in one session. |
+| Binding | The ID is bound to the actuation kind plus the caller's command spec. Send: session, `--pane/--panes/--type/--exclude/--all`, `--enter`, `--clear-input`, `--with-cass`/`--with-memory` toggles, input-message digest. Interrupt: session, `--panes`, `--all`, `--force`, input-message digest. Selector lists are order-insensitive; interrupt wait behavior (`--no-wait`, `--timeout`) is not bound, so a retry may lengthen the timeout. |
+| Identical retry of a completed operation | Replays the recorded outcome (`operation.replayed: true`) without sending or interrupting again. A replayed failure carries a hint to use a new ID. |
+| Conflicting reuse | `IDEMPOTENCY_CONFLICT` (REST 409); nothing is touched. |
+| Retry while the first attempt is still running | `OPERATION_IN_PROGRESS` (REST 409) with per-target admissions `unknown`; reconcile with the receipt. A claim abandoned by a crashed process is taken over after 10 minutes. |
+| Preflight failure after the claim (send) | The claim is released, so the ID stays retryable. Once an interrupt passes its claim every step may touch a pane, so its outcome is always recorded. |
+| Receipt | `--robot-send-receipt=<ID>` returns `operation` (with `kind`) plus `outcome` (send) or `interrupt_outcome` (interrupt). Receipts keep payload digests and states only — never message bytes or pane output — and are pruned 7 days after completion. |
+| No state store | Supplying an ID without the runtime state store fails closed with `NOT_IMPLEMENTED` before anything is touched. |
+
+```bash
+# Interrupt + retask, safely retryable after a caller timeout
+ntm --robot-interrupt=myproject --msg="Stop and fix the build" --op-id="retask-42"
+# ...timeout... identical retry: replays, no second Ctrl+C, no second task
+ntm --robot-interrupt=myproject --msg="Stop and fix the build" --op-id="retask-42"
+# Outcome by ID, from any process
+ntm --robot-send-receipt="retask-42"
+```
+
 ---
 
 ## 4. Retry Semantics
@@ -170,7 +202,7 @@ Commands are classified by retry safety:
 | `send` (different content) | No | Never | Creates new message |
 | `spawn` (existing session) | Yes | Always | No-op if exists |
 | `spawn` (new session) | No | Use idempotency key | Duplicate session possible |
-| `interrupt` | No | Avoid | Cumulative effect |
+| `interrupt` | No | Use idempotency key (`--op-id`) | Cumulative effect: a bare retry interrupts again and re-sends the task |
 | `close-bead` | Yes | Always | No-op if closed |
 | `ack-alert` | Yes | Always | No-op if acked |
 
@@ -215,7 +247,7 @@ REQUEST FAILED
 When retry safety is uncertain:
 
 ```bash
-# Check whether the send completed (durable receipt by operation ID)
+# Check whether the send (or interrupt) completed (durable receipt by operation ID)
 ntm --robot-send-receipt="op_start_work_1"
 ```
 
@@ -611,6 +643,9 @@ type RobotResponse struct {
 ## Appendix: Changelog
 
 - **2026-03-22:** Initial request identity contract (bd-j9jo3.1.10)
+- **2026-10-07:** `--robot-interrupt --op-id` (and the REST interrupt
+  `Idempotency-Key`) ships on the shared durable operation protocol; the
+  receipt reports the operation kind (§3.5)
 
 ---
 

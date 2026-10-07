@@ -2191,6 +2191,11 @@ func robotErrorHTTPStatus(code string) int {
 		return http.StatusForbidden
 	case robot.ErrCodeResourceBusy, robot.ErrCodeStaleWorkCoordination:
 		return http.StatusConflict
+	case robot.ErrCodeIdempotencyConflict, robot.ErrCodeOperationInProgress:
+		// The operation ID (Idempotency-Key) is bound to a different command,
+		// or another request holding it is still running: a client-side
+		// conflict to reconcile via the receipt, never a server fault.
+		return http.StatusConflict
 	case robot.ErrCodeTimeout:
 		return http.StatusGatewayTimeout
 	case robot.ErrCodeNotImplemented:

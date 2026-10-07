@@ -345,10 +345,13 @@ Errors include retry guidance:
 
 ### 5.3 Request Correlation
 
-For non-idempotent commands, include a durable operation ID (`--op-id`):
+For non-idempotent commands (`--robot-send`, `--robot-interrupt`), include a
+durable operation ID (`--op-id`; the REST endpoints take the same ID as the
+`Idempotency-Key` header):
 
 ```bash
 ntm --robot-send=myproject --msg="Fix auth" --op-id="deploy-42"
+ntm --robot-interrupt=myproject --msg="Stop and fix the build" --op-id="retask-42"
 ```
 
 The response includes the recorded operation:
@@ -357,6 +360,7 @@ The response includes the recorded operation:
   "success": true,
   "operation": {
     "operation_id": "deploy-42",
+    "kind": "send",
     "status": "completed",
     "payload_sha256": "...",
     "payload_bytes": 8
@@ -365,8 +369,11 @@ The response includes the recorded operation:
 ```
 
 An identical retry replays the recorded outcome (`"replayed": true` in
-`operation`); reusing the same `--op-id` with a different payload is rejected.
-Query the durable receipt later with:
+`operation`) without sending, or interrupting, again; reusing the same
+`--op-id` with a different command — or for a different actuation in the same
+session — is rejected with `IDEMPOTENCY_CONFLICT`. Query the durable receipt
+later with (it reports `outcome` for sends and `interrupt_outcome` for
+interrupts):
 
 ```bash
 ntm --robot-send-receipt=deploy-42

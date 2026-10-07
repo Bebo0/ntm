@@ -117,7 +117,7 @@ var SchemaPagination = map[string]SchemaPaginationFlag{
 	"safety_simulate":  {Reason: "bounded: per-request simulated command steps"},
 	"schema":           {Reason: "bounded: fixed schema catalog"},
 	"send":             {Reason: "bounded: per-request send results for addressed panes"},
-	"send_receipt":     {Reason: "bounded: delivery receipt for one send"},
+	"send_receipt":     {Reason: "bounded: receipt for one idempotent send or interrupt"},
 	"spawn":            {Reason: "bounded: per-request spawned pane rows"},
 	"support_bundle":   {Reason: "bounded: bundle manifest for one collection run"},
 

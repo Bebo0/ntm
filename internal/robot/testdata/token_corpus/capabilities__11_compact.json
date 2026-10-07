@@ -746,7 +746,7 @@
       "name": "send-receipt",
       "flag": "--robot-send-receipt",
       "category": "control",
-      "summary": "Query the durable receipt of an idempotent send by operation ID: binding digest, byte count, per-target admission states, and the recorded outcome.",
+      "summary": "Query the durable receipt of an idempotent --robot-send or --robot-interrupt by operation ID: operation kind, payload digest, byte count, per-target admission states, and the recorded outcome (outcome for sends, interrupt_outcome for interrupts).",
       "output_formats": [
         "json"
       ],

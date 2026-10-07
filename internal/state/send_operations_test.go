@@ -1,11 +1,16 @@
 package state
 
 import (
+	"database/sql"
+	"fmt"
+	"strings"
 	"testing"
 	"time"
+
+	"github.com/Dicklesworthstone/ntm/internal/sqliteutil"
 )
 
-// Tests for the durable idempotent send-operation records (#245).
+// Tests for the durable idempotent operation records (send #245, interrupt).
 
 func TestClaimSendOperationLifecycle(t *testing.T) {
 	store := testStore(t)
@@ -74,6 +79,126 @@ func TestClaimSendOperationLifecycle(t *testing.T) {
 	got2, _ := store.GetSendOperation("op-1", "proj")
 	if got2.OutcomeJSON != `{"success":true}` {
 		t.Errorf("re-complete overwrote outcome: %q", got2.OutcomeJSON)
+	}
+}
+
+// Operation kinds share one per-session operation-ID namespace: the kind is
+// recorded on claim, an empty kind claims as a send, and a later claim of the
+// same ID under a different kind observes (never overwrites) the original
+// row so the caller can reject it as a conflict.
+func TestClaimSendOperationRecordsKind(t *testing.T) {
+	store := testStore(t)
+
+	stored, claimed, err := store.ClaimSendOperation(&SendOperation{
+		OperationID: "op-int", SessionName: "proj", Kind: OperationKindInterrupt, BindingHash: "bind-int",
+	})
+	if err != nil || !claimed {
+		t.Fatalf("interrupt claim = (claimed=%v, err=%v), want fresh claim", claimed, err)
+	}
+	if stored.Kind != OperationKindInterrupt {
+		t.Fatalf("claimed kind = %q, want %q", stored.Kind, OperationKindInterrupt)
+	}
+
+	defaulted, claimed, err := store.ClaimSendOperation(&SendOperation{
+		OperationID: "op-legacy", SessionName: "proj", BindingHash: "bind-send",
+	})
+	if err != nil || !claimed {
+		t.Fatalf("kindless claim = (claimed=%v, err=%v), want fresh claim", claimed, err)
+	}
+	if defaulted.Kind != OperationKindSend {
+		t.Fatalf("kindless claim kind = %q, want %q", defaulted.Kind, OperationKindSend)
+	}
+
+	existing, claimedAgain, err := store.ClaimSendOperation(&SendOperation{
+		OperationID: "op-int", SessionName: "proj", Kind: OperationKindSend, BindingHash: "bind-send",
+	})
+	if err != nil {
+		t.Fatalf("cross-kind claim error = %v", err)
+	}
+	if claimedAgain {
+		t.Fatal("cross-kind claim reported claimed=true; operation IDs must share one namespace per session")
+	}
+	if existing.Kind != OperationKindInterrupt || existing.BindingHash != "bind-int" {
+		t.Fatalf("cross-kind claim overwrote the original row: %+v", existing)
+	}
+
+	ops, err := store.GetSendOperationsByID("op-int")
+	if err != nil || len(ops) != 1 || ops[0].Kind != OperationKindInterrupt {
+		t.Fatalf("GetSendOperationsByID(op-int) = (%+v, %v), want one interrupt row", ops, err)
+	}
+}
+
+// A database migrated before kinds existed keeps its send rows readable and
+// replayable: migration 025 backfills kind='send' and leaves the
+// (operation_id, session_name) key the idempotency invariant depends on.
+func TestSendOperationsKindMigrationBackfillsLegacyRows(t *testing.T) {
+	db, err := sql.Open(sqliteutil.DriverName, sqliteutil.MemoryDSN("foreign_keys(1)"))
+	if err != nil {
+		t.Fatalf("open in-memory db: %v", err)
+	}
+	db.SetMaxOpenConns(1)
+	db.SetMaxIdleConns(1)
+	t.Cleanup(func() { _ = db.Close() })
+
+	files, err := GetMigrationFiles()
+	if err != nil {
+		t.Fatalf("GetMigrationFiles: %v", err)
+	}
+	if _, err := db.Exec(`CREATE TABLE _migrations (
+		version INTEGER PRIMARY KEY,
+		name TEXT NOT NULL,
+		applied_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+	)`); err != nil {
+		t.Fatalf("create _migrations: %v", err)
+	}
+	// Bring the schema to the last pre-kind version exactly as an older ntm
+	// would have left it.
+	for _, filename := range files {
+		var version int
+		if _, err := fmt.Sscanf(filename, "%03d_", &version); err != nil {
+			t.Fatalf("parse migration version %s: %v", filename, err)
+		}
+		if version >= 25 {
+			break
+		}
+		content, err := ReadMigration(filename)
+		if err != nil {
+			t.Fatalf("read %s: %v", filename, err)
+		}
+		if _, err := db.Exec(content); err != nil {
+			t.Fatalf("apply %s: %v", filename, err)
+		}
+		if _, err := db.Exec(`INSERT INTO _migrations (version, name) VALUES (?, ?)`, version, filename); err != nil {
+			t.Fatalf("record %s: %v", filename, err)
+		}
+	}
+	if _, err := db.Exec(`
+		INSERT INTO send_operations (
+			operation_id, session_name, binding_hash, payload_sha256,
+			payload_bytes, status, outcome_json, created_at, completed_at
+		) VALUES ('op-pre', 'proj', 'bind-pre', 'sha-pre', 3, ?, '{"success":true}', ?, ?)`,
+		SendOperationCompleted, time.Now().UTC(), time.Now().UTC()); err != nil {
+		t.Fatalf("seed legacy send row: %v", err)
+	}
+
+	if err := ApplyMigrations(db); err != nil {
+		t.Fatalf("ApplyMigrations upgrade: %v", err)
+	}
+	store := &Store{db: db, path: ":memory:"}
+	got, err := store.GetSendOperation("op-pre", "proj")
+	if err != nil {
+		t.Fatalf("GetSendOperation after upgrade: %v", err)
+	}
+	if got == nil || got.Kind != OperationKindSend || got.BindingHash != "bind-pre" || got.Status != SendOperationCompleted {
+		t.Fatalf("legacy row after upgrade = %+v, want completed send row with original binding", got)
+	}
+
+	var tableSQL string
+	if err := db.QueryRow(`SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'send_operations'`).Scan(&tableSQL); err != nil {
+		t.Fatalf("read send_operations schema: %v", err)
+	}
+	if !strings.Contains(tableSQL, "PRIMARY KEY (operation_id, session_name)") {
+		t.Fatalf("send_operations lost its (operation_id, session_name) key after upgrade:\n%s", tableSQL)
 	}
 }
 

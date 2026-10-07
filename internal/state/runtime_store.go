@@ -25,7 +25,8 @@ const (
 	DefaultIncidentReopenWindow      = time.Hour
 	DefaultResolvedIncidentRetention = 7 * 24 * time.Hour
 	// DefaultSendOperationRetention bounds how long completed idempotent
-	// send receipts (#245) remain queryable before GC prunes them.
+	// operation receipts (send #245, interrupt) remain queryable before GC
+	// prunes them.
 	DefaultSendOperationRetention = 7 * 24 * time.Hour
 	// DefaultOutputSeqWatermarkRetention bounds how long an untouched
 	// output-sequence watermark row (#246) survives before GC prunes it.
@@ -3206,20 +3207,25 @@ func DecodeJSON(data string, v interface{}) error {
 }
 
 // =============================================================================
-// Send Operations (idempotent robot send, #245)
+// Send Operations (idempotent robot actuations: send #245, interrupt)
 // =============================================================================
 
 // ClaimSendOperation atomically claims a (session, operation ID) pair for
 // execution. The INSERT OR IGNORE makes the claim race-safe across
 // processes: exactly one caller creates the row (claimed=true) and every
-// other caller observes the existing row, whose binding it must validate
-// before deciding between replay and conflict.
+// other caller observes the existing row, whose kind and binding it must
+// validate before deciding between replay and conflict. An empty Kind claims
+// as OperationKindSend.
 func (s *Store) ClaimSendOperation(op *SendOperation) (existing *SendOperation, claimed bool, err error) {
 	if op == nil || op.OperationID == "" {
 		return nil, false, fmt.Errorf("claim send operation: operation ID is required")
 	}
 	if op.SessionName == "" {
 		return nil, false, fmt.Errorf("claim send operation: session name is required")
+	}
+	kind := op.Kind
+	if kind == "" {
+		kind = OperationKindSend
 	}
 
 	s.mu.Lock()
@@ -3231,10 +3237,10 @@ func (s *Store) ClaimSendOperation(op *SendOperation) (existing *SendOperation, 
 	}
 	result, err := s.db.Exec(`
 		INSERT OR IGNORE INTO send_operations (
-			operation_id, session_name, binding_hash, payload_sha256,
+			operation_id, session_name, kind, binding_hash, payload_sha256,
 			payload_bytes, status, outcome_json, created_at
-		) VALUES (?, ?, ?, ?, ?, ?, '', ?)`,
-		op.OperationID, op.SessionName, op.BindingHash, op.PayloadSHA256,
+		) VALUES (?, ?, ?, ?, ?, ?, ?, '', ?)`,
+		op.OperationID, op.SessionName, kind, op.BindingHash, op.PayloadSHA256,
 		op.PayloadBytes, SendOperationInProgress, createdAt,
 	)
 	if err != nil {
@@ -3353,7 +3359,7 @@ func (s *Store) GetSendOperationsByID(operationID string) ([]SendOperation, erro
 	defer s.mu.RUnlock()
 
 	rows, err := s.db.Query(`
-		SELECT operation_id, session_name, binding_hash, payload_sha256,
+		SELECT operation_id, session_name, kind, binding_hash, payload_sha256,
 			payload_bytes, status, COALESCE(outcome_json, ''), created_at, completed_at
 		FROM send_operations WHERE operation_id = ?
 		ORDER BY created_at DESC`,
@@ -3368,7 +3374,7 @@ func (s *Store) GetSendOperationsByID(operationID string) ([]SendOperation, erro
 	for rows.Next() {
 		var op SendOperation
 		if err := rows.Scan(
-			&op.OperationID, &op.SessionName, &op.BindingHash, &op.PayloadSHA256,
+			&op.OperationID, &op.SessionName, &op.Kind, &op.BindingHash, &op.PayloadSHA256,
 			&op.PayloadBytes, &op.Status, &op.OutcomeJSON, &op.CreatedAt, &op.CompletedAt,
 		); err != nil {
 			return nil, fmt.Errorf("scan send operation: %w", err)
@@ -3397,12 +3403,12 @@ func (s *Store) GCCompletedSendOperations(retention time.Duration) (int64, error
 func (s *Store) getSendOperationLocked(operationID, sessionName string) (*SendOperation, error) {
 	op := &SendOperation{}
 	err := s.db.QueryRow(`
-		SELECT operation_id, session_name, binding_hash, payload_sha256,
+		SELECT operation_id, session_name, kind, binding_hash, payload_sha256,
 			payload_bytes, status, COALESCE(outcome_json, ''), created_at, completed_at
 		FROM send_operations WHERE operation_id = ? AND session_name = ?`,
 		operationID, sessionName,
 	).Scan(
-		&op.OperationID, &op.SessionName, &op.BindingHash, &op.PayloadSHA256,
+		&op.OperationID, &op.SessionName, &op.Kind, &op.BindingHash, &op.PayloadSHA256,
 		&op.PayloadBytes, &op.Status, &op.OutcomeJSON, &op.CreatedAt, &op.CompletedAt,
 	)
 	if err == sql.ErrNoRows {

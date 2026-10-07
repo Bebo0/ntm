@@ -73,15 +73,53 @@ func TestSendOperationBindingHashCanonicalizesSelectors(t *testing.T) {
 	}
 }
 
-func TestSendPayloadDigest(t *testing.T) {
-	sha, n := sendPayloadDigest("abc")
+// TestSendOperationBindingHashIsStableAcrossVersions pins the exact digests
+// the pre-shared-hasher implementation produced (computed with the verbatim
+// v1.26 sendOperationBindingHash). Moving the encoding into
+// operationBindingHasher must not change a single byte: a changed digest
+// turns every recorded operation ID into IDEMPOTENCY_CONFLICT on retry.
+func TestSendOperationBindingHashIsStableAcrossVersions(t *testing.T) {
+	enterOff := false
+	cases := []struct {
+		name string
+		opts SendOptions
+		want string
+	}{
+		{
+			name: "selector lists with whitespace and empties",
+			opts: SendOptions{
+				Session: "proj", Message: "deploy",
+				Panes: []string{" 2", "1", ""}, AgentTypes: []string{"codex", "claude"}, Exclude: []string{"3"},
+			},
+			want: "cc064cd39ad44f118f4353d1b890a8f504104756b6ceda46fb41cf6c474a5aa0",
+		},
+		{
+			name: "every toggle set",
+			opts: SendOptions{
+				Session: "proj", All: true, Pane: "%7", Enter: &enterOff, ClearInput: true,
+				WithCASS: true, WithMemory: true, Message: "hello world",
+			},
+			want: "064f1f4f4b8005fcb2b6b58f1445a021b32e89af8da0b6ef59dea65c70bef8f7",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := sendOperationBindingHash(tc.opts); got != tc.want {
+				t.Fatalf("binding hash = %s, want pinned %s", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestOperationPayloadDigest(t *testing.T) {
+	sha, n := operationPayloadDigest("abc")
 	if n != 3 {
 		t.Errorf("payload bytes = %d, want 3", n)
 	}
 	if len(sha) != 64 {
 		t.Errorf("payload sha length = %d, want 64 hex chars", len(sha))
 	}
-	sha2, _ := sendPayloadDigest("abc")
+	sha2, _ := operationPayloadDigest("abc")
 	if sha != sha2 {
 		t.Error("digest is not deterministic")
 	}
@@ -97,7 +135,7 @@ func TestAdmissionsFromSendOutput(t *testing.T) {
 	if len(admissions) != 3 {
 		t.Fatalf("admissions = %+v, want 3 entries", admissions)
 	}
-	byTarget := map[string]SendAdmission{}
+	byTarget := map[string]OperationAdmission{}
 	for _, adm := range admissions {
 		byTarget[adm.Target] = adm
 	}
@@ -120,7 +158,7 @@ func TestApplyReplayedOutcomeRestoresOriginalResult(t *testing.T) {
 		Targets:    []string{"cc_1"},
 		Successful: []string{"cc_1"},
 		Failed:     []SendError{},
-		Admissions: []SendAdmission{{Target: "cc_1", State: AdmissionSubmitted}},
+		Admissions: []OperationAdmission{{Target: "cc_1", State: AdmissionSubmitted}},
 	}
 	data, err := json.Marshal(outcome)
 	if err != nil {
@@ -140,8 +178,8 @@ func TestApplyReplayedOutcomeRestoresOriginalResult(t *testing.T) {
 
 	var output SendOutput
 	output.RobotResponse = NewRobotResponse(true)
-	if err := applyReplayedOutcome(&output, op); err != nil {
-		t.Fatalf("applyReplayedOutcome error = %v", err)
+	if err := applyReplayedSendOutcome(&output, op); err != nil {
+		t.Fatalf("applyReplayedSendOutcome error = %v", err)
 	}
 	if !output.Success || len(output.Successful) != 1 || output.Successful[0] != "cc_1" {
 		t.Errorf("replayed output = %+v, want original successful targets", output)

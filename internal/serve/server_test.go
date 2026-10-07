@@ -226,6 +226,8 @@ func TestRobotErrorHTTPStatus(t *testing.T) {
 		{code: "SENSITIVE_DATA_BLOCKED", want: http.StatusForbidden},
 		{code: robot.ErrCodeResourceBusy, want: http.StatusConflict},
 		{code: robot.ErrCodeStaleWorkCoordination, want: http.StatusConflict},
+		{code: robot.ErrCodeIdempotencyConflict, want: http.StatusConflict},
+		{code: robot.ErrCodeOperationInProgress, want: http.StatusConflict},
 		{code: robot.ErrCodeTimeout, want: http.StatusGatewayTimeout},
 		{code: robot.ErrCodeNotImplemented, want: http.StatusNotImplemented},
 		{code: robot.ErrCodeDependencyMissing, want: http.StatusServiceUnavailable},

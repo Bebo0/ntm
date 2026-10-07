@@ -2022,11 +2022,11 @@ Shell Integration:
 			return
 		}
 		if robotSendReceipt != "" {
-			if robotSend != "" {
+			if robotSend != "" || robotInterrupt != "" {
 				// The receipt branch would otherwise return before the send
-				// block, silently skipping the send with a success-looking
-				// receipt response.
-				failRobotCommand(errors.New("--robot-send-receipt cannot be combined with --robot-send"), robot.ErrCodeInvalidFlag, "Run the send first, then query the receipt in a separate invocation", "robot-send-receipt")
+				// and interrupt blocks, silently skipping the actuation with
+				// a success-looking receipt response.
+				failRobotCommand(errors.New("--robot-send-receipt cannot be combined with --robot-send or --robot-interrupt"), robot.ErrCodeInvalidFlag, "Run the send or interrupt first, then query the receipt in a separate invocation", "robot-send-receipt")
 				return
 			}
 			if err := robot.PrintSendReceipt(robotSendReceipt); err != nil {
@@ -2104,7 +2104,7 @@ Shell Integration:
 				// not (yet) participate in the durable claim/replay protocol.
 				// Failing loudly beats accepting --op-id and providing no
 				// idempotency.
-				if strings.TrimSpace(robotSendOpID) != "" {
+				if strings.TrimSpace(robotOpID) != "" {
 					failRobotCommand(errors.New("--op-id is not supported with --track"), robot.ErrCodeInvalidFlag, "Send with --op-id first, then poll with --robot-ack separately", "robot-send")
 					return
 				}
@@ -2181,7 +2181,7 @@ Shell Integration:
 				DryRun:         robotDryRunEffective,
 				ClearInput:     robotSendClearInput,
 				VerifyRender:   robotSendVerifyRender,
-				IdempotencyKey: strings.TrimSpace(robotSendOpID),
+				IdempotencyKey: strings.TrimSpace(robotOpID),
 				WithCASS:       withCASS,
 				CASSConfig:     cassQuery,
 				FilterConfig:   cassFilter,
@@ -2512,14 +2512,15 @@ Shell Integration:
 				return
 			}
 			opts := robot.InterruptOptions{
-				Session:   session,
-				Message:   resolveRobotInterruptMessage(cmd),
-				Panes:     paneFilter,
-				All:       resolveRobotInterruptAll(cmd),
-				Force:     resolveRobotInterruptForce(cmd),
-				NoWait:    robotInterruptNoWait,
-				TimeoutMs: int(interruptTimeout.Milliseconds()),
-				DryRun:    robotDryRunEffective,
+				Session:        session,
+				Message:        resolveRobotInterruptMessage(cmd),
+				Panes:          paneFilter,
+				All:            resolveRobotInterruptAll(cmd),
+				Force:          resolveRobotInterruptForce(cmd),
+				NoWait:         robotInterruptNoWait,
+				TimeoutMs:      int(interruptTimeout.Milliseconds()),
+				DryRun:         robotDryRunEffective,
+				IdempotencyKey: strings.TrimSpace(robotOpID),
 			}
 			if cfg != nil {
 				opts.Redaction = cfg.Redaction.ToRedactionLibConfig()
@@ -3949,8 +3950,8 @@ var (
 	robotSendType         string // filter by agent type (e.g., "claude")
 	robotSendExclude      string // comma-separated panes to exclude
 	robotSendDelay        int    // delay between sends in ms
-	robotSendOpID         string // durable idempotent operation ID for --robot-send (#245)
-	robotSendReceipt      string // operation ID for --robot-send-receipt (#245)
+	robotOpID             string // durable idempotent operation ID for --robot-send (#245) and --robot-interrupt
+	robotSendReceipt      string // operation ID for --robot-send-receipt (#245): send or interrupt receipt
 	robotSendWithMemory   bool   // inject CM memory rules into the outgoing message (bd-3j6hm)
 	robotSendWithCASS     bool   // inject CASS session context into the outgoing message (bd-ws2-wire-or-delete-ykmcz.11)
 	robotSendNoCASS       bool   // force-disable CASS injection, overriding [cass.context] enabled=true
@@ -4635,8 +4636,8 @@ func init() {
 	rootCmd.Flags().BoolVar(&robotSendWithMemory, "with-memory", false, "Inject relevant CM (cass-memory) rules above the message before sending. Optional with --robot-send; degrades gracefully when cm is unavailable. Config: [memory] send_injection/send_max_rules/send_budget_tokens")
 	rootCmd.Flags().BoolVar(&robotSendWithCASS, "with-cass", false, "Inject relevant CASS session context above the message before sending. Optional with --robot-send; degrades gracefully when cass is unavailable. Config: [cass.context] enabled/max_sessions/lookback_days/max_tokens/min_relevance/skip_if_context_above/prefer_same_project")
 	rootCmd.Flags().BoolVar(&robotSendNoCASS, "no-cass", false, "Disable CASS context injection for this send, overriding [cass.context] enabled=true")
-	rootCmd.Flags().StringVar(&robotSendOpID, "op-id", "", "Durable idempotent operation ID for --robot-send: identical retries replay the recorded outcome, conflicting reuse is rejected. Example: ntm --robot-send=proj --msg='...' --op-id=deploy-42")
-	rootCmd.Flags().StringVar(&robotSendReceipt, "robot-send-receipt", "", "Query the durable receipt of an idempotent send by operation ID. Example: ntm --robot-send-receipt=deploy-42")
+	rootCmd.Flags().StringVar(&robotOpID, "op-id", "", "Durable idempotent operation ID for --robot-send and --robot-interrupt: identical retries replay the recorded outcome without touching panes again, conflicting reuse is rejected. Example: ntm --robot-interrupt=proj --msg='...' --op-id=retask-42")
+	rootCmd.Flags().StringVar(&robotSendReceipt, "robot-send-receipt", "", "Query the durable receipt of an idempotent --robot-send or --robot-interrupt by operation ID. Example: ntm --robot-send-receipt=deploy-42")
 
 	// Robot-assign flags for work distribution
 	rootCmd.Flags().StringVar(&robotAssign, "robot-assign", "", "Get work distribution recommendations. Required: SESSION. Example: ntm --robot-assign=proj --strategy=speed")

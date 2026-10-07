@@ -1,0 +1,13 @@
+-- Durable idempotent operations beyond --robot-send (#245 follow-up).
+--
+-- --robot-interrupt (and the REST interrupt endpoint's Idempotency-Key) now
+-- claims operation IDs in this table through the same claim / replay /
+-- conflict / takeover protocol as --robot-send. The kind column records which
+-- robot actuation an operation ID is bound to, so a receipt query can decode
+-- the recorded outcome and an operation ID reused across actuation kinds is
+-- rejected as a conflict instead of replaying the wrong outcome.
+--
+-- Operation IDs keep ONE namespace per session across kinds: the
+-- (operation_id, session_name) primary key is deliberately unchanged. Every
+-- row written before this migration was a send, hence the default.
+ALTER TABLE send_operations ADD COLUMN kind TEXT NOT NULL DEFAULT 'send';

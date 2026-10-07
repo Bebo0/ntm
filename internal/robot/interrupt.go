@@ -4,13 +4,16 @@ package robot
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
 
 	dispatchsvc "github.com/Dicklesworthstone/ntm/internal/dispatch"
 	"github.com/Dicklesworthstone/ntm/internal/redaction"
+	"github.com/Dicklesworthstone/ntm/internal/state"
 	"github.com/Dicklesworthstone/ntm/internal/status"
 	"github.com/Dicklesworthstone/ntm/internal/tmux"
 )
@@ -34,6 +37,10 @@ type InterruptOutput struct {
 	TimedOut       bool                 `json:"timed_out"`
 	DryRun         bool                 `json:"dry_run,omitempty"`
 	WouldAffect    []string             `json:"would_affect,omitempty"`
+
+	// Operation is the durable idempotent-operation receipt, present when
+	// the caller supplied an operation ID (--op-id / Idempotency-Key).
+	Operation *OperationInfo `json:"operation,omitempty"`
 }
 
 // PaneState captures the state of a pane before interruption
@@ -66,7 +73,7 @@ type InterruptOptions struct {
 	DryRun         bool     // Preview mode: show what would happen without executing
 	RequestID      string   // External request identifier for REST parity
 	CorrelationID  string   // Correlation identifier for tracing request/outcome/verification
-	IdempotencyKey string   // Idempotency key when provided by an upstream caller
+	IdempotencyKey string   // Durable operation ID (--op-id / REST Idempotency-Key), claimed before any pane is touched
 	Redaction      redaction.Config
 }
 
@@ -80,6 +87,12 @@ func GetInterrupt(opts InterruptOptions) (*InterruptOutput, error) {
 		opts.PollMs = 300 // Default 300ms poll interval
 	}
 	trace := normalizeActuationTrace(opts.RequestID, opts.CorrelationID, opts.IdempotencyKey)
+	// The operation binding digests the caller's INPUT follow-up message, so
+	// it is computed before redaction rewrites opts.Message below.
+	var operationBinding string
+	if trace.IdempotencyKey != "" && !opts.DryRun {
+		operationBinding = interruptOperationBindingHash(opts)
+	}
 
 	interruptedAt := time.Now().UTC()
 	output := &InterruptOutput{
@@ -210,6 +223,38 @@ func GetInterrupt(opts InterruptOptions) (*InterruptOutput, error) {
 		}
 		output.CompletedAt = time.Now().UTC()
 		return output, nil
+	}
+
+	// Durable idempotent operation claim (protocol shared with --robot-send,
+	// operation_idempotency.go). It happens after every preflight check and
+	// BEFORE the first interrupt key or follow-up message, so an identical
+	// retry after a caller timeout replays the recorded outcome instead of
+	// interrupting the agents — and delivering the new task — a second time.
+	// Everything past the claim may touch panes, so the outcome is always
+	// recorded as terminal rather than released.
+	if trace.IdempotencyKey != "" {
+		claim := claimRobotOperation(operationClaimRequest{
+			Kind:        state.OperationKindInterrupt,
+			OperationID: trace.IdempotencyKey,
+			Session:     opts.Session,
+			BindingHash: operationBinding,
+			Payload:     opts.Message,
+			Targets:     targetKeys,
+		})
+		switch claim.Verdict {
+		case operationRefused:
+			output.RobotResponse = claim.Response
+			output.Operation = claim.Info
+			output.CompletedAt = time.Now().UTC()
+			return finalizeTerminalInterruptActuation(trace, opts, targetKeys, output), nil
+		case operationReplay:
+			if err := applyReplayedInterruptOutcome(output, claim.Record); err != nil {
+				output.RobotResponse = NewErrorResponse(err, ErrCodeInternalError, "Stored interrupt outcome could not be decoded")
+				output.CompletedAt = time.Now().UTC()
+			}
+			return finalizeTerminalInterruptActuation(trace, opts, targetKeys, output), nil
+		}
+		defer completeInterruptOperation(claim.Owned, targetKeys, opts.Message != "", output)
 	}
 
 	publishInterruptActuationRequest(trace, opts, targetKeys)
@@ -485,6 +530,222 @@ func PrintInterrupt(opts InterruptOptions) error {
 		return err
 	}
 	return encodeTerminalRobotOutput(output, output.RobotResponse, "robot interrupt failed")
+}
+
+// interruptOperationBindingHash binds an idempotent interrupt to the
+// caller's canonical COMMAND spec: actuation kind, session, pane selectors,
+// --all, --force, and a digest of the caller's INPUT follow-up message
+// (before redaction).
+//
+// As with sends, the selector — not the resolved pane list — is bound, so a
+// byte-identical retry replays even when pane topology changed between
+// attempts; selector lists are canonicalized (trimmed, sorted). Wait
+// behavior (--no-wait, --timeout) is deliberately not bound: it shapes how
+// long the caller waits for closed-loop verification, and a caller retrying
+// after a timeout commonly lengthens it.
+//
+// Unlike sends, the kind is the first hashed field: interrupt bindings have
+// no pre-kind history to stay compatible with.
+func interruptOperationBindingHash(opts InterruptOptions) string {
+	b := newOperationBindingHasher()
+	b.field(state.OperationKindInterrupt)
+	b.field(opts.Session)
+	b.list(opts.Panes)
+	b.field(strconv.FormatBool(opts.All))
+	b.field(strconv.FormatBool(opts.Force))
+	inputSHA, _ := operationPayloadDigest(opts.Message)
+	b.field(inputSHA)
+	return b.sum()
+}
+
+// interruptOperationOutcome is the durable outcome record of a completed
+// idempotent interrupt, replayed verbatim to identical retries. Pane output
+// captured into previous_states is deliberately NOT persisted (last_output
+// is blanked): the receipt store keeps digests and states, never pane
+// contents.
+type interruptOperationOutcome struct {
+	Success        bool                 `json:"success"`
+	Error          string               `json:"error,omitempty"`
+	ErrorCode      string               `json:"error_code,omitempty"`
+	InterruptedAt  time.Time            `json:"interrupted_at"`
+	CompletedAt    time.Time            `json:"completed_at"`
+	Method         string               `json:"method"`
+	Targets        []string             `json:"targets"`
+	Interrupted    []string             `json:"interrupted"`
+	PreviousStates map[string]PaneState `json:"previous_states"`
+	ReadyForInput  []string             `json:"ready_for_input"`
+	Failed         []InterruptError     `json:"failed"`
+	MessageSent    bool                 `json:"message_sent"`
+	MessagePreview string               `json:"message_preview,omitempty"`
+	TimedOut       bool                 `json:"timed_out"`
+	Admissions     []OperationAdmission `json:"admissions"`
+}
+
+// admissionsFromInterruptOutput derives per-target admission states for a
+// finished interrupt: rejected when any action against the target failed
+// (interrupt key or follow-up message), submitted when the target accepted
+// the interrupt key or — already ready, so not interrupted — the follow-up
+// message, and not_attempted when the target was already ready and nothing
+// was submitted to it.
+func admissionsFromInterruptOutput(targets []string, messageRequested bool, output *InterruptOutput) []OperationAdmission {
+	if output == nil {
+		return nil
+	}
+	interrupted := make(map[string]bool, len(output.Interrupted))
+	for _, target := range output.Interrupted {
+		interrupted[target] = true
+	}
+	ready := make(map[string]bool, len(output.ReadyForInput))
+	for _, target := range output.ReadyForInput {
+		ready[target] = true
+	}
+	failures := make(map[string]string, len(output.Failed))
+	for _, failure := range output.Failed {
+		if previous, seen := failures[failure.Pane]; seen {
+			failures[failure.Pane] = previous + "; " + failure.Reason
+			continue
+		}
+		failures[failure.Pane] = failure.Reason
+	}
+
+	admissions := make([]OperationAdmission, 0, len(targets))
+	for _, target := range targets {
+		switch reason, failed := failures[target]; {
+		case failed:
+			admissions = append(admissions, OperationAdmission{Target: target, State: AdmissionRejected, Error: reason})
+		case interrupted[target], messageRequested && output.MessageSent && ready[target]:
+			admissions = append(admissions, OperationAdmission{Target: target, State: AdmissionSubmitted})
+		default:
+			admissions = append(admissions, OperationAdmission{Target: target, State: AdmissionNotAttempted})
+		}
+	}
+	return admissions
+}
+
+// completeInterruptOperation persists the terminal outcome of a claimed
+// interrupt and attaches the operation info to the output. Best-effort: a
+// persistence failure surfaces as a warning rather than failing an
+// interrupt that already happened.
+func completeInterruptOperation(op *durableOperation, targets []string, messageRequested bool, output *InterruptOutput) {
+	admissions := admissionsFromInterruptOutput(targets, messageRequested, output)
+	recordedStates := make(map[string]PaneState, len(output.PreviousStates))
+	for key, paneState := range output.PreviousStates {
+		paneState.LastOutput = ""
+		recordedStates[key] = paneState
+	}
+	info, warning := op.complete(interruptOperationOutcome{
+		Success:        output.Success,
+		Error:          output.Error,
+		ErrorCode:      output.ErrorCode,
+		InterruptedAt:  output.InterruptedAt,
+		CompletedAt:    output.CompletedAt,
+		Method:         output.Method,
+		Targets:        targets,
+		Interrupted:    output.Interrupted,
+		PreviousStates: recordedStates,
+		ReadyForInput:  output.ReadyForInput,
+		Failed:         output.Failed,
+		MessageSent:    output.MessageSent,
+		MessagePreview: output.Message,
+		TimedOut:       output.TimedOut,
+		Admissions:     admissions,
+	}, admissions)
+	if warning != "" {
+		output.Warnings = append(output.Warnings, warning)
+		return
+	}
+	output.Operation = info
+}
+
+// applyReplayedInterruptOutcome restores a stored outcome onto a fresh
+// InterruptOutput so an identical retry observes the original result without
+// sending a second interrupt key or follow-up message.
+func applyReplayedInterruptOutcome(output *InterruptOutput, op *state.SendOperation) error {
+	var outcome interruptOperationOutcome
+	if err := json.Unmarshal([]byte(op.OutcomeJSON), &outcome); err != nil {
+		return fmt.Errorf("decode stored interrupt outcome: %w", err)
+	}
+	output.Success = outcome.Success
+	output.Error = outcome.Error
+	output.ErrorCode = outcome.ErrorCode
+	output.InterruptedAt = outcome.InterruptedAt
+	output.CompletedAt = outcome.CompletedAt
+	if outcome.Method != "" {
+		output.Method = outcome.Method
+	}
+	output.Interrupted = nonNilStrings(outcome.Interrupted)
+	output.PreviousStates = outcome.PreviousStates
+	if output.PreviousStates == nil {
+		output.PreviousStates = map[string]PaneState{}
+	}
+	output.ReadyForInput = nonNilStrings(outcome.ReadyForInput)
+	output.Failed = outcome.Failed
+	if output.Failed == nil {
+		output.Failed = []InterruptError{}
+	}
+	output.MessageSent = outcome.MessageSent
+	if outcome.MessagePreview != "" {
+		output.Message = outcome.MessagePreview
+	}
+	output.TimedOut = outcome.TimedOut
+	output.Operation = replayedOperationInfo(op, outcome.Admissions)
+	// A replayed failure (including a verification timeout) is terminal for
+	// THIS operation ID: interrupt keys and the follow-up message may already
+	// have landed, so the retry semantics the caller opted into forbid a
+	// second attempt under the same ID.
+	if !outcome.Success && output.Hint == "" {
+		output.Hint = "recorded outcome replayed without re-interrupting; use a new operation ID to interrupt again"
+	}
+	return nil
+}
+
+func nonNilStrings(values []string) []string {
+	if values == nil {
+		return []string{}
+	}
+	return values
+}
+
+// InterruptReceiptOutcome is the recorded terminal result of a completed
+// interrupt operation as exposed by receipt queries.
+type InterruptReceiptOutcome struct {
+	Success       bool             `json:"success"`
+	InterruptedAt time.Time        `json:"interrupted_at"`
+	CompletedAt   time.Time        `json:"completed_at"`
+	Method        string           `json:"method"`
+	Targets       []string         `json:"targets"`
+	Interrupted   []string         `json:"interrupted"`
+	ReadyForInput []string         `json:"ready_for_input"`
+	Failed        []InterruptError `json:"failed"`
+	MessageSent   bool             `json:"message_sent"`
+	TimedOut      bool             `json:"timed_out"`
+	Error         string           `json:"error,omitempty"`
+	ErrorCode     string           `json:"error_code,omitempty"`
+}
+
+func interruptReceiptOutcomeFromJSON(outcomeJSON string) (*InterruptReceiptOutcome, error) {
+	var outcome interruptOperationOutcome
+	if err := json.Unmarshal([]byte(outcomeJSON), &outcome); err != nil {
+		return nil, fmt.Errorf("decode stored interrupt outcome: %w", err)
+	}
+	failed := outcome.Failed
+	if failed == nil {
+		failed = []InterruptError{}
+	}
+	return &InterruptReceiptOutcome{
+		Success:       outcome.Success,
+		InterruptedAt: outcome.InterruptedAt,
+		CompletedAt:   outcome.CompletedAt,
+		Method:        outcome.Method,
+		Targets:       nonNilStrings(outcome.Targets),
+		Interrupted:   nonNilStrings(outcome.Interrupted),
+		ReadyForInput: nonNilStrings(outcome.ReadyForInput),
+		Failed:        failed,
+		MessageSent:   outcome.MessageSent,
+		TimedOut:      outcome.TimedOut,
+		Error:         outcome.Error,
+		ErrorCode:     outcome.ErrorCode,
+	}, nil
 }
 
 func resolveInterruptTargets(panes []tmux.Pane, selectors []string, all bool) ([]tmux.Pane, error) {
