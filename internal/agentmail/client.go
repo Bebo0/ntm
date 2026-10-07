@@ -171,10 +171,40 @@ func WithBaseURL(url string) Option {
 	}
 }
 
+// configuredEndpoint is the `[agent_mail] url`/`token` the running process
+// loaded. NewClient starts from it, so the twenty-odd call sites that build a
+// client with no options (the pre-commit reservation guard, robot
+// reservations, pipeline mail steps, handoff, ...) reach the same server, with
+// the same bearer token, as the ones that pass ConfigOptions explicitly.
+var configuredEndpoint struct {
+	mu      sync.RWMutex
+	baseURL string
+	token   string
+}
+
+// UseConfiguredEndpoint records the process's configured Agent Mail endpoint
+// and bearer token as the defaults for every client NewClient builds. The
+// environment still overrides it (AGENT_MAIL_URL / AGENT_MAIL_TOKEN), and an
+// explicit Option still overrides both. Empty strings clear a value.
+func UseConfiguredEndpoint(baseURL, token string) {
+	configuredEndpoint.mu.Lock()
+	defer configuredEndpoint.mu.Unlock()
+	configuredEndpoint.baseURL = strings.TrimSpace(baseURL)
+	configuredEndpoint.token = strings.TrimSpace(token)
+}
+
+func configuredEndpointDefaults() (baseURL, token string) {
+	configuredEndpoint.mu.RLock()
+	defer configuredEndpoint.mu.RUnlock()
+	return configuredEndpoint.baseURL, configuredEndpoint.token
+}
+
 // ConfigOptions returns the client options implied by a configured Agent Mail
-// endpoint and bearer token, as read from `[agent_mail] url`/`token`.
+// endpoint and bearer token, as read from `[agent_mail] url`/`token`, for a
+// caller holding a config other than the one the process recorded with
+// UseConfiguredEndpoint.
 //
-// It is the one place that decides environment-versus-config precedence:
+// It applies the same environment-versus-config precedence NewClient does:
 // NewClient reads AGENT_MAIL_URL / AGENT_MAIL_TOKEN before applying options,
 // so a configured value is yielded only when the matching variable is unset
 // and the environment keeps overriding the file. Callers used to open-code
@@ -223,7 +253,12 @@ func NewClient(opts ...Option) *Client {
 		},
 	}
 
-	// Check environment variables
+	// Configured endpoint, then environment variables, then options.
+	configuredURL, configuredToken := configuredEndpointDefaults()
+	if configuredURL != "" {
+		c.baseURL = configuredURL
+	}
+	c.bearerToken = configuredToken
 	if token := os.Getenv("AGENT_MAIL_TOKEN"); token != "" {
 		c.bearerToken = token
 	}

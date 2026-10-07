@@ -93,6 +93,44 @@ func TestConfigOptionsEmptyConfigKeepsDefaults(t *testing.T) {
 	}
 }
 
+// TestUseConfiguredEndpointReachesOptionlessClients pins the precedence a
+// client built with no options sees: the recorded configured endpoint, then
+// the environment, then explicit options.
+func TestUseConfiguredEndpointReachesOptionlessClients(t *testing.T) {
+	t.Setenv("AGENT_MAIL_URL", "")
+	t.Setenv("AGENT_MAIL_TOKEN", "")
+	t.Cleanup(func() { UseConfiguredEndpoint("", "") })
+
+	UseConfiguredEndpoint("http://config.test:9000/mcp", "config-token")
+	c := NewClient()
+	if c.BaseURL() != "http://config.test:9000/mcp/" {
+		t.Errorf("BaseURL() = %q, want the configured endpoint with a trailing slash", c.BaseURL())
+	}
+	if c.bearerToken != "config-token" {
+		t.Errorf("bearer token = %q, want the configured token", c.bearerToken)
+	}
+
+	t.Setenv("AGENT_MAIL_URL", "http://env.test:9100/mcp/")
+	t.Setenv("AGENT_MAIL_TOKEN", "env-token")
+	c = NewClient()
+	if c.BaseURL() != "http://env.test:9100/mcp/" || c.bearerToken != "env-token" {
+		t.Errorf("environment must override the configured endpoint; got %q / %q", c.BaseURL(), c.bearerToken)
+	}
+
+	c = NewClient(WithBaseURL("http://option.test/mcp/"), WithToken("option-token"))
+	if c.BaseURL() != "http://option.test/mcp/" || c.bearerToken != "option-token" {
+		t.Errorf("explicit options must override both; got %q / %q", c.BaseURL(), c.bearerToken)
+	}
+
+	t.Setenv("AGENT_MAIL_URL", "")
+	t.Setenv("AGENT_MAIL_TOKEN", "")
+	UseConfiguredEndpoint("", "")
+	c = NewClient()
+	if c.BaseURL() != DefaultBaseURL || c.bearerToken != "" {
+		t.Errorf("cleared endpoint must fall back to the defaults; got %q / %q", c.BaseURL(), c.bearerToken)
+	}
+}
+
 // TestQuickAvailableDecidesWithoutRetrying pins the contract that separates
 // the inventory probe from the dispatch gate: one request, a clear verdict,
 // and "cannot decide" reserved for a liveness endpoint that is missing or

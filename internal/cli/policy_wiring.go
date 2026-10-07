@@ -23,6 +23,10 @@ func applyConfiguredPolicies(cfg *config.Config) {
 	if cfg == nil {
 		return
 	}
+	// [agent_mail] url/token → every Agent Mail client this process builds,
+	// including the ones constructed without options (the pre-commit
+	// reservation guard, robot reservations, pipeline mail steps).
+	agentmail.UseConfiguredEndpoint(cfg.AgentMail.URL, cfg.AgentMail.Token)
 	// [retry] → the three real retry loops (WS6-wire).
 	agentmail.ApplyRetryPolicy(cfg.Retry.RetryPolicyFor("agent_mail"))
 	robot.ApplyAlertRetryPolicy(cfg.Retry.RetryPolicyFor("alerts"))

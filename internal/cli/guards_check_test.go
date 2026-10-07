@@ -14,6 +14,8 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"net/http/httputil"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -283,6 +285,52 @@ func TestGuardsCheckStaged_StrictFailsClosed(t *testing.T) {
 	}
 	// Strict blocks the commit; nothing was allowed through unchecked, so no
 	// degraded row is recorded.
+	assertGuardDegradedCount(t, dbPath, 0)
+}
+
+// TestGuardsCheckCommandHonorsConfiguredAgentMailEndpoint drives `ntm guards
+// check --staged` through the root command with the Agent Mail endpoint and
+// bearer token set only in config.toml. The guard builds its client with no
+// options; before the configured endpoint reached such clients it probed the
+// default port, failed open, and let the reserved file through.
+func TestGuardsCheckCommandHonorsConfiguredAgentMailEndpoint(t *testing.T) {
+	dbPath := isolateGuardState(t)
+	repo := guardTestRepo(t)
+	guardStageFile(t, repo, "reserved.txt", "contested\n")
+
+	const token = "configured-token"
+	inner := startFakeAgentMail(t, []map[string]any{exclusiveReservation(42, "BlueLake", "reserved.txt")})
+	innerURL, err := url.Parse(inner.URL)
+	if err != nil {
+		t.Fatalf("parse fake Agent Mail URL: %v", err)
+	}
+	proxy := httputil.NewSingleHostReverseProxy(innerURL)
+	authed := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") != "Bearer "+token {
+			http.Error(w, "missing or wrong bearer token", http.StatusUnauthorized)
+			return
+		}
+		proxy.ServeHTTP(w, r)
+	}))
+	t.Cleanup(authed.Close)
+
+	configPath := filepath.Join(t.TempDir(), "config.toml")
+	configBody := "[agent_mail]\nurl = \"" + authed.URL + "/mcp/\"\ntoken = \"" + token + "\"\n"
+	if err := os.WriteFile(configPath, []byte(configBody), 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	t.Setenv("NTM_CONFIG", configPath)
+	t.Setenv("AGENT_MAIL_URL", "")
+	t.Cleanup(func() { agentmail.UseConfiguredEndpoint("", "") })
+
+	out, err := execCommand(t, "guards", "check", "--staged")
+	if err == nil {
+		t.Fatalf("reserved file must block the commit; output=%q", out)
+	}
+	if !strings.Contains(err.Error()+out, "BlueLake") {
+		t.Errorf("block must name the reservation holder; err=%q output=%q", err, out)
+	}
+	// Reaching the configured server means nothing was let through unchecked.
 	assertGuardDegradedCount(t, dbPath, 0)
 }
 
