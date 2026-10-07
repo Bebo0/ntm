@@ -3001,14 +3001,12 @@ func GetMail(opts MailOptions) (*MailOutput, error) {
 
 	// Ensure project exists
 	if _, err := ensureProjectWithRetry(ctx, client, projectKey); err != nil {
-		output.Warnings = append(output.Warnings, fmt.Sprintf("ensure_project failed: %v", err))
-		return output, nil
+		return mailReadFailed(output, "ensure_project", err), nil
 	}
 
 	agents, err := client.ListProjectAgents(ctx, projectKey)
 	if err != nil {
-		output.Warnings = append(output.Warnings, fmt.Sprintf("list_agents failed: %v", err))
-		return output, nil
+		return mailReadFailed(output, "list_agents", err), nil
 	}
 
 	agentByName := make(map[string]agentmail.Agent, len(agents))
@@ -3109,6 +3107,17 @@ func GetMail(opts MailOptions) (*MailOutput, error) {
 	}
 
 	return output, nil
+}
+
+// mailReadFailed marks output failed when the project's agents could not be
+// read: success with an empty agents array would claim the server has none.
+func mailReadFailed(output *MailOutput, step string, err error) *MailOutput {
+	code, hint := ErrCodeInternalError, "Check the Agent Mail server's health and logs"
+	if agentmail.IsUnauthorized(err) {
+		code, hint = ErrCodePermissionDenied, "Set [agent_mail] token or AGENT_MAIL_TOKEN to the bearer token the Agent Mail server requires"
+	}
+	output.RobotResponse = NewErrorResponse(fmt.Errorf("%s failed: %w", step, err), code, hint)
+	return output
 }
 
 // PrintMail outputs detailed Agent Mail state for AI orchestrators.

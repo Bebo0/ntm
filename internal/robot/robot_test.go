@@ -359,7 +359,10 @@ func TestGetMail_DropsStaleSessionAgentFromDifferentProject(t *testing.T) {
 	}
 }
 
-func TestGetMail_DegradesOnAgentMailListAgentsError(t *testing.T) {
+// TestGetMail_FailsOnAgentMailListAgentsError: a server that is up but cannot
+// list the project's agents fails the call. Success with agents: [] would tell
+// the orchestrator the project has no agents.
+func TestGetMail_FailsOnAgentMailListAgentsError(t *testing.T) {
 	origDir, _ := os.Getwd()
 	t.Cleanup(func() {
 		if err := os.Chdir(origDir); err != nil {
@@ -450,8 +453,11 @@ func TestGetMail_DegradesOnAgentMailListAgentsError(t *testing.T) {
 	if output == nil {
 		t.Fatal("expected output")
 	}
-	if !output.Success {
-		t.Fatalf("Success = false, warnings=%v", output.Warnings)
+	if output.Success || output.ErrorCode != ErrCodeInternalError {
+		t.Fatalf("Success = %v ErrorCode = %q, want a failed INTERNAL_ERROR response", output.Success, output.ErrorCode)
+	}
+	if !strings.Contains(output.Error, "list_agents failed") || !strings.Contains(output.Error, "database disk image is malformed") {
+		t.Fatalf("Error = %q, want the list_agents failure and the server's message", output.Error)
 	}
 	if !output.Available {
 		t.Fatal("expected Agent Mail to be marked available")
@@ -459,11 +465,53 @@ func TestGetMail_DegradesOnAgentMailListAgentsError(t *testing.T) {
 	if output.ProjectKey != projectDir {
 		t.Fatalf("ProjectKey = %q, want %q", output.ProjectKey, projectDir)
 	}
-	if len(output.Warnings) == 0 {
-		t.Fatal("expected warnings when list_agents fails")
+	if output.Agents == nil || len(output.Agents) != 0 {
+		t.Fatalf("Agents = %#v, want the required array present and empty", output.Agents)
 	}
-	if !strings.Contains(output.Warnings[0], "list_agents failed") {
-		t.Fatalf("warning = %q, want list_agents failure", output.Warnings[0])
+}
+
+// TestGetMail_RejectedTokenIsPermissionDenied: a server that refuses ntm's
+// bearer token fails the call with PERMISSION_DENIED and a token hint, rather
+// than reporting a reachable server with no agents.
+func TestGetMail_RejectedTokenIsPermissionDenied(t *testing.T) {
+	origDir, _ := os.Getwd()
+	t.Cleanup(func() {
+		if err := os.Chdir(origDir); err != nil {
+			t.Errorf("restore working directory: %v", err)
+		}
+	})
+	projectDir := tempDirCanonical(t)
+	if err := os.Chdir(projectDir); err != nil {
+		t.Fatal(err)
+	}
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet {
+			_, _ = w.Write([]byte(`{"status":"ok"}`))
+			return
+		}
+		if r.Header.Get("Authorization") != "Bearer right-token" {
+			w.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+		t.Errorf("request with the right token reached the server; the test sends a wrong one")
+	}))
+	defer server.Close()
+	t.Setenv("AGENT_MAIL_URL", server.URL+"/")
+	t.Setenv("AGENT_MAIL_TOKEN", "wrong-token")
+
+	output, err := GetMail(MailOptions{})
+	if err != nil {
+		t.Fatalf("GetMail error: %v", err)
+	}
+	if output.Success || output.ErrorCode != ErrCodePermissionDenied {
+		t.Fatalf("Success = %v ErrorCode = %q Error = %q, want PERMISSION_DENIED", output.Success, output.ErrorCode, output.Error)
+	}
+	if !strings.Contains(output.Error, "ensure_project failed") || !strings.Contains(output.Hint, "token") {
+		t.Fatalf("Error = %q Hint = %q, want the ensure_project failure and a token hint", output.Error, output.Hint)
+	}
+	if output.Agents == nil || len(output.Agents) != 0 {
+		t.Fatalf("Agents = %#v, want the required array present and empty", output.Agents)
 	}
 }
 
