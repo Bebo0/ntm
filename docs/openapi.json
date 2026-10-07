@@ -16806,6 +16806,10 @@
             "type": "string",
             "description": "Bead title"
           },
+          "cass_injection": {
+            "description": "C a s s injection",
+            "$ref": "#/components/schemas/CASSInjectionInfo"
+          },
           "claim_actor": {
             "type": "string",
             "description": "Claim actor"
@@ -16829,6 +16833,10 @@
           "idempotency_key": {
             "type": "string",
             "description": "Idempotency key"
+          },
+          "memory_injection": {
+            "description": "Memory injection",
+            "$ref": "#/components/schemas/CMInjectionInfo"
           },
           "pane": {
             "type": "string",

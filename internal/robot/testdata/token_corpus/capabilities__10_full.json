@@ -3707,7 +3707,7 @@
           "flag": "--spawn-assign-work",
           "type": "bool",
           "required": false,
-          "description": "Claim and assign ready work during spawn"
+          "description": "Claim and assign ready work during spawn. Each fresh work prompt is enriched like --robot-bulk-assign (--with-cass/--no-cass/--with-memory over [cass.context]/[memory]) and reported per assignment as cass_injection/memory_injection"
         },
         {
           "name": "strategy",

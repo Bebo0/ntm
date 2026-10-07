@@ -729,6 +729,96 @@ func TestGetSpawnAssignWorkPacesWorkPromptsAndCarriesInitialPrompt(t *testing.T)
 	}
 }
 
+// TestGetSpawnAssignWorkEnrichesWorkPromptAndReplaysWithoutRequery drives
+// --robot-spawn --spawn-assign-work with CASS enrichment: the work prompt
+// carries the bead's history before the durable intent is recorded, the
+// ledger keeps the template checksum, and re-running the same assignment
+// replays the recorded prompt without delivering again or re-querying cass.
+func TestGetSpawnAssignWorkEnrichesWorkPromptAndReplaysWithoutRequery(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	const session = "spawn-assign-context"
+	world := newStaggerSpawnWorld(t, session, tmux.AgentClaude)
+	store := assignment.NewStore(session)
+	var claimedBy string
+	world.assignment.LoadAssignmentPolicy = func(string, string, bool) (*config.Config, error) { return testSpawnConfig(), nil }
+	world.assignment.FetchActionable = func(context.Context, string, int) ([]bv.TriageRecommendation, error) {
+		return []bv.TriageRecommendation{{ID: "bd-ctx", Title: "Rate limiting middleware", Status: "open", Priority: 1}}, nil
+	}
+	world.assignment.LoadStore = func(string) (*assignment.AssignmentStore, error) { return store, nil }
+	world.assignment.ClaimBead = func(_ context.Context, _ string, beadID, actor string) (bv.BeadClaimResult, error) {
+		claimedBy = actor
+		return bv.BeadClaimResult{ID: beadID, Actor: actor, Status: "in_progress", ClaimedAt: time.Now().UTC()}, nil
+	}
+	world.assignment.GetBeadDetails = func(_ context.Context, _ string, beadID string) (*bv.BeadAssignmentDetails, error) {
+		details := &bv.BeadAssignmentDetails{
+			ID: beadID, Status: "open", Title: "Rate limiting middleware",
+			Labels: []string{"gateway"}, Description: "Use a token bucket per API key.",
+		}
+		if claimedBy != "" {
+			details.Status, details.Assignee = "in_progress", claimedBy
+		}
+		return details, nil
+	}
+	world.assignment.GetBeadStatus = func(context.Context, string, string) (string, error) {
+		if claimedBy != "" {
+			return "in_progress", nil
+		}
+		return "open", nil
+	}
+	world.assignment.NewIdempotencyKey = func() (string, error) { return "spawn-context-key", nil }
+	cassBin, cassLog := writeBulkContextStub(t, "cass", bulkContextCASSFixture)
+
+	opts := world.options(t)
+	opts.CCCount = 1
+	opts.AssignWork, opts.AssignStrategy = true, "top-n"
+	opts.PromptContext = bulkContextOptions(cassBin, "")
+
+	out, err := GetSpawn(t.Context(), opts, testSpawnConfig())
+	if err != nil || !out.Success || len(out.Assignments) != 1 {
+		t.Fatalf("GetSpawn output=%+v err=%v", out, err)
+	}
+	got := out.Assignments[0]
+	if !got.Claimed || !got.PromptSent || got.CASSInjection == nil || got.CASSInjection.ItemsInjected == 0 {
+		t.Fatalf("assignment = %+v (cass_injection %+v), want an enriched delivered prompt", got, got.CASSInjection)
+	}
+	if len(world.deliveries) != 1 {
+		t.Fatalf("deliveries = %d, want 1", len(world.deliveries))
+	}
+	prompt := world.deliveries[0].Message
+	history, task := strings.Index(prompt, bulkContextCASSMarker), strings.Index(prompt, "Work on bead bd-ctx")
+	if history < 0 || task < 0 || history > task {
+		t.Fatalf("delivered prompt history=%d task=%d, want the history above the work prompt:\n%s", history, task, prompt)
+	}
+	cassCalls := bulkContextStubCalls(t, cassLog)
+	if strings.Count(cassCalls, "search") != 1 || !strings.Contains(cassCalls, "gateway") || !strings.Contains(cassCalls, "bucket") {
+		t.Fatalf("cass calls = %q, want one search over the bead's title, labels, and description", cassCalls)
+	}
+	row := store.Get("bd-ctx")
+	if row == nil || row.PromptSent != prompt || row.BaseIntentSHA256 == "" || row.BaseIntentSHA256 == row.IntentSHA256 {
+		t.Fatalf("ledger row = %+v, want the enriched prompt recorded with its template checksum", row)
+	}
+
+	// Re-running the assignment finds the recorded intent by its template
+	// checksum and replays it: no second delivery, no second cass query.
+	plan := mockTriage([]bv.TriageRecommendation{{ID: "bd-ctx", Title: "Rate limiting middleware", Status: "open", Priority: 1}}, nil)
+	replayed, err := assignWorkToAgentsWithError(
+		t.Context(), out, opts.WorkingDir, out.Session, "top-n", testSpawnConfig(),
+		false, nil, world.assignment, plan, "", opts.PromptContext, nil,
+	)
+	if err != nil || len(replayed) != 1 {
+		t.Fatalf("replay assignments=%+v err=%v", replayed, err)
+	}
+	if r := replayed[0]; !r.PromptSent || r.IdempotencyKey != got.IdempotencyKey || r.CASSInjection != nil {
+		t.Fatalf("replay = %+v, want the recorded key %s replayed without enrichment", r, got.IdempotencyKey)
+	}
+	if len(world.deliveries) != 1 {
+		t.Fatalf("replay delivered again: %d deliveries", len(world.deliveries))
+	}
+	if calls := bulkContextStubCalls(t, cassLog); calls != cassCalls {
+		t.Fatalf("replay queried cass again: %q", calls)
+	}
+}
+
 func TestGetSpawnPromptDeliveryFailureIsReportedPerAgent(t *testing.T) {
 	world := newStaggerSpawnWorld(t, "partial-prompts", tmux.AgentClaude, tmux.AgentClaude, tmux.AgentClaude)
 	world.failPane = "%3"

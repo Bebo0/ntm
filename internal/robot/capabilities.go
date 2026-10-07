@@ -1295,7 +1295,7 @@ func buildCommandRegistry() []RobotCommandInfo {
 				{Name: "timeout", Flag: "--timeout", Type: "string", Required: false, Default: "30s", Description: "Max wait for ready state when --spawn-wait is enabled"},
 				{Name: "spawn-dir", Flag: "--spawn-dir", Type: "string", Required: false, Description: "Working directory for session"},
 				{Name: "spawn-label", Flag: "--spawn-label", Type: "string", Required: false, Description: "Goal label for multi-session support (creates SESSION--LABEL)"},
-				{Name: "spawn-assign-work", Flag: "--spawn-assign-work", Type: "bool", Required: false, Description: "Claim and assign ready work during spawn"},
+				{Name: "spawn-assign-work", Flag: "--spawn-assign-work", Type: "bool", Required: false, Description: "Claim and assign ready work during spawn. Each fresh work prompt is enriched like --robot-bulk-assign (--with-cass/--no-cass/--with-memory over [cass.context]/[memory]) and reported per assignment as cass_injection/memory_injection"},
 				{Name: "strategy", Flag: "--strategy", Type: "string", Required: false, Default: "top-n", Description: "Assignment strategy when --spawn-assign-work is enabled: top-n, diverse, dependency-aware, skill-matched"},
 				{Name: "spawn-prompt", Flag: "--spawn-prompt", Type: "string", Required: false, Description: "Initial prompt delivered to every agent after the readiness wait (implies --spawn-wait) through robot send's dispatch path; prefixes each work prompt with --spawn-assign-work. Outcomes in prompt_deliveries[]"},
 				{Name: "spawn-prompt-file", Flag: "--spawn-prompt-file", Type: "string", Required: false, Description: "Read the --spawn-prompt text from a file, or stdin with '-'"},

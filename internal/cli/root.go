@@ -4657,8 +4657,8 @@ func init() {
 	rootCmd.Flags().IntVar(&robotSendDelay, "delay-ms", 0, "Delay between sends (ms). Optional with --robot-send. Example: --delay-ms=500 for 0.5s between panes")
 	rootCmd.Flags().BoolVar(&robotSendClearInput, "clear-input", false, "Clear residual composer text (per-agent Escape ritual + C-u, verified) before typing. Optional with --robot-send; recommended after interrupts on codex panes")
 	rootCmd.Flags().BoolVar(&robotSendVerifyRender, "verify-render", false, "Capture bounded before/after pane output and require rendered delivery evidence. Optional with --robot-send")
-	rootCmd.Flags().BoolVar(&robotSendWithMemory, "with-memory", false, "Inject relevant CM (cass-memory) rules above the message before sending. Optional with --robot-send and --robot-bulk-assign (each fresh assignment prompt); degrades gracefully when cm is unavailable. Config: [memory] send_injection/send_max_rules/send_budget_tokens")
-	rootCmd.Flags().BoolVar(&robotSendWithCASS, "with-cass", false, "Inject relevant CASS session context above the message before sending. Optional with --robot-send and --robot-bulk-assign (each fresh assignment prompt, queried by bead title/labels/description); degrades gracefully when cass is unavailable. Config: [cass.context] enabled/max_sessions/lookback_days/max_tokens/min_relevance/skip_if_context_above/prefer_same_project")
+	rootCmd.Flags().BoolVar(&robotSendWithMemory, "with-memory", false, "Inject relevant CM (cass-memory) rules above the message before sending. Optional with --robot-send, --robot-bulk-assign and --robot-spawn --spawn-assign-work (each fresh assignment prompt); degrades gracefully when cm is unavailable. Config: [memory] send_injection/send_max_rules/send_budget_tokens")
+	rootCmd.Flags().BoolVar(&robotSendWithCASS, "with-cass", false, "Inject relevant CASS session context above the message before sending. Optional with --robot-send, --robot-bulk-assign and --robot-spawn --spawn-assign-work (each fresh assignment prompt, queried by bead title/labels/description); degrades gracefully when cass is unavailable. Config: [cass.context] enabled/max_sessions/lookback_days/max_tokens/min_relevance/skip_if_context_above/prefer_same_project")
 	rootCmd.Flags().BoolVar(&robotSendNoCASS, "no-cass", false, "Disable CASS context injection for this send or bulk assignment, overriding [cass.context] enabled=true")
 	rootCmd.Flags().StringVar(&robotOpID, "op-id", "", "Durable idempotent operation ID for --robot-send and --robot-interrupt: identical retries replay the recorded outcome without touching panes again, conflicting reuse is rejected. Example: ntm --robot-interrupt=proj --msg='...' --op-id=retask-42")
 	rootCmd.Flags().StringVar(&robotSendReceipt, "robot-send-receipt", "", "Query the durable receipt of an idempotent --robot-send or --robot-interrupt by operation ID. Example: ntm --robot-send-receipt=deploy-42")
@@ -5801,6 +5801,11 @@ func applyRobotSpawnPromptFlags(cmd *cobra.Command, cfg *config.Config, opts *ro
 	opts.Prompt = prompt
 	opts.StaggerMode = mode
 	opts.StaggerDelay = delay
+	// --spawn-assign-work prompts are enriched like --robot-bulk-assign's:
+	// --with-cass/--no-cass/--with-memory over [cass.context]/[memory].
+	if opts.AssignWork {
+		opts.PromptContext = resolvePromptContextOptions(robotSendWithCASS, robotSendNoCASS, robotSendWithMemory, cfg)
+	}
 	return nil
 }
 

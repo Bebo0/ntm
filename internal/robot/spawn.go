@@ -103,8 +103,12 @@ type SpawnOptions struct {
 	// StaggerMode/StaggerDelay pace prompt delivery (Prompt and AssignWork
 	// prompts) between agents, resolved by ResolveSpawnStagger exactly as
 	// `ntm spawn --stagger-mode/--stagger-delay`. Empty mode means none.
-	StaggerMode    string
-	StaggerDelay   time.Duration
+	StaggerMode  string
+	StaggerDelay time.Duration
+	// PromptContext enriches each fresh AssignWork prompt with CASS history
+	// and CM rules, exactly as --robot-bulk-assign and ntm assign do, before
+	// the durable intent is recorded; a recorded intent is replayed verbatim.
+	PromptContext  PromptContextOptions
 	AssignmentDeps *SpawnAssignmentDependencies
 	LifecycleDeps  *SpawnLifecycleDependencies
 }
@@ -479,6 +483,11 @@ type SpawnAssignment struct {
 	PromptError       string `json:"prompt_error,omitempty"`  // Error sending prompt, if any
 	AssignReason      string `json:"assign_reason,omitempty"` // Strategy rationale for this pairing (e.g. skill-matched capability score)
 	DeliveredAt       string `json:"delivered_at,omitempty"`  // When this run delivered the work prompt (RFC3339Nano); see stagger.schedule
+	// CASSInjection and MemoryInjection report the work prompt's enrichment,
+	// as on --robot-bulk-assign. Absent when enrichment was not requested or
+	// a recorded intent was replayed without re-querying.
+	CASSInjection   *CASSInjectionInfo `json:"cass_injection,omitempty"`
+	MemoryInjection *CMInjectionInfo   `json:"memory_injection,omitempty"`
 }
 
 // SpawnPromptDelivery is one agent's --spawn-prompt delivery outcome.
@@ -1459,7 +1468,7 @@ func GetSpawn(ctx context.Context, opts SpawnOptions, cfg *config.Config) (*Spaw
 		assignments, assignmentErr := assignWorkToAgentsWithError(
 			ctx, output, dir, opts.Session, output.AssignStrategy, cfg,
 			opts.RequireReservation, opts.ReservationPaths, opts.AssignmentDeps, verifiedAssignmentPlan,
-			opts.Prompt, pacer,
+			opts.Prompt, opts.PromptContext, pacer,
 		)
 		output.Assignments = assignments
 		ensureSpawnAssignmentCoverage(output)
@@ -2152,7 +2161,7 @@ func normalizeAssignStrategyStrict(strategy string) (string, error) {
 // Each agent's atomic claim+dispatch waits for its stagger slot (pacer; nil
 // never waits) so work prompts reach agents paced like `ntm spawn` prompts,
 // and initialPrompt, when set, prefixes every work prompt.
-func assignWorkToAgentsWithError(ctx context.Context, output *SpawnOutput, workDir, session, strategy string, cfg *config.Config, requireReservation bool, reservationPaths []string, customDeps *SpawnAssignmentDependencies, verifiedPlan *bv.TriageResponse, initialPrompt string, pacer *spawnStaggerPacer) ([]SpawnAssignment, error) {
+func assignWorkToAgentsWithError(ctx context.Context, output *SpawnOutput, workDir, session, strategy string, cfg *config.Config, requireReservation bool, reservationPaths []string, customDeps *SpawnAssignmentDependencies, verifiedPlan *bv.TriageResponse, initialPrompt string, promptContext PromptContextOptions, pacer *spawnStaggerPacer) ([]SpawnAssignment, error) {
 	var assignments []SpawnAssignment
 	if ctx == nil {
 		return []SpawnAssignment{{ClaimError: "spawn assignment context is required"}}, nil
@@ -2310,10 +2319,31 @@ func assignWorkToAgentsWithError(ctx context.Context, output *SpawnOutput, workD
 		if target == "" {
 			target = pane.Ref().Physical()
 		}
-		prompt := composeSpawnWorkPrompt(initialPrompt, generateWorkPrompt(item))
+		basePrompt := composeSpawnWorkPrompt(initialPrompt, generateWorkPrompt(item))
+		prompt := basePrompt
 		agentName := ""
 		idempotencyKey := ""
-		if replay := robotAtomicReplayIntent(store, item.ID, target, pane.Index, agent.Type, prompt, requireReservation, reservationPaths); replay != nil {
+		baseIntentSHA256 := ""
+		recoveredIntentSHA256 := ""
+		// A live row recorded from this same template intent with an enriched
+		// prompt is replayed or recovered with its exact recorded prompt;
+		// cass and cm are never queried again for it.
+		recorded := robotAtomicContextIntent(store, item.ID, target, agent.Type, basePrompt, requireReservation, reservationPaths)
+		if recorded != nil {
+			prompt = bulkRecoveryPrompt(recorded)
+			recoveredIntentSHA256 = strings.TrimSpace(recorded.IntentSHA256)
+			if recoveredIntentSHA256 == "" {
+				recoveredIntentSHA256 = strings.TrimSpace(recorded.PromptSHA256)
+			}
+		}
+		var replay *assignment.Assignment
+		switch {
+		case recorded != nil && recorded.DispatchState == assignment.DispatchSent:
+			replay = recorded
+		case recorded == nil:
+			replay = robotAtomicReplayIntent(store, item.ID, target, pane.Index, agent.Type, prompt, requireReservation, reservationPaths)
+		}
+		if replay != nil {
 			agentName = replay.AgentName
 			idempotencyKey = replay.IdempotencyKey
 		} else {
@@ -2340,66 +2370,78 @@ func assignWorkToAgentsWithError(ctx context.Context, output *SpawnOutput, workD
 				continue
 			}
 
-			agentName = strings.TrimSpace(agent.Name)
-			if requireReservation {
-				if reservationPort == nil {
-					mailRuntime, runtimeErr := newRobotAgentMailReservationRuntime(ctx, workDir, session, nil)
-					if runtimeErr != nil {
-						spawnAssignment.ClaimError = runtimeErr.Error()
+			if recorded != nil {
+				// Recover the recorded, not yet delivered, enriched intent
+				// under its own identity and key.
+				agentName = recorded.AgentName
+				idempotencyKey = recorded.IdempotencyKey
+			} else {
+				agentName = strings.TrimSpace(agent.Name)
+				if requireReservation {
+					if reservationPort == nil {
+						mailRuntime, runtimeErr := newRobotAgentMailReservationRuntime(ctx, workDir, session, nil)
+						if runtimeErr != nil {
+							spawnAssignment.ClaimError = runtimeErr.Error()
+							assignments = append(assignments, spawnAssignment)
+							if stopForTerminalError(runtimeErr) {
+								assignments = append(assignments, spawnAgentPlanErrors(readyAgents[i+1:], runtimeErr)...)
+								break
+							}
+							continue
+						}
+						reservationPort = mailRuntime
+						if resolveAgentName == nil {
+							resolveAgentName = mailRuntime.ResolveRecipient
+						}
+					}
+					if resolveAgentName == nil {
+						spawnAssignment.ClaimError = "required reservation has no exact Agent Mail pane-identity resolver"
 						assignments = append(assignments, spawnAssignment)
-						if stopForTerminalError(runtimeErr) {
-							assignments = append(assignments, spawnAgentPlanErrors(readyAgents[i+1:], runtimeErr)...)
+						continue
+					}
+					agentName, resolveErr = resolveAgentName(ctx, workDir, session, target, pane.Title)
+					if resolveErr != nil {
+						spawnAssignment.ClaimError = resolveErr.Error()
+						assignments = append(assignments, spawnAssignment)
+						if stopForTerminalError(resolveErr) {
+							assignments = append(assignments, spawnAgentPlanErrors(readyAgents[i+1:], resolveErr)...)
 							break
 						}
 						continue
 					}
-					reservationPort = mailRuntime
-					if resolveAgentName == nil {
-						resolveAgentName = mailRuntime.ResolveRecipient
+					if err := ctx.Err(); err != nil {
+						spawnAssignment.ClaimError = fmt.Sprintf("spawn assignment canceled after reservation identity resolution: %v", err)
+						assignments = append(assignments, spawnAssignment)
+						assignments = append(assignments, spawnAgentPlanErrors(readyAgents[i+1:], err)...)
+						terminalErr = err
+						break
 					}
+					agentName = strings.TrimSpace(agentName)
 				}
-				if resolveAgentName == nil {
-					spawnAssignment.ClaimError = "required reservation has no exact Agent Mail pane-identity resolver"
+				if agentName == "" {
+					spawnAssignment.ClaimError = fmt.Sprintf("pane %s (%s) has no canonical assignment identity", spawnAssignment.Pane, target)
 					assignments = append(assignments, spawnAssignment)
 					continue
 				}
-				agentName, resolveErr = resolveAgentName(ctx, workDir, session, target, pane.Title)
-				if resolveErr != nil {
-					spawnAssignment.ClaimError = resolveErr.Error()
+				var keyErr error
+				idempotencyKey, keyErr = robotAtomicIdempotencyKey(
+					store, item.ID, target, pane.Index, agent.Type, agentName, prompt,
+					requireReservation, reservationPaths, deps.NewIdempotencyKey,
+				)
+				if keyErr != nil {
+					spawnAssignment.ClaimError = keyErr.Error()
 					assignments = append(assignments, spawnAssignment)
-					if stopForTerminalError(resolveErr) {
-						assignments = append(assignments, spawnAgentPlanErrors(readyAgents[i+1:], resolveErr)...)
+					if stopForTerminalError(keyErr) {
+						assignments = append(assignments, spawnAgentPlanErrors(readyAgents[i+1:], keyErr)...)
 						break
 					}
 					continue
 				}
-				if err := ctx.Err(); err != nil {
-					spawnAssignment.ClaimError = fmt.Sprintf("spawn assignment canceled after reservation identity resolution: %v", err)
-					assignments = append(assignments, spawnAssignment)
-					assignments = append(assignments, spawnAgentPlanErrors(readyAgents[i+1:], err)...)
-					terminalErr = err
-					break
+				if promptContext.Enabled() && !robotAtomicLiveKey(store, item.ID, idempotencyKey) {
+					// A fresh intent: enrich now, before Execute records it, so
+					// the ledger hashes and persists exactly what the agent gets.
+					prompt, baseIntentSHA256 = enrichSpawnWorkPrompt(ctx, deps.GetBeadDetails, workDir, session, item, agent.Type, prompt, promptContext, &spawnAssignment)
 				}
-				agentName = strings.TrimSpace(agentName)
-			}
-			if agentName == "" {
-				spawnAssignment.ClaimError = fmt.Sprintf("pane %s (%s) has no canonical assignment identity", spawnAssignment.Pane, target)
-				assignments = append(assignments, spawnAssignment)
-				continue
-			}
-			var keyErr error
-			idempotencyKey, keyErr = robotAtomicIdempotencyKey(
-				store, item.ID, target, pane.Index, agent.Type, agentName, prompt,
-				requireReservation, reservationPaths, deps.NewIdempotencyKey,
-			)
-			if keyErr != nil {
-				spawnAssignment.ClaimError = keyErr.Error()
-				assignments = append(assignments, spawnAssignment)
-				if stopForTerminalError(keyErr) {
-					assignments = append(assignments, spawnAgentPlanErrors(readyAgents[i+1:], keyErr)...)
-					break
-				}
-				continue
 			}
 		}
 		spawnAssignment.IdempotencyKey = idempotencyKey
@@ -2425,9 +2467,12 @@ func assignWorkToAgentsWithError(ctx context.Context, output *SpawnOutput, workD
 		coordinator = coordinator.WithAssignmentEligibilityAuthorizationPort(
 			newRobotAtomicEligibilityAuthorizationPort(workDir, operatorGatedLabels, deps.GetBeadDetails),
 		)
-		result, executeErr := coordinator.Execute(ctx, spawnAtomicRequest(
+		request := spawnAtomicRequest(
 			item, target, pane.Index, agent.Type, agentName, prompt, idempotencyKey, requireReservation, reservationPaths,
-		))
+		)
+		request.BaseIntentSHA256 = baseIntentSHA256
+		request.RecoveredIntentSHA256 = recoveredIntentSHA256
+		result, executeErr := coordinator.Execute(ctx, request)
 		if result.Assignment != nil && result.Assignment.IdempotencyKey == idempotencyKey {
 			spawnAssignment.Claimed = result.Assignment.ClaimState == assignment.ClaimClaimed
 			spawnAssignment.ClaimActor = result.Assignment.ClaimActor
@@ -2660,6 +2705,33 @@ func finalizeSpawnPromptDeliveries(output *SpawnOutput) {
 		ErrCodePromptSendFailed,
 		"Inspect prompt_deliveries[].error; agents with prompt_sent=false did not receive the prompt and remain running (resend with --robot-send)",
 	)
+}
+
+// enrichSpawnWorkPrompt enriches one fresh work prompt with CASS history and
+// CM rules through the shared EnrichAssignmentPrompt (queried by the bead's
+// title, labels and description), records what happened on out, and returns
+// the enriched prompt with the base prompt's checksum for the ledger.
+func enrichSpawnWorkPrompt(
+	ctx context.Context,
+	readBead func(context.Context, string, string) (*bv.BeadAssignmentDetails, error),
+	workDir, session string,
+	item workItem,
+	agentType, prompt string,
+	promptContext PromptContextOptions,
+	out *SpawnAssignment,
+) (string, string) {
+	request := AssignmentPrompt{
+		Prompt: prompt, Title: item.Title, AgentType: agentType,
+		Session: session, ProjectDir: workDir,
+	}
+	if readBead != nil {
+		if details, err := readBead(ctx, workDir, item.ID); err == nil && details != nil {
+			request.Labels, request.Description = details.Labels, details.Description
+		}
+	}
+	enriched, cassInjection, memoryInjection := EnrichAssignmentPrompt(ctx, request, promptContext)
+	out.CASSInjection, out.MemoryInjection = cassInjection, memoryInjection
+	return enriched, assignment.PromptSHA256(prompt)
 }
 
 func spawnAtomicRequest(item workItem, target string, pane int, agentType, agentName, prompt, key string, requireReservation bool, reservationPaths []string) assignment.AtomicRequest {
