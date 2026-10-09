@@ -125,7 +125,7 @@ func launchOverlayPopup(session, bindKey string, attentionCursor int64, inferred
 		innerCmd,
 	}
 
-	cmd := exec.Command(tmux.BinaryPath(), tmuxArgs...)
+	cmd := exec.Command(tmux.BinaryPath(), tmux.SocketArgs(tmuxArgs)...)
 	cmd.Stdin = os.Stdin
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr

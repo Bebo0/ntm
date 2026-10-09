@@ -33,6 +33,21 @@ func TestAgentType_String(t *testing.T) {
 	}
 }
 
+func TestOMPIdentityAndNativeBoundary(t *testing.T) {
+	for _, alias := range []AgentType{"omp", "oh-my-pi", " OH_MY_PI "} {
+		if alias.Canonical() != AgentTypeOMP || !alias.IsValid() || alias.DisplayName() != "Oh My Pi" {
+			t.Fatalf("OMP identity lost for %q", alias)
+		}
+		if !errors.Is(alias.ValidateAutomatedPromptDelivery(), ErrOMPNativeAdapterRequired) || !errors.Is(alias.ValidateAutomatedRelaunch(), ErrOMPNativeAdapterRequired) {
+			t.Fatalf("OMP terminal automation accepted for %q", alias)
+		}
+	}
+	state, err := NewParser().ParseWithHint("Ready ❯ idle", AgentTypeOMP)
+	if err != nil || state.Type != AgentTypeOMP || state.IsIdle || state.Confidence != 0 {
+		t.Fatalf("terminal output must not establish OMP readiness: %+v, %v", state, err)
+	}
+}
+
 func TestAgentType_DisplayName(t *testing.T) {
 	t.Parallel()
 

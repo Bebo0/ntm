@@ -6,10 +6,13 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"strings"
 	"syscall"
 	"testing"
@@ -27,6 +30,71 @@ import (
 	"github.com/Dicklesworthstone/ntm/internal/tmux"
 	"github.com/Dicklesworthstone/ntm/tests/testutil"
 )
+
+func TestOMPShellDispatchNativeEndToEnd(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Unix control protocol")
+	}
+	dir := t.TempDir()
+	socket := filepath.Join(dir, "s")
+	listener, err := net.Listen("unix", socket)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(socket, 0600); err != nil {
+		t.Fatal(err)
+	}
+	requests := make(chan string, 2)
+	server := &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet {
+			_ = json.NewEncoder(w).Encode(map[string]any{"instance_id": "instance-1", "run_id": "run-1", "ready": true})
+			return
+		}
+		requests <- r.URL.Path
+		status := "queued"
+		if r.URL.Path == "/stage" {
+			status = "staged"
+		}
+		_ = json.NewEncoder(w).Encode(map[string]string{"instance_id": "instance-1", "status": status})
+	})}
+	go func() { _ = server.Serve(listener) }()
+	t.Cleanup(func() { _ = server.Close() })
+	binary, log := filepath.Join(dir, "tmux"), filepath.Join(dir, "commands")
+	fixture := "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$NTM_TEST_OMP_LOG\"\ncase \"$*\" in *display-message*) printf '%s\\n' \"$NTM_TEST_OMP_METADATA\";; *) exit 91;; esac\n"
+	if err := os.WriteFile(binary, []byte(fixture), 0700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("NTM_TMUX_BINARY", binary)
+	t.Setenv("NTM_TEST_OMP_LOG", log)
+	t.Setenv("NTM_TEST_OMP_METADATA", socket+"|instance-1|run-1")
+	pane := tmux.Pane{ID: "%7", WindowIndex: 1, Type: tmux.AgentOMP, Title: "test__omp_1", Command: "omp"}
+	service, err := newShellDispatchService("test", []tmux.Pane{pane}, redaction.Config{Mode: redaction.ModeOff})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, submit := range []bool{true, false} {
+		req := shellDispatchRequest("test", []tmux.Pane{pane}, []tmux.Pane{pane}, "hello", true)
+		req.Submit, req.ClearInput = submit, true
+		result, err := service.Execute(context.Background(), req)
+		if err != nil || result.Delivered != 1 {
+			t.Fatalf("result=%+v err=%v", result, err)
+		}
+		want, protocol := "/stage", dispatchsvc.ProtocolOMPStage
+		if submit {
+			want, protocol = "/send", dispatchsvc.ProtocolOMPNative
+		}
+		if got := <-requests; got != want || result.Receipts[0].Protocol != protocol {
+			t.Fatalf("path=%q receipt=%+v", got, result.Receipts[0])
+		}
+	}
+	data, err := os.ReadFile(log)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(data), "send-keys") || strings.Contains(string(data), "paste-buffer") {
+		t.Fatalf("terminal mutation: %s", data)
+	}
+}
 
 type recordingDistributeAtomicExecutor struct {
 	calls   int

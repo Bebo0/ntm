@@ -86,7 +86,7 @@ func setupBinding(key string) error {
 	// Apply to current tmux server (if running)
 	inTmux := os.Getenv("TMUX") != ""
 	if inTmux {
-		cmd := exec.Command(tmux.BinaryPath(), "bind-key", "-n", key, "display-popup", "-E", "-w", "80%", "-h", "70%", "ntm palette")
+		cmd := exec.Command(tmux.BinaryPath(), tmux.SocketArgs([]string{"bind-key", "-n", key, "display-popup", "-E", "-w", "80%", "-h", "70%", "ntm palette"})...)
 		if err := cmd.Run(); err != nil {
 			fmt.Printf("%s⚠%s Could not bind in current session: %v\n", colorize(t.Warning), colorize(t.Text), err)
 		} else {
@@ -172,7 +172,7 @@ func setupOverlayBindingWithWriter(key string, out io.Writer) error {
 	// Apply to current tmux server
 	inTmux := os.Getenv("TMUX") != ""
 	if inTmux {
-		cmd := exec.Command(tmux.BinaryPath(), overlayBindingArgs(key)...)
+		cmd := exec.Command(tmux.BinaryPath(), tmux.SocketArgs(overlayBindingArgs(key))...)
 		if err := cmd.Run(); err != nil {
 			maybeFprintf(out, "%s⚠%s Could not bind in current session: %v\n", colorize(t.Warning), colorize(t.Text), err)
 		} else {
@@ -266,7 +266,7 @@ func removeBinding(key string) error {
 
 	// Remove from current tmux server
 	if os.Getenv("TMUX") != "" {
-		cmd := exec.Command(tmux.BinaryPath(), "unbind-key", "-n", key)
+		cmd := exec.Command(tmux.BinaryPath(), tmux.SocketArgs([]string{"unbind-key", "-n", key})...)
 		if err := cmd.Run(); err != nil {
 			fmt.Printf("%s⚠%s Could not unbind in current session: %v\n", colorize(t.Warning), colorize(t.Text), err)
 		} else {

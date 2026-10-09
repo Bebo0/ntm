@@ -990,6 +990,33 @@ func TestHandlePaneInputV1_GrokReturnsNotImplementedBeforeSendKeys(t *testing.T)
 	}
 }
 
+func TestOMPAPIUnavailableNeverFallsBackToKeys(t *testing.T) {
+	t.Setenv("NTM_TMUX_BINARY", "/nonexistent/omp-test-tmux")
+	for _, operation := range []string{"input", "interrupt"} {
+		t.Run(operation, func(t *testing.T) {
+			srv, _ := setupTestServer(t)
+			srv.resolvePane = func(context.Context, string, int) (tmux.Pane, error) {
+				return tmux.Pane{ID: "%7", Type: tmux.AgentOMP}, nil
+			}
+			srv.sendPaneKeys = func(string, string, bool) error { t.Fatal("OMP fell back to terminal input"); return nil }
+			rec := httptest.NewRecorder()
+			req := httptest.NewRequest(http.MethodPost, "/", strings.NewReader(`{"text":"work","enter":true}`))
+			rctx := chi.NewRouteContext()
+			rctx.URLParams.Add("sessionId", "omp-session")
+			rctx.URLParams.Add("paneIdx", "0")
+			req = req.WithContext(context.WithValue(req.Context(), chi.RouteCtxKey, rctx))
+			if operation == "input" {
+				srv.handlePaneInputV1(rec, req)
+			} else {
+				srv.handlePaneInterruptV1(rec, req)
+			}
+			if rec.Code != http.StatusServiceUnavailable {
+				t.Fatalf("status=%d, body=%s", rec.Code, rec.Body.String())
+			}
+		})
+	}
+}
+
 func TestHandleAgentSendV1PropagatesRobotNotImplemented(t *testing.T) {
 	srv, _ := setupTestServer(t)
 	calls := 0
@@ -1796,6 +1823,27 @@ func TestHandleAgentSpawnV1_ForwardsGrokCount(t *testing.T) {
 	req = req.WithContext(context.WithValue(req.Context(), chi.RouteCtxKey, rctx))
 	srv.handleAgentSpawnV1(rec, req)
 
+	if !called || rec.Code != http.StatusInternalServerError {
+		t.Fatalf("called=%v status=%d", called, rec.Code)
+	}
+}
+
+func TestHandleAgentSpawnV1_ForwardsOMPCount(t *testing.T) {
+	srv, _ := setupTestServer(t)
+	called := false
+	srv.spawnAgents = func(_ context.Context, opts robot.SpawnOptions) (*robot.SpawnOutput, error) {
+		called = true
+		if opts.Session != "omp-session" || opts.OMPCount != 2 {
+			t.Fatalf("spawn options = %+v", opts)
+		}
+		return nil, errServeTestAgentSpawnDisabled
+	}
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/sessions/omp-session/agents/spawn", strings.NewReader(`{"omp_count":2}`))
+	rctx := chi.NewRouteContext()
+	rctx.URLParams.Add("sessionId", "omp-session")
+	req = req.WithContext(context.WithValue(req.Context(), chi.RouteCtxKey, rctx))
+	srv.handleAgentSpawnV1(rec, req)
 	if !called || rec.Code != http.StatusInternalServerError {
 		t.Fatalf("called=%v status=%d", called, rec.Code)
 	}

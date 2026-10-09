@@ -15,6 +15,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	agentpkg "github.com/Dicklesworthstone/ntm/internal/agent"
 	"github.com/Dicklesworthstone/ntm/internal/checkpoint"
 	"github.com/Dicklesworthstone/ntm/internal/config"
 	"github.com/Dicklesworthstone/ntm/internal/events"
@@ -170,6 +171,8 @@ func opencodeCommandOrDefault(configured string) string {
 
 func resolveAddAgentCommandTemplate(agentType AgentType, pluginMap map[string]plugins.AgentPlugin, ollamaHost string) (string, map[string]string, error) {
 	switch agentType {
+	case AgentTypeOMP:
+		return spawnAgentCommandTemplate(agentType, pluginMap, ollamaHost)
 	case AgentTypeClaude:
 		return cfg.Agents.Claude, nil, nil
 	case AgentTypeCodex:
@@ -210,6 +213,12 @@ func resolveAddAgentCommandTemplate(agentType AgentType, pluginMap map[string]pl
 // protocol that phase one deliberately does not claim to understand.
 func validateGrokPhaseOneAdd(opts AddOptions) error {
 	for _, spec := range opts.Agents.Flatten() {
+		if spec.Type == AgentTypeOMP {
+			if opts.Prompt != "" || (!opts.NoCassContext && opts.CassContextQuery != "") || opts.PersonaMap[spec.Model] != nil {
+				return agentpkg.ErrOMPNativeAdapterRequired
+			}
+			continue
+		}
 		if spec.Type != AgentTypeGrok {
 			continue
 		}
@@ -347,6 +356,7 @@ func newAddCmd() *cobra.Command {
 	cmd.Flags().Var(NewAgentSpecsValue(AgentTypeGemini, &agentSpecs), "gmi", "Gemini agents (N or N:model)")
 	cmd.Flags().Var(NewAgentSpecsValue(AgentTypeAntigravity, &agentSpecs), "agy", "Antigravity (agy) agents (N; model pinned to Gemini 3.1 Pro (High))")
 	cmd.Flags().Var(NewAgentSpecsValue(AgentTypeGrok, &agentSpecs), "grok", "Grok Build agents (N or N:model[:effort])")
+	cmd.Flags().Var(NewAgentSpecsValue(AgentTypeOMP, &agentSpecs), "omp", "Oh My Pi agents (N or N:model; native adapter required for automated input)")
 	cmd.Flags().Var(NewAgentSpecsValue(AgentTypeOllama, &agentSpecs), "ollama", "Ollama agents (N or N:model)")
 	cmd.Flags().Var(NewAgentSpecsValue(AgentTypeCursor, &agentSpecs), "cursor", "Cursor agents (N or N:model)")
 	cmd.Flags().Var(NewAgentSpecsValue(AgentTypeWindsurf, &agentSpecs), "windsurf", "Windsurf agents (N or N:model)")
@@ -598,6 +608,7 @@ func executeAdd(ctx context.Context, opts AddOptions, emitResult bool) error {
 	// Add agents
 	flatAgents := opts.Agents.Flatten()
 	ccCount, codCount, gmiCount, agyCount, grokCount, ollamaCount, cursorCount, windsurfCount, aiderCount, opencodeCount := 0, 0, 0, 0, 0, 0, 0, 0, 0, 0
+	ompCount := 0
 	var rateLimitTracker *ratelimit.RateLimitTracker
 	openAICooldownWaited := false
 	ollamaHost := ""
@@ -682,6 +693,8 @@ func executeAdd(ctx context.Context, opts AddOptions, emitResult bool) error {
 			agyCount++
 		case AgentTypeGrok:
 			grokCount++
+		case AgentTypeOMP:
+			ompCount++
 		case AgentTypeOllama:
 			ollamaCount++
 		case AgentTypeCursor:
@@ -861,7 +874,7 @@ func executeAdd(ctx context.Context, opts AddOptions, emitResult bool) error {
 			}
 			return outputError(launchErr)
 		}
-		if agent.Type == AgentTypeGrok {
+		if agent.Type == AgentTypeGrok || agent.Type == AgentTypeOMP {
 			if _, err := tmux.WaitForPaneProcessStartContext(ctx, session, paneID); err != nil {
 				return outputError(fmt.Errorf(
 					"launching %s agent in pane %s did not start a stable process: %w",
@@ -1030,6 +1043,7 @@ func executeAdd(ctx context.Context, opts AddOptions, emitResult bool) error {
 			AddedGemini:         gmiCount,
 			AddedAntigravity:    agyCount,
 			AddedGrok:           grokCount,
+			AddedOMP:            ompCount,
 			AddedOllama:         ollamaCount,
 			AddedCursor:         cursorCount,
 			AddedWindsurf:       windsurfCount,

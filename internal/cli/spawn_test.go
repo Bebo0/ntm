@@ -582,6 +582,32 @@ func TestNormalizeSpawnOptionsGrok(t *testing.T) {
 	}
 }
 
+func TestNormalizeSpawnOptionsOMP(t *testing.T) {
+	opts := SpawnOptions{OMPCount: 2}
+	normalizeSpawnOptions(&opts)
+	if opts.OMPCount != 2 || len(opts.Agents) != 2 || legacySpawnTotalAgentCount(opts) != 2 {
+		t.Fatalf("OMP count normalization: %+v", opts)
+	}
+	if newSpawnCmd().Flags().Lookup("omp") == nil {
+		t.Fatal("spawn omits --omp")
+	}
+	if newAddCmd().Flags().Lookup("omp") == nil {
+		t.Fatal("add omits --omp")
+	}
+	if err := validateGrokPhaseOneAdd(AddOptions{Agents: AgentSpecs{{Type: AgentTypeOMP, Count: 1}}, Prompt: "work"}); err == nil {
+		t.Fatal("add accepts OMP terminal prompt without native adapter")
+	}
+	for _, spec := range opts.Agents {
+		if spec.Type != AgentTypeOMP {
+			t.Fatalf("OMP recognized as %q", spec.Type)
+		}
+	}
+	opts.Prompt = "must not type this into a pane"
+	if err := validateGrokPhaseOneSpawn(opts, nil); err == nil {
+		t.Fatal("OMP automated prompt accepted without native adapter")
+	}
+}
+
 func TestValidateSpawnPaneCapacity(t *testing.T) {
 	tests := []struct {
 		name       string

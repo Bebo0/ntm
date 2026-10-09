@@ -35,3 +35,19 @@ func TestDetectAgentFromCommand_FalsePositives(t *testing.T) {
 		})
 	}
 }
+
+func TestOMPProcessIdentity(t *testing.T) {
+	for _, command := range []string{"omp", "/home/bro/.local/bin/omp --model qwen"} {
+		if got := detectAgentFromCommand(command); got != AgentOMP {
+			t.Fatalf("%q recognized as %q", command, got)
+		}
+	}
+	for _, argv := range [][]string{{"rg", "omp"}, {"bash", "omp"}, {"compiler"}} {
+		if got := detectAgentFromArgv(argv); got == AgentOMP {
+			t.Fatalf("false OMP recognition: %q", argv)
+		}
+	}
+	if got := detectAgentFromArgv([]string{"/usr/bin/omp", "--model", "qwen"}); got != AgentOMP {
+		t.Fatalf("OMP executable lost: %q", got)
+	}
+}

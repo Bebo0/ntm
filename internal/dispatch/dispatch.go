@@ -7,6 +7,8 @@ package dispatch
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -73,6 +75,7 @@ type AgentFilter struct {
 // Request is the complete neutral dispatch input. Panes must be the current
 // topology snapshot for Session. Selectors use the shared N, W.P, or %N grammar.
 type Request struct {
+	RequestID             string // Stable operation identity supplied by a caller when available.
 	Session               string
 	Panes                 []tmux.Pane
 	Selectors             []string
@@ -112,6 +115,8 @@ const (
 	ProtocolStageOnly   DeliveryProtocol = "stage_only"
 	ProtocolSingleEnter DeliveryProtocol = "single_enter"
 	ProtocolDoubleEnter DeliveryProtocol = "double_enter"
+	ProtocolOMPNative   DeliveryProtocol = "omp_native"
+	ProtocolOMPStage    DeliveryProtocol = "omp_native_stage"
 )
 
 // ProtocolPlan contains the protocol and its observable timing contract.
@@ -142,6 +147,7 @@ type RedactionReceipt struct {
 
 // Delivery is the fully prepared actuation passed to the delivery port.
 type Delivery struct {
+	RequestID        string
 	Session          string
 	Target           Target
 	Message          string
@@ -277,6 +283,12 @@ func (f ProtocolPlannerFunc) PlanDelivery(ctx context.Context, target Target, su
 type DefaultProtocolPlanner struct{}
 
 func (DefaultProtocolPlanner) PlanDelivery(_ context.Context, target Target, submit bool) (ProtocolPlan, error) {
+	if target.AgentType.Canonical() == tmux.AgentOMP {
+		if !submit {
+			return ProtocolPlan{Protocol: ProtocolOMPStage}, nil
+		}
+		return ProtocolPlan{Protocol: ProtocolOMPNative}, nil
+	}
 	if !submit {
 		return ProtocolPlan{Protocol: ProtocolStageOnly}, nil
 	}
@@ -326,6 +338,27 @@ func RefuseDeadAgentPane(pane tmux.Pane) error {
 func (TMUXDeliverer) Deliver(ctx context.Context, delivery Delivery) error {
 	if err := contextError(ctx); err != nil {
 		return err
+	}
+	if delivery.Target.AgentType.Canonical() == tmux.AgentOMP {
+		path := "/send"
+		if delivery.Protocol == ProtocolOMPStage {
+			path = "/stage"
+		} else if delivery.Protocol != ProtocolOMPNative {
+			return fmt.Errorf("OMP requires its native delivery protocol, got %q", delivery.Protocol)
+		}
+		requestID := delivery.RequestID
+		if requestID == "" {
+			var nonce [16]byte
+			if _, err := rand.Read(nonce[:]); err != nil {
+				return err
+			}
+			requestID = hex.EncodeToString(nonce[:])
+		}
+		_, err := tmux.OMPControlContext(ctx, delivery.Target.Ref.ID, path, map[string]any{"request_id": requestID, "text": delivery.Message, "deliver_as": "followUp"})
+		if err != nil {
+			return fmt.Errorf("OMP request %s: %w", requestID, err)
+		}
+		return nil
 	}
 	if err := RefuseDeadAgentPane(delivery.Target.Pane); err != nil {
 		return err
@@ -625,7 +658,7 @@ func (s *Service) Prepare(ctx context.Context, req Request) (prepared *Prepared,
 	if err != nil {
 		return nil, err
 	}
-	if err := ValidatePromptDeliveryTargets(targets); err != nil {
+	if err := ValidatePromptDeliveryTargetsContext(ctx, targets); err != nil {
 		return nil, err
 	}
 	orderedTargets, err := s.orderer.OrderTargets(ctx, OrderInput{
@@ -692,8 +725,17 @@ func (s *Service) Prepare(ctx context.Context, req Request) (prepared *Prepared,
 		if err := validateProtocolPlan(plan, req.Submit); err != nil {
 			return rejectPrepared(prepared, i, ErrProtocol, err, ReceiptFailed)
 		}
+		requestID := req.RequestID
+		if target.AgentType.Canonical() == tmux.AgentOMP && requestID == "" {
+			var nonce [16]byte
+			if _, err := rand.Read(nonce[:]); err != nil {
+				return rejectPrepared(prepared, i, ErrProtocol, err, ReceiptFailed)
+			}
+			requestID = hex.EncodeToString(nonce[:])
+		}
 
 		prepared.entries[i].delivery = Delivery{
+			RequestID:        requestID,
 			Session:          req.Session,
 			Target:           cloneTarget(target),
 			Message:          redacted.Message,
@@ -903,10 +945,21 @@ func PlanTargets(req Request) ([]Target, error) {
 
 // ValidatePromptDeliveryTargets rejects agents whose prompt-delivery protocol
 // is not implemented. Callers that combine prompt delivery with another
-// actuation can use this pure preflight before performing that actuation.
+// actuation can use this read-only preflight before performing that actuation.
 func ValidatePromptDeliveryTargets(targets []Target) error {
+	return ValidatePromptDeliveryTargetsContext(context.Background(), targets)
+}
+
+// ValidatePromptDeliveryTargetsContext respects cancellation during native
+// adapter verification, before any target receives input.
+func ValidatePromptDeliveryTargetsContext(ctx context.Context, targets []Target) error {
 	for _, target := range targets {
 		err := target.AgentType.ValidateAutomatedPromptDelivery()
+		if target.AgentType.Canonical() == tmux.AgentOMP {
+			probeCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+			err = tmux.VerifyOMPControlContext(probeCtx, target.Ref.ID)
+			cancel()
+		}
 		if err == nil {
 			continue
 		}
@@ -1019,6 +1072,10 @@ func validateProtocolPlan(plan ProtocolPlan, submit bool) error {
 		return errors.New("protocol delays cannot be negative")
 	}
 	switch plan.Protocol {
+	case ProtocolOMPNative, ProtocolOMPStage:
+		if (plan.Protocol == ProtocolOMPNative) != submit || plan.EnterDelay != 0 || plan.SecondEnterDelay != 0 {
+			return errors.New("OMP native protocol must match submit and cannot include terminal delays")
+		}
 	case ProtocolStageOnly:
 		if submit {
 			return errors.New("stage-only protocol conflicts with submit=true")

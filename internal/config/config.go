@@ -833,6 +833,7 @@ type AgentConfig struct {
 	Gemini       string            `toml:"gemini"`
 	Antigravity  string            `toml:"antigravity"` // Antigravity (agy) launch command — successor to the Gemini CLI
 	Grok         string            `toml:"grok"`        // Official xAI Grok Build launch command
+	OMP          string            `toml:"omp"`         // Oh My Pi native interactive launch command
 	Ollama       string            `toml:"ollama"`
 	Cursor       string            `toml:"cursor"`
 	Windsurf     string            `toml:"windsurf"`
@@ -3810,6 +3811,7 @@ func Print(cfg *Config, w io.Writer) error {
 	fmt.Fprintf(w, "codex = %q\n", cfg.Agents.Codex)
 	fmt.Fprintf(w, "gemini = %q\n", cfg.Agents.Gemini)
 	fmt.Fprintf(w, "grok = %q\n", cfg.Agents.Grok)
+	fmt.Fprintf(w, "omp = %q\n", cfg.Agents.OMP)
 	if cfg.Agents.Antigravity != "" {
 		fmt.Fprintf(w, "antigravity = %q\n", cfg.Agents.Antigravity)
 	}
@@ -4935,6 +4937,8 @@ func GetValue(cfg *Config, path string) (interface{}, error) {
 			return cfg.Agents.Antigravity, nil
 		case "grok":
 			return cfg.Agents.Grok, nil
+		case "omp":
+			return cfg.Agents.OMP, nil
 		case "cursor":
 			return cfg.Agents.Cursor, nil
 		case "windsurf":
@@ -6072,6 +6076,7 @@ func Diff(cfg *Config) []ConfigDiff {
 	addDiff("agents.codex", defaults.Agents.Codex, cfg.Agents.Codex)
 	addDiff("agents.gemini", defaults.Agents.Gemini, cfg.Agents.Gemini)
 	addDiff("agents.grok", defaults.Agents.Grok, cfg.Agents.Grok)
+	addDiff("agents.omp", defaults.Agents.OMP, cfg.Agents.OMP)
 	addDiff("agents.cursor", defaults.Agents.Cursor, cfg.Agents.Cursor)
 	addDiff("agents.windsurf", defaults.Agents.Windsurf, cfg.Agents.Windsurf)
 	addDiff("agents.aider", defaults.Agents.Aider, cfg.Agents.Aider)

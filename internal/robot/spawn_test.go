@@ -227,6 +227,28 @@ func TestGetSpawnGrokUsesExactCommandWithFakeLifecycle(t *testing.T) {
 	}
 }
 
+func TestGetSpawnOMPWithFakeLifecycle(t *testing.T) {
+	deps := testSpawnLifecycleDependencies([]tmux.Pane{{ID: "%1", WindowIndex: 0, Index: 0}})
+	deps.LaunchAgent = func(_ context.Context, _ tmux.Pane, _, kind string, _ int, _, command string) (SpawnedAgent, error) {
+		if kind != "omp" || command != "omp" {
+			t.Fatalf("OMP launch: kind=%q command=%q", kind, command)
+		}
+		return SpawnedAgent{Pane: "0.0", Type: kind}, nil
+	}
+	out, err := GetSpawn(t.Context(), SpawnOptions{
+		Session: "omp-fake", OMPCount: 1, NoUserPane: true, WorkingDir: t.TempDir(), LifecycleDeps: deps,
+	}, testSpawnConfig())
+	if err != nil || !out.Success || len(out.Agents) != 1 || out.Agents[0].Type != "omp" {
+		t.Fatalf("OMP spawn: %+v, %v", out, err)
+	}
+	if _, err := validateSpawnRequest(SpawnOptions{OMPCount: -1, CCCount: 1}); err == nil {
+		t.Fatal("negative OMP count accepted")
+	}
+	if _, err := validateSpawnRequest(SpawnOptions{OMPCount: 1, WaitReady: true}); err == nil {
+		t.Fatal("OMP readiness inferred without native adapter")
+	}
+}
+
 func TestGetSpawnGrokUsesConfiguredDefaultModelWithFakeLifecycle(t *testing.T) {
 	panes := []tmux.Pane{{ID: "%1", WindowIndex: 0, Index: 0}}
 	deps := testSpawnLifecycleDependencies(panes)

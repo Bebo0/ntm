@@ -5,7 +5,12 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net"
+	"net/http"
+	"os"
+	"path/filepath"
 	"reflect"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -13,6 +18,94 @@ import (
 	"github.com/Dicklesworthstone/ntm/internal/agent"
 	"github.com/Dicklesworthstone/ntm/internal/tmux"
 )
+
+func TestOMPNativeDeliveryUsesUnixSocketOnly(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Unix control protocol")
+	}
+	dir := t.TempDir()
+	socket := filepath.Join(dir, "s")
+	listener, err := net.Listen("unix", socket)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(socket, 0600); err != nil {
+		t.Fatal(err)
+	}
+	requests := make(chan map[string]string, 4)
+	server := &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet {
+			_ = json.NewEncoder(w).Encode(map[string]any{"instance_id": "instance-1", "run_id": "run-1", "ready": true})
+			return
+		}
+		var request map[string]string
+		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+			t.Error(err)
+		}
+		request["path"] = r.URL.Path
+		requests <- request
+		status := "queued"
+		if r.URL.Path == "/stage" {
+			status = "staged"
+		}
+		if request["text"] == "ambiguous" {
+			status = "delivery_unknown"
+		}
+		_ = json.NewEncoder(w).Encode(map[string]string{"instance_id": "instance-1", "status": status})
+	})}
+	go func() { _ = server.Serve(listener) }()
+	t.Cleanup(func() { _ = server.Close() })
+	binary, log := filepath.Join(dir, "tmux"), filepath.Join(dir, "commands")
+	fixture := "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$NTM_TEST_OMP_LOG\"\ncase \"$*\" in *display-message*) printf '%s\\n' \"$NTM_TEST_OMP_METADATA\";; *) exit 91;; esac\n"
+	if err := os.WriteFile(binary, []byte(fixture), 0700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("NTM_TMUX_BINARY", binary)
+	t.Setenv("NTM_TEST_OMP_LOG", log)
+	t.Setenv("NTM_TEST_OMP_METADATA", socket+"|instance-1|run-1")
+	pane := testPane("%7", 1, 0, tmux.AgentOMP, "")
+	target := Target{Pane: pane, Ref: pane.Ref(), AgentType: tmux.AgentOMP}
+	for _, tc := range []struct {
+		submit        bool
+		message, path string
+		want          DeliveryProtocol
+		uncertain     bool
+	}{
+		{true, "hello", "/send", ProtocolOMPNative, false},
+		{false, "draft", "/stage", ProtocolOMPStage, false},
+		{true, "ambiguous", "/send", ProtocolOMPNative, true},
+	} {
+		plan, err := (DefaultProtocolPlanner{}).PlanDelivery(context.Background(), target, tc.submit)
+		if err != nil || plan.Protocol != tc.want {
+			t.Fatalf("plan=%+v err=%v", plan, err)
+		}
+		err = (TMUXDeliverer{}).Deliver(context.Background(), Delivery{RequestID: "stable-request", Target: target, Message: tc.message, Protocol: plan.Protocol, ClearInput: true})
+		if tc.uncertain {
+			if !errors.Is(err, tmux.ErrOMPDeliveryUncertain) {
+				t.Fatalf("uncertain delivery reported as %v", err)
+			}
+		} else if err != nil {
+			t.Fatal(err)
+		}
+		request := <-requests
+		if request["request_id"] != "stable-request" || request["path"] != tc.path || request["text"] != tc.message || request["deliver_as"] != "followUp" {
+			t.Fatalf("unexpected request: %+v", request)
+		}
+	}
+	if err := server.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := (TMUXDeliverer{}).Deliver(context.Background(), Delivery{Target: target, Message: "offline", Protocol: ProtocolOMPNative}); err == nil {
+		t.Fatal("unavailable adapter accepted")
+	}
+	data, err := os.ReadFile(log)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(data), "send-keys") || strings.Contains(string(data), "paste-buffer") {
+		t.Fatalf("terminal fallback occurred: %s", data)
+	}
+}
 
 func testPane(id string, window, index int, agentType tmux.AgentType, variant string, tags ...string) tmux.Pane {
 	return tmux.Pane{

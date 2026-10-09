@@ -3448,6 +3448,32 @@ func (s *Server) handlePaneInputV1(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	if pane.Type.Canonical() == tmux.AgentOMP {
+		path := "/stage"
+		if req.Enter {
+			path = "/send"
+		}
+		nativeRequestID := reqID
+		if nativeRequestID == "" {
+			nativeRequestID = generateRequestID()
+		}
+		body, err := tmux.OMPControlContext(r.Context(), pane.ID, path, map[string]any{
+			"request_id": nativeRequestID, "text": req.Text, "deliver_as": "followUp",
+		})
+		if err != nil {
+			writeErrorResponse(w, http.StatusServiceUnavailable, ErrCodeInternalError, err.Error(), nil, reqID)
+			return
+		}
+		var receipt struct {
+			Status string `json:"status"`
+		}
+		if json.Unmarshal(body, &receipt) != nil || (receipt.Status != "queued" && receipt.Status != "staged") {
+			writeErrorResponse(w, http.StatusServiceUnavailable, ErrCodeInternalError, "OMP delivery outcome is uncertain; inspect the existing request before retrying", map[string]interface{}{"native_request_id": nativeRequestID}, reqID)
+			return
+		}
+		writeSuccessResponse(w, http.StatusOK, map[string]interface{}{"sent": true, "pane": pane.ID, "transport": "omp_native"}, reqID)
+		return
+	}
 	if err := pane.Type.ValidateAutomatedPromptDelivery(); err != nil {
 		writeErrorResponse(w, http.StatusNotImplemented, ErrCodeNotImplemented, err.Error(), map[string]interface{}{
 			"agent_type": pane.Type.Canonical().String(),
@@ -3491,8 +3517,17 @@ func (s *Server) handlePaneInterruptV1(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	paneTarget, ok := s.resolvePaneTargetForRequest(w, r, sessionID, paneIdx, reqID)
+	pane, ok := s.resolvePaneForRequest(w, r, sessionID, paneIdx, reqID)
 	if !ok {
+		return
+	}
+	paneTarget := pane.ID
+	if pane.Type.Canonical() == tmux.AgentOMP {
+		if _, err := tmux.OMPControlContext(r.Context(), paneTarget, "/interrupt", map[string]any{}); err != nil {
+			writeErrorResponse(w, http.StatusServiceUnavailable, ErrCodeInternalError, err.Error(), nil, reqID)
+			return
+		}
+		writeSuccessResponse(w, http.StatusOK, map[string]interface{}{"interrupted": true, "pane": paneTarget, "transport": "omp_native"}, reqID)
 		return
 	}
 
@@ -3769,6 +3804,7 @@ type AgentSpawnRequest struct {
 	GmiCount  int    `json:"gmi_count,omitempty"`
 	AgyCount  int    `json:"agy_count,omitempty"`
 	GrokCount int    `json:"grok_count,omitempty"`
+	OMPCount  int    `json:"omp_count,omitempty"`
 	Preset    string `json:"preset,omitempty"`
 	WaitReady bool   `json:"wait_ready,omitempty"`
 	Label     string `json:"label,omitempty"` // Goal label for multi-session support
@@ -3790,8 +3826,8 @@ func (s *Server) handleAgentSpawnV1(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// At least one agent count or preset must be specified
-	if req.CCCount == 0 && req.CodCount == 0 && req.GmiCount == 0 && req.AgyCount == 0 && req.GrokCount == 0 && req.Preset == "" {
-		writeErrorResponse(w, http.StatusBadRequest, ErrCodeBadRequest, "at least one agent count (cc_count, cod_count, gmi_count, agy_count, grok_count) or preset required", nil, reqID)
+	if req.CCCount == 0 && req.CodCount == 0 && req.GmiCount == 0 && req.AgyCount == 0 && req.GrokCount == 0 && req.OMPCount == 0 && req.Preset == "" {
+		writeErrorResponse(w, http.StatusBadRequest, ErrCodeBadRequest, "at least one agent count (cc_count, cod_count, gmi_count, agy_count, grok_count, omp_count) or preset required", nil, reqID)
 		return
 	}
 
@@ -3803,6 +3839,7 @@ func (s *Server) handleAgentSpawnV1(w http.ResponseWriter, r *http.Request) {
 		GmiCount:  req.GmiCount,
 		AgyCount:  req.AgyCount,
 		GrokCount: req.GrokCount,
+		OMPCount:  req.OMPCount,
 		Preset:    req.Preset,
 		WaitReady: req.WaitReady,
 	}

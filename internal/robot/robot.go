@@ -1785,6 +1785,7 @@ type StatusSummary struct {
 	GeminiCount      int            `json:"gemini_count"`
 	AntigravityCount int            `json:"antigravity_count"`
 	GrokCount        int            `json:"grok_count"`
+	OMPCount         int            `json:"omp_count"`
 	CursorCount      int            `json:"cursor_count"`
 	WindsurfCount    int            `json:"windsurf_count"`
 	AiderCount       int            `json:"aider_count"`
@@ -2293,6 +2294,7 @@ func cloneSnapshotOutput(base *SnapshotOutput) *SnapshotOutput {
 		GeminiCount:      base.Summary.GeminiCount,
 		AntigravityCount: base.Summary.AntigravityCount,
 		GrokCount:        base.Summary.GrokCount,
+		OMPCount:         base.Summary.OMPCount,
 		CursorCount:      base.Summary.CursorCount,
 		WindsurfCount:    base.Summary.WindsurfCount,
 		AiderCount:       base.Summary.AiderCount,
@@ -2626,6 +2628,8 @@ func statusAccumulateAgentSummary(summary *StatusSummary, agentType, agentState 
 		summary.AntigravityCount++
 	case "grok":
 		summary.GrokCount++
+	case "omp":
+		summary.OMPCount++
 	case "cursor":
 		summary.CursorCount++
 	case "windsurf":
@@ -3757,6 +3761,8 @@ func detectAgentType(title string) string {
 		return "antigravity"
 	case containsShortForm(titleLower, "grok"):
 		return "grok"
+	case containsShortForm(titleLower, "omp"):
+		return "omp"
 	case containsShortForm(titleLower, "ws"):
 		return "windsurf"
 	case containsShortForm(titleLower, "oc"):
@@ -3798,6 +3804,8 @@ func ResolveAgentType(t string) string {
 		return "antigravity"
 	case agent.AgentTypeGrok:
 		return "grok"
+	case agent.AgentTypeOMP:
+		return "omp"
 	case agent.AgentTypeCursor:
 		return "cursor"
 	case agent.AgentTypeWindsurf:
@@ -6881,6 +6889,7 @@ func robotPreparedDispatchRequest(allPanes, targetPanes []tmux.Pane, opts SendOp
 		}
 	}
 	return dispatchsvc.Request{
+		RequestID:         opts.RequestID,
 		Session:           opts.Session,
 		Panes:             planningPanes,
 		Selectors:         selectors,

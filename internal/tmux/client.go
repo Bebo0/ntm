@@ -292,7 +292,7 @@ func (c *Client) RunContext(ctx context.Context, args ...string) (string, error)
 		out, err = runLocalContext(ctx, args...)
 	} else {
 		// Remote execution via ssh
-		remoteCmd := buildRemoteShellCommand("tmux", args...)
+		remoteCmd := buildRemoteShellCommand("tmux", SocketArgs(args)...)
 		// Use "--" to prevent Remote from being parsed as an ssh option.
 		out, err = runSSHContext(ctx, "--", c.Remote, remoteCmd)
 	}
@@ -427,7 +427,17 @@ func buildRemoteShellCommand(command string, args ...string) string {
 	return strings.Join(parts, " ")
 }
 
+// SocketArgs pins all commands to the worker's private tmux server when set.
+// The path is passed as one argv value, including for quoted SSH commands.
+func SocketArgs(args []string) []string {
+	if socket := os.Getenv("NTM_TMUX_SOCKET"); socket != "" {
+		return append([]string{"-S", socket}, args...)
+	}
+	return args
+}
+
 func runLocalContext(ctx context.Context, args ...string) (string, error) {
+	args = SocketArgs(args)
 	if ctx == nil {
 		ctx = context.Background()
 	}

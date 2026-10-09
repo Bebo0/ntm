@@ -150,11 +150,32 @@ Only use tool prefix for options unique to that tool:
 | `--spawn-cod=N` | Codex agents to spawn | spawn-specific |
 | `--spawn-agy=N` | Antigravity agents to spawn | spawn-specific |
 | `--spawn-grok=N` | Grok Build agents to spawn (phase one: launch only) | spawn-specific |
+| `--spawn-omp=N` | Oh My Pi agents to spawn (native adapter required for readiness and automated input) | spawn-specific |
 | `--spawn-gmi=N` | Gemini agents to spawn (legacy) | spawn-specific |
 | `--spawn-preset=NAME` | Use preset recipe | spawn-specific |
 | `--probe-method=M` | Probe detection method | probe-specific |
 | `--xf-mode=semantic` | XF search mode | xf-specific |
 | `--bulk-strategy=S` | Bulk assign strategy | bulk-assign-specific |
+
+OMP is a native agent type (`omp`, aliases `oh-my-pi` and `oh_my_pi`). Interactive
+CLI launch uses `ntm spawn SESSION --omp=N` or `ntm add SESSION --omp=N`; the
+HTTP agent-spawn request accepts `omp_count`. Configure its command with
+`[agents] omp = "omp"`. Saved topology and agent counts preserve its identity.
+Terminal output does not establish OMP readiness. Automated input and relaunch
+require a native control adapter; they never borrow another agent's keystrokes.
+With the adapter installed, prompt receipts report `omp_native` or
+`omp_native_stage`, with zero terminal Enter delays. Every mutation verifies
+the run and instance over its private Unix socket first. Native delivery keeps
+a request ID and reports an uncertain result rather than retrying through the
+terminal. Native control runs on the worker itself, alongside the socket.
+
+Set `NTM_TMUX_SOCKET=/run/user/1000/omp-workers.sock` to select a private worker
+tmux server. Local commands, buffer operations, attachments and remote commands
+pass this path as tmux's `-S` argument (for remote operations, the path is on the
+remote host). Keep this variable scoped to worker NTM processes. NTM refuses to
+switch a human client from a different socket; open a terminal or portal window
+instead. Worker-created sessions/windows can be discovered through this socket
+without modifying the operator's tmux server.
 
 Grok Build phase one does not automate the authenticated fullscreen TUI. Robot
 send, retasking interrupt, restart, readiness waits, assignment, and restore-time

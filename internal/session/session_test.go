@@ -20,6 +20,17 @@ type fakePaneBindingDiscoverer struct {
 	observe func(context.Context, string, string, int, time.Time) agentsession.BindingObservation
 }
 
+func TestOMPCountsAndRestoreBoundary(t *testing.T) {
+	counts := countAgents([]tmux.Pane{{Type: tmux.AgentOMP}, {Type: tmux.AgentUser}})
+	if counts.OMP != 1 || counts.User != 1 || counts.Total() != 2 {
+		t.Fatalf("OMP session counts: %+v", counts)
+	}
+	state := &SessionState{Panes: []PaneState{{Index: 1, AgentType: "omp"}}}
+	if err := ValidateAutomatedRelaunch(state); err == nil {
+		t.Fatal("restore accepted OMP without native instance binding")
+	}
+}
+
 func (f fakePaneBindingDiscoverer) ObserveBinding(ctx context.Context, agentType, workDir string, panePID int, observedAt time.Time) agentsession.BindingObservation {
 	return f.observe(ctx, agentType, workDir, panePID, observedAt)
 }

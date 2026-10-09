@@ -55,6 +55,7 @@ type SpawnOptions struct {
 	GmiCount           int           // Gemini agents
 	AgyCount           int           // Antigravity agents
 	GrokCount          int           // Grok Build agents
+	OMPCount           int           // Oh My Pi agents
 	Preset             string        // Recipe/preset name
 	NoUserPane         bool          // Don't create user pane
 	WorkingDir         string        // Override working directory
@@ -173,14 +174,18 @@ func validateSpawnRequest(opts SpawnOptions) (string, error) {
 		{flag: "--spawn-gmi", value: opts.GmiCount},
 		{flag: "--spawn-agy", value: opts.AgyCount},
 		{flag: "--spawn-grok", value: opts.GrokCount},
+		{flag: "--spawn-omp", value: opts.OMPCount},
 	}
 	for _, count := range counts {
 		if count.value < 0 {
 			return "", fmt.Errorf("%s must be zero or greater, got %d", count.flag, count.value)
 		}
 	}
-	if opts.CCCount+opts.CodCount+opts.GmiCount+opts.AgyCount+opts.GrokCount <= 0 {
-		return "", errors.New("no agents specified (use cc, cod, gmi, agy, or grok counts)")
+	if opts.CCCount+opts.CodCount+opts.GmiCount+opts.AgyCount+opts.GrokCount+opts.OMPCount <= 0 {
+		return "", errors.New("no agents specified (use cc, cod, gmi, agy, grok, or omp counts)")
+	}
+	if opts.OMPCount > 0 && (opts.WaitReady || opts.AssignWork) {
+		return "", agentpkg.ErrOMPNativeAdapterRequired
 	}
 	if opts.GrokCount > 0 && opts.WaitReady {
 		return "", errGrokSpawnWaitUnavailable
@@ -199,14 +204,14 @@ func validateSpawnRequest(opts SpawnOptions) (string, error) {
 }
 
 func validateGrokSpawnPaneBaselines(panes []tmux.Pane, opts SpawnOptions) error {
-	if opts.GrokCount <= 0 {
+	if opts.GrokCount+opts.OMPCount <= 0 {
 		return nil
 	}
 	start := opts.CCCount + opts.CodCount + opts.GmiCount + opts.AgyCount
 	if !opts.NoUserPane {
 		start++
 	}
-	for i := 0; i < opts.GrokCount; i++ {
+	for i := 0; i < opts.GrokCount+opts.OMPCount; i++ {
 		paneIndex := start + i
 		if paneIndex >= len(panes) {
 			return fmt.Errorf("requested Grok Build pane %d is unavailable", i+1)
@@ -219,14 +224,14 @@ func validateGrokSpawnPaneBaselines(panes []tmux.Pane, opts SpawnOptions) error 
 }
 
 func validateExistingGrokSpawnPaneBaselines(panes []tmux.Pane, opts SpawnOptions) error {
-	if opts.GrokCount <= 0 {
+	if opts.GrokCount+opts.OMPCount <= 0 {
 		return nil
 	}
 	start := opts.CCCount + opts.CodCount + opts.GmiCount + opts.AgyCount
 	if !opts.NoUserPane {
 		start++
 	}
-	for i := 0; i < opts.GrokCount; i++ {
+	for i := 0; i < opts.GrokCount+opts.OMPCount; i++ {
 		paneIndex := start + i
 		if paneIndex >= len(panes) {
 			break
@@ -452,7 +457,7 @@ func GetSpawn(ctx context.Context, opts SpawnOptions, cfg *config.Config) (*Spaw
 	_ = audit.LogEvent(opts.Session, audit.EventTypeSpawn, audit.ActorSystem, "robot.spawn", map[string]interface{}{
 		"phase":           "start",
 		"session":         opts.Session,
-		"total_agents":    opts.CCCount + opts.CodCount + opts.GmiCount + opts.AgyCount + opts.GrokCount,
+		"total_agents":    opts.CCCount + opts.CodCount + opts.GmiCount + opts.AgyCount + opts.GrokCount + opts.OMPCount,
 		"preset":          opts.Preset,
 		"no_user_pane":    opts.NoUserPane,
 		"dry_run":         opts.DryRun,
@@ -470,7 +475,7 @@ func GetSpawn(ctx context.Context, opts SpawnOptions, cfg *config.Config) (*Spaw
 		payload := map[string]interface{}{
 			"phase":           "finish",
 			"session":         opts.Session,
-			"total_agents":    opts.CCCount + opts.CodCount + opts.GmiCount + opts.AgyCount + opts.GrokCount,
+			"total_agents":    opts.CCCount + opts.CodCount + opts.GmiCount + opts.AgyCount + opts.GrokCount + opts.OMPCount,
 			"preset":          opts.Preset,
 			"no_user_pane":    opts.NoUserPane,
 			"dry_run":         opts.DryRun,
@@ -594,7 +599,7 @@ func GetSpawn(ctx context.Context, opts SpawnOptions, cfg *config.Config) (*Spaw
 	// handoffCtx is available for use in work prompts below
 	_ = handoffCtx // silence unused warning when not in orchestrator mode
 
-	totalAgents := opts.CCCount + opts.CodCount + opts.GmiCount + opts.AgyCount + opts.GrokCount
+	totalAgents := opts.CCCount + opts.CodCount + opts.GmiCount + opts.AgyCount + opts.GrokCount + opts.OMPCount
 
 	// Calculate total panes needed
 	totalPanes := totalAgents
@@ -713,6 +718,14 @@ func GetSpawn(ctx context.Context, opts SpawnOptions, cfg *config.Config) (*Spaw
 			paneIdx++
 		}
 
+		for i := 0; i < opts.OMPCount; i++ {
+			pane := fmt.Sprintf("0.%d", paneIdx)
+			output.WouldCreate = append(output.WouldCreate, SpawnedAgent{
+				Pane: pane, Name: dryRunNameMap.AssignNew("omp", pane), Type: "omp",
+				Title: fmt.Sprintf("%s__omp_%d", opts.Session, i+1),
+			})
+			paneIdx++
+		}
 		output.Layout = "tiled"
 		return output, nil
 	}
@@ -898,6 +911,7 @@ func GetSpawn(ctx context.Context, opts SpawnOptions, cfg *config.Config) (*Spaw
 		{agentType: "gemini", count: opts.GmiCount},
 		{agentType: "antigravity", count: opts.AgyCount},
 		{agentType: "grok", count: opts.GrokCount},
+		{agentType: "omp", count: opts.OMPCount},
 	} {
 		for i := 0; i < spec.count; i++ {
 			launchRequests = append(launchRequests, launchRequest{agentType: spec.agentType, number: i + 1})
@@ -1024,7 +1038,7 @@ func launchAgent(ctx context.Context, pane tmux.Pane, session, agentType string,
 		agent.Error = fmt.Sprintf("launch canceled: %v", err)
 		return agent, fmt.Errorf("launch canceled: %w", err)
 	}
-	if agentTypeShort(agentType) == "grok" {
+	if agentTypeShort(agentType) == "grok" || agentTypeShort(agentType) == "omp" {
 		if err := tmux.ValidatePaneLaunchBaseline(pane); err != nil {
 			agent.Error = fmt.Sprintf("launching: %v", err)
 			agent.StartupMs = time.Since(startTime).Milliseconds()
@@ -1065,7 +1079,7 @@ func launchAgent(ctx context.Context, pane tmux.Pane, session, agentType string,
 		agent.StartupMs = time.Since(startTime).Milliseconds()
 		return agent, fmt.Errorf("launching: %w", err)
 	}
-	if agentTypeShort(agentType) == "grok" {
+	if agentTypeShort(agentType) == "grok" || agentTypeShort(agentType) == "omp" {
 		if _, err := tmux.WaitForPaneProcessStartContext(ctx, session, pane.ID); err != nil {
 			agent.Error = fmt.Sprintf("launching: stable process did not start: %v", err)
 			agent.StartupMs = time.Since(startTime).Milliseconds()
@@ -1253,6 +1267,8 @@ func agentTypeShort(agentType string) string {
 		return "agy"
 	case tmux.AgentGrok:
 		return "grok"
+	case tmux.AgentOMP:
+		return "omp"
 	case tmux.AgentCursor:
 		return "cursor"
 	case tmux.AgentWindsurf:
@@ -1276,6 +1292,7 @@ func getAgentCommands(cfg *config.Config) map[string]string {
 		"gemini":      "gemini",
 		"antigravity": "agy",
 		"grok":        "grok --always-approve",
+		"omp":         config.DefaultAgentTemplates().OMP,
 	}
 
 	if cfg != nil && cfg.Agents.Claude != "" {
@@ -1292,6 +1309,9 @@ func getAgentCommands(cfg *config.Config) map[string]string {
 	}
 	if cfg != nil && cfg.Agents.Grok != "" {
 		defaults["grok"] = cfg.Agents.Grok
+	}
+	if cfg != nil && cfg.Agents.OMP != "" {
+		defaults["omp"] = cfg.Agents.OMP
 	}
 
 	for agentType, cmdTemplate := range defaults {

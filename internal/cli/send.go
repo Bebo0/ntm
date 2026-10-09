@@ -518,7 +518,7 @@ func matchesLegacySendTypeFilter(pane tmux.Pane, targetCC, targetCod, targetGmi 
 
 func isInterruptibleAgentPane(pane tmux.Pane) bool {
 	switch tmux.AgentType(pane.Type).Canonical() {
-	case tmux.AgentClaude, tmux.AgentCodex, tmux.AgentGemini, tmux.AgentGrok, tmux.AgentCursor, tmux.AgentWindsurf, tmux.AgentAider, tmux.AgentOpencode, tmux.AgentOllama:
+	case tmux.AgentClaude, tmux.AgentCodex, tmux.AgentGemini, tmux.AgentGrok, tmux.AgentOMP, tmux.AgentCursor, tmux.AgentWindsurf, tmux.AgentAider, tmux.AgentOpencode, tmux.AgentOllama:
 		return true
 	default:
 		return false
@@ -2456,15 +2456,24 @@ func runInterrupt(session string, tags []string) error {
 				}
 			}
 
-			if err := tmux.SendInterrupt(p.ID); err != nil {
+			if err := interruptAgentPane(context.Background(), p); err != nil {
 				return fmt.Errorf("interrupting pane %d: %w", p.Index, err)
 			}
 			count++
 		}
 	}
 
-	fmt.Printf("Sent Ctrl+C to %d agent pane(s)\n", count)
+	fmt.Printf("Interrupted %d agent pane(s)\n", count)
 	return nil
+}
+
+// interruptAgentPane preserves the native OMP boundary on human CLI paths.
+func interruptAgentPane(ctx context.Context, pane tmux.Pane) error {
+	if pane.Type.Canonical() == tmux.AgentOMP {
+		_, err := tmux.OMPControlContext(ctx, pane.ID, "/interrupt", map[string]any{})
+		return err
+	}
+	return tmux.SendInterrupt(pane.ID)
 }
 
 // buildInterruptResponse constructs the response for session interrupt.
@@ -2504,7 +2513,7 @@ func buildInterruptResponse(ctx context.Context, session string, tags []string) 
 			}
 
 			targetedPanes = append(targetedPanes, p.Index)
-			if err := tmux.SendInterrupt(p.ID); err != nil {
+			if err := interruptAgentPane(ctx, p); err != nil {
 				return nil, fmt.Errorf("interrupting pane %d: %w", p.Index, err)
 			}
 			interrupted++
@@ -3549,7 +3558,10 @@ func looksLikeShellCommand(line string) bool {
 
 type shellDispatchProtocolPlanner struct{}
 
-func (shellDispatchProtocolPlanner) PlanDelivery(_ context.Context, target dispatchsvc.Target, submit bool) (dispatchsvc.ProtocolPlan, error) {
+func (shellDispatchProtocolPlanner) PlanDelivery(ctx context.Context, target dispatchsvc.Target, submit bool) (dispatchsvc.ProtocolPlan, error) {
+	if target.AgentType.Canonical() == tmux.AgentOMP {
+		return (dispatchsvc.DefaultProtocolPlanner{}).PlanDelivery(ctx, target, submit)
+	}
 	if !submit {
 		return dispatchsvc.ProtocolPlan{Protocol: dispatchsvc.ProtocolStageOnly}, nil
 	}
@@ -3635,6 +3647,9 @@ func newShellDispatchServiceWithGate(
 		Orderer:   shellDispatchOrderer(selected),
 		Protocols: shellDispatchProtocolPlanner{},
 		Deliverer: dispatchsvc.DelivererFunc(func(ctx context.Context, delivery dispatchsvc.Delivery) error {
+			if delivery.Target.AgentType.Canonical() == tmux.AgentOMP {
+				return (dispatchsvc.TMUXDeliverer{}).Deliver(ctx, delivery)
+			}
 			target := delivery.Target.Pane
 			if err := dispatchsvc.RefuseDeadAgentPane(target); err != nil {
 				return err
@@ -4741,7 +4756,7 @@ func distributeProtocolFromDeliveryID(deliveryID string) dispatchsvc.DeliveryPro
 	}
 	protocol := dispatchsvc.DeliveryProtocol(parts[1])
 	switch protocol {
-	case dispatchsvc.ProtocolStageOnly, dispatchsvc.ProtocolSingleEnter, dispatchsvc.ProtocolDoubleEnter:
+	case dispatchsvc.ProtocolStageOnly, dispatchsvc.ProtocolSingleEnter, dispatchsvc.ProtocolDoubleEnter, dispatchsvc.ProtocolOMPNative, dispatchsvc.ProtocolOMPStage:
 		return protocol
 	default:
 		return ""

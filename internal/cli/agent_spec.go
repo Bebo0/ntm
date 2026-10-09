@@ -43,6 +43,7 @@ const (
 	AgentTypeGemini      AgentType = "gmi"
 	AgentTypeAntigravity AgentType = "agy"
 	AgentTypeGrok        AgentType = "grok"
+	AgentTypeOMP         AgentType = "omp"
 	AgentTypeOllama      AgentType = "ollama"
 	AgentTypeCursor      AgentType = "cursor"
 	AgentTypeWindsurf    AgentType = "windsurf"

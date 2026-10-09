@@ -50,6 +50,11 @@ func (p *parserImpl) ParseWithHint(output string, hint AgentType) (*AgentState, 
 	}
 
 	// Step 2: Extract metrics based on agent type
+	// OMP readiness must come from the native extension, never terminal text.
+	if state.Type == AgentTypeOMP {
+		state.RawSample = util.SafeSliceFromEnd(cleanOutput, p.config.SampleLength)
+		return state, nil
+	}
 	p.extractMetrics(cleanOutput, state)
 
 	// Step 3: Detect state flags

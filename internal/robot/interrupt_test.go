@@ -1,6 +1,7 @@
 package robot
 
 import (
+	"encoding/json"
 	"errors"
 	"strings"
 	"testing"
@@ -11,6 +12,32 @@ import (
 	"github.com/Dicklesworthstone/ntm/internal/status"
 	"github.com/Dicklesworthstone/ntm/internal/tmux"
 )
+
+func TestOMPInterruptReadinessRequiresFreshCompleteNativeState(t *testing.T) {
+	now := time.Now().UTC()
+	base := map[string]any{"ready": true, "observed_at": now, "idle": true, "pending": false, "tools": 0, "async_busy": false}
+	check := func(state map[string]any, want bool) {
+		t.Helper()
+		body, err := json.Marshal(state)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := ompInterruptStateReady(body, now); got != want {
+			t.Fatalf("readiness %s = %v, want %v", body, got, want)
+		}
+	}
+	check(base, true)
+	for key, value := range map[string]any{"ready": false, "idle": false, "pending": true, "tools": 1, "async_busy": true, "observed_at": now.Add(-time.Minute)} {
+		state := make(map[string]any)
+		for k, v := range base {
+			state[k] = v
+		}
+		state[key] = value
+		check(state, false)
+	}
+	delete(base, "pending")
+	check(base, false)
+}
 
 // TestSelectInterruptTargetsWindowAware documents the targeting fix at the heart
 // of #172: on a multi-window / window-per-agent layout a bare --panes index

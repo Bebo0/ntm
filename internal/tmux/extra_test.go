@@ -37,6 +37,31 @@ func TestShellQuote(t *testing.T) {
 	}
 }
 
+func TestWorkerSocketArgs(t *testing.T) {
+	t.Setenv("NTM_TMUX_SOCKET", "/run/user/1000/omp worker.sock")
+	args := SocketArgs([]string{"list-panes", "-a"})
+	if strings.Join(args, "|") != "-S|/run/user/1000/omp worker.sock|list-panes|-a" {
+		t.Fatalf("socket arguments = %q", args)
+	}
+	remote := buildRemoteShellCommand("tmux", args...)
+	if !strings.Contains(remote, "'/run/user/1000/omp worker.sock'") {
+		t.Fatalf("remote socket path not quoted: %s", remote)
+	}
+	t.Setenv("NTM_TMUX_SOCKET", "")
+	if got := SocketArgs([]string{"list-sessions"}); len(got) != 1 || got[0] != "list-sessions" {
+		t.Fatalf("default socket changed: %q", got)
+	}
+}
+
+func TestWorkerSocketRefusesCrossServerSwitch(t *testing.T) {
+	t.Setenv("TMUX", "/tmp/human-tmux.sock,1234,0")
+	t.Setenv("NTM_TMUX_SOCKET", "/tmp/omp-workers.sock")
+	t.Setenv("NTM_TMUX_BINARY", "/nonexistent/must-not-run-tmux")
+	if err := NewClient("").AttachOrSwitch("omp-test"); err == nil || !strings.Contains(err.Error(), "different tmux socket") {
+		t.Fatalf("cross-server switch must fail before executing tmux: %v", err)
+	}
+}
+
 func TestBuildRemoteShellCommand(t *testing.T) {
 	t.Parallel()
 

@@ -46,6 +46,7 @@ const (
 	AgentGemini      = agent.AgentTypeGemini
 	AgentAntigravity = agent.AgentTypeAntigravity
 	AgentGrok        = agent.AgentTypeGrok
+	AgentOMP         = agent.AgentTypeOMP
 	AgentCursor      = agent.AgentTypeCursor
 	AgentWindsurf    = agent.AgentTypeWindsurf
 	AgentAider       = agent.AgentTypeAider
@@ -445,6 +446,9 @@ func FormatTags(tags []string) string {
 // shell prompts or tmux hooks change the title dynamically).
 func detectAgentFromCommand(command string) AgentType {
 	cmd := strings.ToLower(strings.TrimSpace(command))
+	if commandExecutableIs(cmd, "omp") {
+		return AgentOMP
+	}
 
 	// Grok Build deliberately uses the generic executable name "grok", which is
 	// also present in unrelated project names and command arguments. Recognize it
@@ -525,6 +529,9 @@ func detectAgentFromArgv(argv []string) AgentType {
 	if len(argv) == 0 {
 		return AgentUser
 	}
+	if commandExecutableIs(argv[0], "omp") {
+		return AgentOMP
+	}
 
 	// Grok Build must be the process executable, never a coincidental argument.
 	if commandExecutableIs(argv[0], "grok") {
@@ -532,11 +539,11 @@ func detectAgentFromArgv(argv []string) AgentType {
 	}
 
 	joined := strings.Join(argv, " ")
-	if t := detectAgentFromCommand(joined); t != AgentUser && t != AgentGrok {
+	if t := detectAgentFromCommand(joined); t != AgentUser && t != AgentGrok && t != AgentOMP {
 		return t
 	}
 	for _, arg := range argv {
-		if t := detectAgentFromCommand(arg); t != AgentUser && t != AgentGrok {
+		if t := detectAgentFromCommand(arg); t != AgentUser && t != AgentGrok && t != AgentOMP {
 			return t
 		}
 	}
@@ -1829,7 +1836,7 @@ func (c *Client) loadBufferLocalContext(ctx context.Context, bufferName, content
 	binary := BinaryPath()
 	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, binary, "load-buffer", "-b", bufferName, "-")
+	cmd := exec.CommandContext(ctx, binary, SocketArgs([]string{"load-buffer", "-b", bufferName, "-"})...)
 	cmd.Stdin = strings.NewReader(content)
 	cmd.WaitDelay = 2 * time.Second
 	var stderr bytes.Buffer
@@ -1848,7 +1855,7 @@ func (c *Client) loadBufferLocalContext(ctx context.Context, bufferName, content
 func (c *Client) loadBufferRemoteContext(ctx context.Context, bufferName, content string) error {
 	// For remote, we need to pipe the content through ssh's stdin
 	// instead of passing it on the command line to avoid ARG_MAX limits.
-	remoteCmd := fmt.Sprintf("tmux load-buffer -b %s -", ShellQuote(bufferName))
+	remoteCmd := buildRemoteShellCommand("tmux", SocketArgs([]string{"load-buffer", "-b", bufferName, "-"})...)
 	sshArgs := []string{"--", c.Remote, "/bin/sh", "-c", ShellQuote(remoteCmd)}
 
 	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
@@ -2463,10 +2470,13 @@ func BuildPaneCommand(projectDir, agentCommand string) (string, error) {
 func (c *Client) AttachOrSwitch(session string) error {
 	if c.Remote == "" {
 		if InTmux() {
+			if socket := os.Getenv("NTM_TMUX_SOCKET"); socket != "" && socket != strings.SplitN(os.Getenv("TMUX"), ",", 2)[0] {
+				return fmt.Errorf("workspace uses a different tmux socket; open it in a new terminal or portal window")
+			}
 			return c.RunSilent("switch-client", "-t", session)
 		}
 		// Interactive attach needs stdin/stdout, so use exec directly for local
-		cmd := exec.Command(BinaryPath(), "attach", "-t", session)
+		cmd := exec.Command(BinaryPath(), SocketArgs([]string{"attach", "-t", session})...)
 		cmd.Stdin = os.Stdin
 		cmd.Stdout = os.Stdout
 		cmd.Stderr = os.Stderr
@@ -2475,7 +2485,7 @@ func (c *Client) AttachOrSwitch(session string) error {
 
 	// Remote attach
 	// ssh -t user@host tmux attach -t session
-	remoteCmd := buildRemoteShellCommand("tmux", "attach", "-t", session)
+	remoteCmd := buildRemoteShellCommand("tmux", SocketArgs([]string{"attach", "-t", session})...)
 	// Use "--" to prevent Remote from being parsed as an ssh option.
 	sshArgs := []string{"-t", "--", c.Remote, remoteCmd}
 	cmd := exec.Command("ssh", sshArgs...)

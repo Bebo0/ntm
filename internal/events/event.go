@@ -89,6 +89,7 @@ type SessionCreateData struct {
 	GeminiCount      int    `json:"gemini_count,omitempty"`
 	AntigravityCount int    `json:"antigravity_count,omitempty"`
 	GrokCount        int    `json:"grok_count,omitempty"`
+	OMPCount         int    `json:"omp_count,omitempty"`
 	CursorCount      int    `json:"cursor_count,omitempty"`
 	WindsurfCount    int    `json:"windsurf_count,omitempty"`
 	AiderCount       int    `json:"aider_count,omitempty"`
@@ -140,6 +141,7 @@ func ToMap(v interface{}) map[string]interface{} {
 			"gemini_count":      d.GeminiCount,
 			"antigravity_count": d.AntigravityCount,
 			"grok_count":        d.GrokCount,
+			"omp_count":         d.OMPCount,
 			"cursor_count":      d.CursorCount,
 			"windsurf_count":    d.WindsurfCount,
 			"aider_count":       d.AiderCount,

@@ -18,6 +18,7 @@ const (
 	AgentTypeGemini      AgentType = "gmi"      // Gemini CLI (Google)
 	AgentTypeAntigravity AgentType = "agy"      // Antigravity CLI (Google) — successor to the Gemini CLI
 	AgentTypeGrok        AgentType = "grok"     // Grok Build CLI (xAI)
+	AgentTypeOMP         AgentType = "omp"      // Oh My Pi native interactive agent
 	AgentTypeOllama      AgentType = "ollama"   // Local Ollama CLI
 	AgentTypeCursor      AgentType = "cursor"   // Cursor AI
 	AgentTypeWindsurf    AgentType = "windsurf" // Windsurf IDE
@@ -44,6 +45,9 @@ var ErrAutomatedRelaunchNotImplemented = errors.New(GrokPhaseOneCapabilityHint)
 // input is written to a Grok Build pane.
 var ErrAutomatedPromptDeliveryNotImplemented = errors.New(GrokPromptDeliveryCapabilityHint)
 
+// OMP requires its native control adapter; terminal text is never its protocol.
+var ErrOMPNativeAdapterRequired = errors.New("OMP requires the native control adapter; terminal keystroke delivery and automated relaunch are disabled")
+
 // String returns the agent type as a string.
 func (t AgentType) String() string {
 	return string(t)
@@ -63,6 +67,8 @@ func (t AgentType) Canonical() AgentType {
 		return AgentTypeAntigravity
 	case "grok", "grok-build", "grok_build", "grokbuild", "xai-grok-build", "xai_grok_build", "xaigrokbuild":
 		return AgentTypeGrok
+	case "omp", "oh-my-pi", "oh_my_pi":
+		return AgentTypeOMP
 	case "cursor":
 		return AgentTypeCursor
 	case "windsurf", "ws":
@@ -95,6 +101,8 @@ func (t AgentType) DisplayName() string {
 		return "Antigravity CLI"
 	case AgentTypeGrok:
 		return "Grok Build"
+	case AgentTypeOMP:
+		return "Oh My Pi"
 	case AgentTypeOllama:
 		return "Ollama"
 	case AgentTypeCursor:
@@ -125,6 +133,8 @@ func (t AgentType) ProfileName() string {
 		return "Antigravity"
 	case AgentTypeGrok:
 		return "Grok"
+	case AgentTypeOMP:
+		return "OMP"
 	case AgentTypeOllama:
 		return "Ollama"
 	case AgentTypeCursor:
@@ -151,7 +161,7 @@ func (t AgentType) ProfileName() string {
 // IsValid returns true if this is a known agent type.
 func (t AgentType) IsValid() bool {
 	switch t.Canonical() {
-	case AgentTypeClaudeCode, AgentTypeCodex, AgentTypeGemini, AgentTypeAntigravity, AgentTypeGrok, AgentTypeOllama, AgentTypeCursor, AgentTypeWindsurf, AgentTypeAider, AgentTypeOpencode, AgentTypeUser:
+	case AgentTypeClaudeCode, AgentTypeCodex, AgentTypeGemini, AgentTypeAntigravity, AgentTypeGrok, AgentTypeOMP, AgentTypeOllama, AgentTypeCursor, AgentTypeWindsurf, AgentTypeAider, AgentTypeOpencode, AgentTypeUser:
 		return true
 	default:
 		return false
@@ -162,6 +172,9 @@ func (t AgentType) IsValid() bool {
 // lifecycle protocol is not implemented. Callers must run this preflight for
 // an entire target batch before mutating any pane or session.
 func (t AgentType) ValidateAutomatedRelaunch() error {
+	if t.Canonical() == AgentTypeOMP {
+		return ErrOMPNativeAdapterRequired
+	}
 	if t.Canonical() == AgentTypeGrok {
 		return ErrAutomatedRelaunchNotImplemented
 	}
@@ -172,6 +185,9 @@ func (t AgentType) ValidateAutomatedRelaunch() error {
 // interactive input protocol is not implemented. Callers must preflight the
 // complete target batch before writing input to any pane.
 func (t AgentType) ValidateAutomatedPromptDelivery() error {
+	if t.Canonical() == AgentTypeOMP {
+		return ErrOMPNativeAdapterRequired
+	}
 	if t.Canonical() == AgentTypeGrok {
 		return ErrAutomatedPromptDeliveryNotImplemented
 	}

@@ -1278,6 +1278,10 @@
             "description": "Ollama count",
             "type": "integer"
           },
+          "omp_count": {
+            "description": "O m p count",
+            "type": "integer"
+          },
           "opencode_count": {
             "description": "Opencode count",
             "type": "integer"
@@ -1308,6 +1312,7 @@
           "gemini_count",
           "antigravity_count",
           "grok_count",
+          "omp_count",
           "cursor_count",
           "windsurf_count",
           "aider_count",

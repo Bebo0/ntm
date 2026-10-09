@@ -56,6 +56,7 @@ type AgentConfig struct {
 	Gemini      int `json:"gmi"`
 	Antigravity int `json:"agy,omitempty"`
 	Grok        int `json:"grok,omitempty"`
+	OMP         int `json:"omp,omitempty"`
 	Cursor      int `json:"cursor"`
 	Windsurf    int `json:"windsurf"`
 	Aider       int `json:"aider"`
@@ -66,7 +67,7 @@ type AgentConfig struct {
 
 // Total returns the total number of agents.
 func (a AgentConfig) Total() int {
-	return a.Claude + a.Codex + a.Gemini + a.Antigravity + a.Grok + a.Cursor + a.Windsurf + a.Aider + a.Opencode + a.Ollama + a.User
+	return a.Claude + a.Codex + a.Gemini + a.Antigravity + a.Grok + a.OMP + a.Cursor + a.Windsurf + a.Aider + a.Opencode + a.Ollama + a.User
 }
 
 // ErrAutomatedRelaunchNotImplemented is the sentinel returned when a saved

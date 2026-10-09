@@ -619,7 +619,7 @@ func getCurrentTmuxSession(ctx context.Context) (string, error) {
 
 	// Extract session name from tmux environment
 	// This is a simplified approach - could be enhanced
-	cmd := exec.CommandContext(ctx, tmux.BinaryPath(), "display-message", "-p", "#S")
+	cmd := exec.CommandContext(ctx, tmux.BinaryPath(), tmux.SocketArgs([]string{"display-message", "-p", "#S"})...)
 	cmd.WaitDelay = 2 * time.Second
 	output, err := cmd.Output()
 	if err != nil {

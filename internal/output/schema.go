@@ -180,6 +180,7 @@ type AddResponse struct {
 	AddedGemini      int            `json:"added_gemini"`
 	AddedAntigravity int            `json:"added_antigravity"`
 	AddedGrok        int            `json:"added_grok"`
+	AddedOMP         int            `json:"added_omp"`
 	AddedOllama      int            `json:"added_ollama"`
 	AddedCursor      int            `json:"added_cursor"`
 	AddedWindsurf    int            `json:"added_windsurf"`

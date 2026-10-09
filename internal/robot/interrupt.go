@@ -4,6 +4,7 @@ package robot
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
@@ -200,6 +201,22 @@ func GetInterrupt(opts InterruptOptions) (*InterruptOutput, error) {
 	}
 
 	publishInterruptActuationRequest(trace, opts, targetKeys)
+	ompTargets := 0
+	for _, pane := range targetPanes {
+		if interruptPaneTMUXAgentType(pane).Canonical() == tmux.AgentOMP {
+			if err := tmux.VerifyOMPControlContext(context.Background(), pane.ID); err != nil {
+				output.RobotResponse = NewErrorResponse(err, ErrCodeNotImplemented, "OMP requires its native control adapter")
+				output.CompletedAt = time.Now().UTC()
+				return finalizeTerminalInterruptActuation(trace, opts, targetKeys, output), nil
+			}
+			ompTargets++
+		}
+	}
+	if ompTargets == len(targetPanes) {
+		output.Method = "native"
+	} else if ompTargets > 0 {
+		output.Method = "native_and_ctrl_c"
+	}
 
 	// Send Ctrl+C to all targets
 	for _, pane := range targetPanes {
@@ -207,17 +224,23 @@ func GetInterrupt(opts InterruptOptions) (*InterruptOutput, error) {
 		prevState := output.PreviousStates[paneKey]
 
 		// Skip if not forced and already idle
-		if !opts.Force && prevState.State == "idle" {
+		isOMP := interruptPaneTMUXAgentType(pane).Canonical() == tmux.AgentOMP
+		if !isOMP && !opts.Force && prevState.State == "idle" {
 			// Already idle, mark as ready but don't interrupt
 			output.ReadyForInput = append(output.ReadyForInput, paneKey)
 			continue
 		}
 
-		err := tmux.SendInterrupt(pane.ID)
+		var err error
+		if isOMP {
+			_, err = tmux.OMPControlContext(context.Background(), pane.ID, "/interrupt", map[string]any{})
+		} else {
+			err = tmux.SendInterrupt(pane.ID)
+		}
 		if err != nil {
 			output.Failed = append(output.Failed, InterruptError{
 				Pane:   paneKey,
-				Reason: fmt.Sprintf("failed to send Ctrl+C: %v", err),
+				Reason: fmt.Sprintf("failed to interrupt: %v", err),
 			})
 		} else {
 			output.Interrupted = append(output.Interrupted, paneKey)
@@ -261,6 +284,13 @@ func GetInterrupt(opts InterruptOptions) (*InterruptOutput, error) {
 					delete(pending, paneKey)
 					continue
 				}
+				if interruptPaneTMUXAgentType(*targetPane).Canonical() == tmux.AgentOMP {
+					if ompInterruptReady(targetPane.ID) {
+						output.ReadyForInput = append(output.ReadyForInput, paneKey)
+						delete(pending, paneKey)
+					}
+					continue
+				}
 
 				// Check if the agent is ready. The individual capture is
 				// intentional here: readiness is a per-pane transition poll.
@@ -300,7 +330,17 @@ func GetInterrupt(opts InterruptOptions) (*InterruptOutput, error) {
 		// than assign: panes that were already idle were recorded as ready above
 		// without being interrupted, and overwriting dropped them from the
 		// follow-up message. Assigning also aliased the two JSON arrays.
-		output.ReadyForInput = append(output.ReadyForInput, output.Interrupted...)
+		for _, key := range output.Interrupted {
+			for _, pane := range targetPanes {
+				if paneTargetKey(pane, multiWindow) != key {
+					continue
+				}
+				if interruptPaneTMUXAgentType(pane).Canonical() != tmux.AgentOMP || ompInterruptReady(pane.ID) {
+					output.ReadyForInput = append(output.ReadyForInput, key)
+				}
+				break
+			}
+		}
 	}
 
 	// Send follow-up message if provided
@@ -460,6 +500,31 @@ func interruptEmptyTargetHint(opts InterruptOptions, panes []tmux.Pane) string {
 	}
 	b.WriteString("Use --robot-is-working to see live pane addresses, or drop --panes to target all agent panes.")
 	return b.String()
+}
+
+// ompInterruptReady uses only fresh native state. An abort acknowledgement
+// alone does not establish readiness or authorize a follow-up message.
+func ompInterruptReady(paneID string) bool {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	data, err := tmux.OMPControlContext(ctx, paneID, "/state", nil)
+	return err == nil && ompInterruptStateReady(data, time.Now())
+}
+
+func ompInterruptStateReady(data []byte, now time.Time) bool {
+	var state struct {
+		Ready      bool      `json:"ready"`
+		ObservedAt time.Time `json:"observed_at"`
+		Idle       *bool     `json:"idle"`
+		Pending    *bool     `json:"pending"`
+		Tools      *int      `json:"tools"`
+		AsyncBusy  *bool     `json:"async_busy"`
+	}
+	if json.Unmarshal(data, &state) != nil || !state.Ready || state.Idle == nil || state.Pending == nil || state.Tools == nil || state.AsyncBusy == nil {
+		return false
+	}
+	age := now.Sub(state.ObservedAt)
+	return age >= -time.Second && age <= 10*time.Second && *state.Idle && !*state.Pending && *state.Tools == 0 && !*state.AsyncBusy
 }
 
 // PrintInterrupt sends Ctrl+C to panes and optionally a follow-up message.

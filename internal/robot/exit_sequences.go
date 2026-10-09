@@ -139,7 +139,7 @@ func runTmuxCommand(ctx context.Context, args ...string) error {
 	if ctx == nil {
 		return context.Canceled
 	}
-	cmd := exec.CommandContext(ctx, tmux.BinaryPath(), args...)
+	cmd := exec.CommandContext(ctx, tmux.BinaryPath(), tmux.SocketArgs(args)...)
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		if ctxErr := ctx.Err(); ctxErr != nil {
@@ -224,7 +224,7 @@ func hardKillAgent(ctx context.Context, session string, win, pane int, seq *Rest
 // win is the pane's exact tmux window index (#172).
 func getShellPID(ctx context.Context, session string, win, pane int) (int, error) {
 	target := session + ":" + strconv.Itoa(win)
-	cmd := exec.CommandContext(ctx, tmux.BinaryPath(), "list-panes", "-t", target, "-F", "#{pane_index} #{pane_pid}")
+	cmd := exec.CommandContext(ctx, tmux.BinaryPath(), tmux.SocketArgs([]string{"list-panes", "-t", target, "-F", "#{pane_index} #{pane_pid}"})...)
 	output, err := cmd.Output()
 	if err != nil {
 		if ctxErr := ctx.Err(); ctxErr != nil {

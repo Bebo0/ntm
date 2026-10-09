@@ -1169,6 +1169,7 @@ func buildCommandRegistry() []RobotCommandInfo {
 				{Name: "spawn-gmi", Flag: "--spawn-gmi", Type: "int", Required: false, Description: "Number of Gemini agents (legacy)"},
 				{Name: "spawn-agy", Flag: "--spawn-agy", Type: "int", Required: false, Description: "Number of Antigravity (agy) agents"},
 				{Name: "spawn-grok", Flag: "--spawn-grok", Type: "int", Required: false, Description: "Number of Grok Build agents (phase one: launch only; no wait or assignment)"},
+				{Name: "spawn-omp", Flag: "--spawn-omp", Type: "int", Required: false, Description: "Number of Oh My Pi agents (native adapter required for readiness and automated input)"},
 				{Name: "spawn-preset", Flag: "--spawn-preset", Type: "string", Required: false, Description: "Use recipe preset instead of counts"},
 				{Name: "spawn-no-user", Flag: "--spawn-no-user", Type: "bool", Required: false, Description: "Skip user pane creation"},
 				{Name: "spawn-wait", Flag: "--spawn-wait", Type: "bool", Required: false, Description: "Wait for agents to show ready state before returning"},

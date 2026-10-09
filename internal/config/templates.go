@@ -264,6 +264,7 @@ func DefaultAgentTemplates() AgentConfig {
 		// --always-approve is the official autonomous approval flag exposed by
 		// the current Grok Build CLI.
 		Grok:   `grok --always-approve{{if .Model}} --model {{shellQuote .Model}}{{end}}{{if .ReasoningEffort}} --effort {{shellQuote .ReasoningEffort}}{{end}}`,
+		OMP:    `omp{{if .Model}} --model {{shellQuote .Model}}{{end}}`,
 		Ollama: `ollama run {{shellQuote (.Model | default "codellama:latest")}}`,
 		// Cursor: launch the Cursor Agent CLI (`cursor-agent`), NOT the `cursor`
 		// IDE binary — on Linux `cursor` is the GUI editor launcher (useless in a
