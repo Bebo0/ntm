@@ -1878,6 +1878,7 @@ func TestAgentTypeString(t *testing.T) {
 		{tmux.AgentCodex, "codex"},
 		{tmux.AgentGemini, "gemini"},
 		{tmux.AgentGrok, "grok"},
+		{tmux.AgentOMP, "omp"},
 		{tmux.AgentCursor, "cursor"},
 		{tmux.AgentWindsurf, "windsurf"},
 		{tmux.AgentAider, "aider"},

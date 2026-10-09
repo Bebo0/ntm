@@ -73,7 +73,10 @@ type Pane struct {
 	Width       int
 	Height      int
 	Active      bool
-	PID         int // Shell PID
+	PID         int    // Shell PID
+	OMPRun      string // Worker-installed identity, independent of the mutable terminal title.
+	OMPInstance string
+	OMPSocket   string // Discovery metadata only; native control revalidates the live socket.
 }
 
 // PaneRef is the stable physical identity and topology address of a pane.
@@ -922,7 +925,7 @@ func (c *Client) GetPanes(session string) ([]Pane, error) {
 // GetPanesContext returns all panes in a session with cancellation support.
 func (c *Client) GetPanesContext(ctx context.Context, session string) ([]Pane, error) {
 	sep := FieldSeparator
-	format := fmt.Sprintf("#{pane_id}%[1]s#{pane_index}%[1]s#{pane_title}%[1]s#{pane_current_command}%[1]s#{pane_width}%[1]s#{pane_height}%[1]s#{pane_active}%[1]s#{pane_pid}%[1]s#{window_index}", sep)
+	format := fmt.Sprintf("#{pane_id}%[1]s#{pane_index}%[1]s#{pane_title}%[1]s#{pane_current_command}%[1]s#{pane_width}%[1]s#{pane_height}%[1]s#{pane_active}%[1]s#{pane_pid}%[1]s#{window_index}%[1]s#{@omp_run}%[1]s#{@omp_instance}%[1]s#{@omp_socket}", sep)
 	output, err := c.RunContext(ctx, "list-panes", "-s", "-t", session, "-F", format)
 	if err != nil {
 		return nil, err
@@ -1143,7 +1146,7 @@ func waitForPaneProcessStartContext(
 func (c *Client) GetAllPanesContext(ctx context.Context) (map[string][]Pane, error) {
 	sep := FieldSeparator
 	// Add session_name at the beginning
-	format := fmt.Sprintf("#{session_name}%[1]s#{pane_id}%[1]s#{pane_index}%[1]s#{pane_title}%[1]s#{pane_current_command}%[1]s#{pane_width}%[1]s#{pane_height}%[1]s#{pane_active}%[1]s#{pane_pid}%[1]s#{window_index}", sep)
+	format := fmt.Sprintf("#{session_name}%[1]s#{pane_id}%[1]s#{pane_index}%[1]s#{pane_title}%[1]s#{pane_current_command}%[1]s#{pane_width}%[1]s#{pane_height}%[1]s#{pane_active}%[1]s#{pane_pid}%[1]s#{window_index}%[1]s#{@omp_run}%[1]s#{@omp_instance}%[1]s#{@omp_socket}", sep)
 	output, err := c.RunContext(ctx, "list-panes", "-a", "-F", format)
 	if err != nil {
 		// No server/no sessions is not an error; treat as empty result.
@@ -1172,7 +1175,7 @@ func (c *Client) GetAllPanesContext(ctx context.Context) (map[string][]Pane, err
 		sessionName := parts[0]
 		// parts[1:] contains: id, index, title, command, width, height, active, pid, window_index
 		// parts[1:8] = id(0), index(1), title(2), command(3), width(4), height(5), active(6)
-		// parts[8:] = pid(0), window_index(1)
+		// parts[8:] = pid(0), window_index(1), omp_run(2), omp_instance(3), omp_socket(4)
 		p, err := parsePaneFromParts(parts[1:8], parts[8:])
 		if err != nil {
 			continue
@@ -2767,7 +2770,7 @@ type PaneActivity struct {
 // GetPanesWithActivityContext returns all panes in a session with their activity times with cancellation support.
 func (c *Client) GetPanesWithActivityContext(ctx context.Context, session string) ([]PaneActivity, error) {
 	sep := FieldSeparator
-	format := fmt.Sprintf("#{pane_id}%[1]s#{pane_index}%[1]s#{pane_title}%[1]s#{pane_current_command}%[1]s#{pane_width}%[1]s#{pane_height}%[1]s#{pane_active}%[1]s#{window_activity}%[1]s#{pane_pid}%[1]s#{window_index}", sep)
+	format := fmt.Sprintf("#{pane_id}%[1]s#{pane_index}%[1]s#{pane_title}%[1]s#{pane_current_command}%[1]s#{pane_width}%[1]s#{pane_height}%[1]s#{pane_active}%[1]s#{window_activity}%[1]s#{pane_pid}%[1]s#{window_index}%[1]s#{@omp_run}%[1]s#{@omp_instance}%[1]s#{@omp_socket}", sep)
 	output, err := c.RunContext(ctx, "list-panes", "-s", "-t", session, "-F", format)
 	if err != nil {
 		return nil, err
@@ -2784,9 +2787,9 @@ func (c *Client) GetPanesWithActivityContext(ctx context.Context, session string
 			continue
 		}
 
-		// Format: id(0), index(1), title(2), command(3), width(4), height(5), active(6), last_activity(7), pid(8), window_index(9), pane_start_time(10, optional)
+		// Format: id(0), index(1), title(2), command(3), width(4), height(5), active(6), last_activity(7), pid(8), window_index(9), omp_run(10), omp_instance(11), omp_socket(12)
 		// parts[:7] = id..active
-		// parts[8:] = pid, window_index[, pane_start_time]
+		// parts[8:] = pid, window_index, omp_run, omp_instance, omp_socket
 		p, err := parsePaneFromParts(parts[:7], parts[8:])
 		if err != nil {
 			continue
@@ -2821,7 +2824,7 @@ func parsePaneLine(line, sep string) (*Pane, error) {
 
 // parsePaneFromParts constructs a Pane from pre-split parts.
 // parts1: id, index, title, command, width, height, active
-// parts2: pid, window_index
+// parts2: pid, window_index[, omp_run, omp_instance, omp_socket]
 func parsePaneFromParts(parts1, parts2 []string) (*Pane, error) {
 	if len(parts1) < 7 || len(parts2) < 2 {
 		return nil, fmt.Errorf("insufficient parts")
@@ -2848,6 +2851,19 @@ func parsePaneFromParts(parts1, parts2 []string) (*Pane, error) {
 
 	// Parse pane title using regex to extract type, index, variant, and tags
 	pane.Type, pane.NTMIndex, pane.Variant, pane.Tags = parseAgentFromTitle(pane.Title)
+	if len(parts2) >= 5 {
+		pane.OMPRun, pane.OMPInstance, pane.OMPSocket = parts2[2], parts2[3], parts2[4]
+		// OSC titles and container wrapper commands are presentation, not
+		// runtime identity. Preserve the control binding even after OMP changes
+		// its title. This classifies ownership only, never readiness or liveness.
+		if pane.OMPRun != "" && pane.OMPInstance != "" && pane.OMPSocket != "" {
+			if pane.Type.Canonical() != AgentOMP {
+				pane.NTMIndex, pane.Variant, pane.Tags = 0, "", nil
+			}
+			pane.Type = AgentOMP
+			return pane, nil
+		}
+	}
 
 	// Fallback chain:
 	//  1. Title-based parse (NTM-formatted titles).

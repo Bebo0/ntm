@@ -5998,6 +5998,8 @@ func agentTypeString(t tmux.AgentType) string {
 		return "antigravity"
 	case tmux.AgentGrok:
 		return "grok"
+	case tmux.AgentOMP:
+		return "omp"
 	case tmux.AgentCursor:
 		return "cursor"
 	case tmux.AgentWindsurf:

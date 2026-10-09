@@ -794,6 +794,16 @@ func TestRenderStatsBar(t *testing.T) {
 		}
 	})
 
+	t.Run("with omp agents", func(t *testing.T) {
+		m := Model{theme: th, icons: ic, panes: []tmux.Pane{{Type: tmux.AgentOMP, Title: "modelctl", Command: "docker"}, {Type: tmux.AgentUser}}}
+		m.updateStats()
+		if m.ompCount != 1 || m.userCount != 1 {
+			t.Fatalf("OMP miscounted: omp=%d user=%d", m.ompCount, m.userCount)
+		}
+		if got := m.renderStatsBar(); !strings.Contains(got, "OMP 1") {
+			t.Fatalf("OMP badge missing: %q", got)
+		}
+	})
 	t.Run("with user panes", func(t *testing.T) {
 		m := Model{theme: th, icons: ic, userCount: 1}
 		got := m.renderStatsBar()

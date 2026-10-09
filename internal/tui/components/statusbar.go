@@ -19,6 +19,7 @@ type StatusBarOptions struct {
 	CodexCount       int
 	GeminiCount      int
 	GrokCount        int
+	OMPCount         int
 	AntigravityCount int
 	UserCount        int
 	FocusedPanel     string
@@ -103,6 +104,7 @@ func renderStatusLeft(t theme.Theme, base lipgloss.Style, opts StatusBarOptions)
 		{"COD", t.Codex, opts.CodexCount},
 		{"GMI", t.Gemini, opts.GeminiCount},
 		{"GRK", t.Pink, opts.GrokCount},
+		{"OMP", t.Teal, opts.OMPCount},
 		{"AGY", t.Lavender, opts.AntigravityCount},
 	}
 

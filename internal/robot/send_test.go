@@ -434,6 +434,17 @@ func TestPaneAgentTypePrefersParsedPaneType(t *testing.T) {
 	}
 }
 
+func TestOMPAgentTypeSurvivesOSCTitle(t *testing.T) {
+	pane := tmux.Pane{ID: "%7", Title: "modelctl — Qwen", Command: "docker", Type: tmux.AgentOMP, OMPRun: "run-1", OMPInstance: "instance-1", OMPSocket: "/tmp/omp.sock"}
+	if got := paneAgentType(pane); got != "omp" {
+		t.Fatalf("metadata-bound pane became %q", got)
+	}
+	targets, _, err := selectSendTargets([]tmux.Pane{pane}, SendOptions{AgentTypes: []string{"omp"}}, map[string]bool{})
+	if err != nil || len(targets) != 1 || targets[0].OMPSocket != pane.OMPSocket {
+		t.Fatalf("OMP target binding lost: %+v, %v", targets, err)
+	}
+}
+
 func TestSelectSendTargetsUsesParsedPaneTypeAndAliases(t *testing.T) {
 	panes := []tmux.Pane{
 		{Index: 0, ID: "%0", Title: "shell", Type: tmux.AgentUser},

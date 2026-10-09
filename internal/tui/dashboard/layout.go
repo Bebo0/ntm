@@ -836,6 +836,8 @@ func agentRowTypePresentation(agentType string, t theme.Theme) (lipgloss.Color, 
 		return t.Gemini, "󰇮"
 	case tmux.AgentGrok:
 		return t.Pink, "󰚩"
+	case tmux.AgentOMP:
+		return t.Teal, "󰚩"
 	case tmux.AgentAntigravity:
 		return t.Lavender, "󰇮"
 	default:
@@ -1236,6 +1238,8 @@ func AgentBorderColor(agentType string, t theme.Theme) lipgloss.Color {
 		return t.Gemini
 	case tmux.AgentGrok:
 		return t.Pink
+	case tmux.AgentOMP:
+		return t.Teal
 	case tmux.AgentAntigravity:
 		return t.Lavender
 	case tmux.AgentCursor:
