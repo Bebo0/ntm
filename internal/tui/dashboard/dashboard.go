@@ -2545,7 +2545,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				// Rate limit check
 				if st.State == status.StateError && st.ErrorType == status.ErrorRateLimit {
 					state = "rate_limited"
-				} else if ps.LastCompaction != nil && state != string(status.StateError) {
+				} else if currentPane.Type.Canonical() != tmux.AgentOMP && ps.LastCompaction != nil && state != string(status.StateError) {
 					state = "compacted"
 				}
 				ps.State = state
@@ -2580,7 +2580,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				// detection nor recovery prompts on this pane.
 				var event *status.CompactionEvent
 				var recoverySent bool
-				if data.Observation.Current.Freshness == status.FreshnessFresh && (m.cfg == nil || m.cfg.ContextRotation.Recovery.Enabled) {
+				if currentPane.Type.Canonical() != tmux.AgentOMP && data.Observation.Current.Freshness == status.FreshnessFresh && (m.cfg == nil || m.cfg.ContextRotation.Recovery.Enabled) {
 					event, recoverySent, _ = m.compaction.CheckAndRecover(data.Output, statusAgentType, m.session, data.PaneIndex)
 				}
 
@@ -2724,7 +2724,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// Rate limit should be shown with special indicator
 			if st.State == status.StateError && st.ErrorType == status.ErrorRateLimit {
 				state = "rate_limited"
-			} else if ps.LastCompaction != nil && state != string(status.StateError) {
+			} else if pane.Type.Canonical() != tmux.AgentOMP && ps.LastCompaction != nil && state != string(status.StateError) {
 				// Compaction warning should override idle/working but not errors
 				state = "compacted"
 			}

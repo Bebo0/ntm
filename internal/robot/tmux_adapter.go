@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/Dicklesworthstone/ntm/internal/state"
+	"github.com/Dicklesworthstone/ntm/internal/status"
 	"github.com/Dicklesworthstone/ntm/internal/tmux"
 )
 
@@ -227,6 +228,19 @@ func (a *TmuxAdapter) NormalizeAgents(sessionName string, agents []Agent, output
 
 // classifyAgentState determines the agent's state from available signals.
 func (a *TmuxAdapter) classifyAgentState(agent *Agent) state.AgentState {
+	if normalizeAgentType(agent.Type) == "omp" {
+		if agent.NativeObservation == nil || agent.NativeObservation.Freshness != status.FreshnessFresh || agent.NativeObservation.Error != "" {
+			return state.AgentStateUnknown
+		}
+		switch agent.NativeObservation.Status.State {
+		case status.StateIdle:
+			return state.AgentStateIdle
+		case status.StateWorking:
+			return state.AgentStateBusy
+		default:
+			return state.AgentStateUnknown
+		}
+	}
 	// Check for error conditions
 	if agent.RateLimitDetected {
 		return state.AgentStateError
@@ -276,6 +290,15 @@ func (a *TmuxAdapter) classifyAgentState(agent *Agent) state.AgentState {
 
 // classifyStateReason provides human-readable reason for the state.
 func (a *TmuxAdapter) classifyStateReason(agent *Agent, agentState state.AgentState, outputTail string) string {
+	if normalizeAgentType(agent.Type) == "omp" {
+		if agent.NativeObservation == nil {
+			return "OMP native state unavailable"
+		}
+		if agent.NativeObservation.Error != "" {
+			return "OMP native state unavailable: " + agent.NativeObservation.Error
+		}
+		return "OMP native state: " + string(agentState)
+	}
 	switch agentState {
 	case state.AgentStateError:
 		if agent.RateLimitDetected {

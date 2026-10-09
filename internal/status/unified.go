@@ -117,6 +117,9 @@ func (d *UnifiedDetector) determineStateAt(output, agentType string, lastActivit
 	// when the agent has clearly recovered and is now waiting for input.
 
 	agentType = string(agent.AgentType(agentType).Canonical())
+	if agentType == string(agent.AgentTypeOMP) {
+		return StateUnknown, ErrorNone
+	}
 	threshold := time.Duration(d.config.ActivityThreshold) * time.Second
 	isLowVelocity := observedAt.Sub(lastActivity) >= threshold
 
@@ -380,6 +383,11 @@ func (d *UnifiedDetector) Detect(paneID string) (AgentStatus, error) {
 		if p.Pane.ID == paneID {
 			status.PaneName = p.Pane.Title
 			status.AgentType = string(p.Pane.Type)
+			if p.Pane.Type.Canonical() == tmux.AgentOMP {
+				nativeCtx, nativeCancel := context.WithTimeout(context.Background(), 2*time.Second)
+				defer nativeCancel()
+				return ObserveOMP(nativeCtx, p.Pane, time.Now()).Status, nil
+			}
 			break
 		}
 	}
@@ -457,6 +465,7 @@ func DefaultSessionObserverConfig(detectorConfig DetectorConfig) SessionObserver
 // SessionObserverDependencies makes topology, capture, and time injectable for
 // deterministic tests and alternate tmux clients.
 type SessionObserverDependencies struct {
+	ObserveOMP  func(context.Context, tmux.Pane, time.Time) StateObservation
 	ListPanes   func(context.Context, string) ([]tmux.PaneActivity, error)
 	CapturePane func(context.Context, string, int) (string, error)
 	Now         func() time.Time
@@ -506,6 +515,9 @@ func NewSessionObserverWithDependencies(detector *UnifiedDetector, config Sessio
 	if deps.Now == nil {
 		deps.Now = time.Now
 	}
+	if deps.ObserveOMP == nil {
+		deps.ObserveOMP = ObserveOMP
+	}
 	return &SessionObserver{
 		detector: detector,
 		config:   config,
@@ -546,6 +558,7 @@ func normalizeSessionObserverConfig(config SessionObserverConfig, detectorConfig
 }
 
 type observationCaptureResult struct {
+	native *StateObservation
 	index  int
 	output string
 	err    error
@@ -600,13 +613,17 @@ func (o *SessionObserver) Observe(ctx context.Context, session string) (SessionO
 		key := pane.Pane.Ref().StableKey()
 		currentKeys[key] = struct{}{}
 		capture := captures[index]
-		observation := o.buildPaneObservation(cache, pane, capture.output, capture.err, observedAt)
+		observation := o.buildPaneObservation(cache, pane, capture.output, capture.err, observedAt, capture.native)
 		result.Panes = append(result.Panes, observation)
-		if capture.err != nil {
+		if observation.Current.Error != "" {
+			stage := "capture"
+			if pane.Pane.Type.Canonical() == tmux.AgentOMP {
+				stage = "omp_native"
+			}
 			result.Failures = append(result.Failures, ObservationFailure{
 				PaneID: pane.Pane.ID,
-				Stage:  "capture",
-				Error:  capture.err.Error(),
+				Stage:  stage,
+				Error:  observation.Current.Error,
 			})
 		}
 	}
@@ -620,15 +637,23 @@ func (o *SessionObserver) Observe(ctx context.Context, session string) (SessionO
 }
 
 // ObservePaneCapture incorporates output already captured by another consumer
-// into the same last-known state machine without issuing another tmux command.
+// into the same last-known state machine. OMP additionally reads native state;
+// its terminal capture is only a preview, never evidence of turn state.
 // It is safe to call concurrently with Observe; calls are serialized so the
 // last-known cache remains race-free.
 func (o *SessionObserver) ObservePaneCapture(session string, pane tmux.PaneActivity, output string, captureErr error) PaneObservation {
+	var native *StateObservation
+	if pane.Pane.Type.Canonical() == tmux.AgentOMP {
+		ctx, cancel := context.WithTimeout(context.Background(), o.config.CaptureTimeout)
+		state := o.deps.ObserveOMP(ctx, pane.Pane, o.deps.Now().UTC())
+		cancel()
+		native = &state
+	}
 	cache := o.sessionCache(session)
 	cache.mu.Lock()
 	defer cache.mu.Unlock()
 	upsertCachedTopology(cache, pane)
-	return o.buildPaneObservation(cache, pane, truncateOutput(output, o.config.MaxCaptureBytes), captureErr, o.deps.Now().UTC())
+	return o.buildPaneObservation(cache, pane, truncateOutput(output, o.config.MaxCaptureBytes), captureErr, o.deps.Now().UTC(), native)
 }
 
 func (o *SessionObserver) sessionCache(session string) *sessionObservationCache {
@@ -675,6 +700,12 @@ func (o *SessionObserver) captureAll(ctx context.Context, panes []tmux.PaneActiv
 			defer workers.Done()
 			for index := range jobs {
 				captureCtx, cancel := context.WithTimeout(ctx, o.config.CaptureTimeout)
+				if panes[index].Pane.Type.Canonical() == tmux.AgentOMP {
+					native := o.deps.ObserveOMP(captureCtx, panes[index].Pane, o.deps.Now().UTC())
+					cancel()
+					completed <- observationCaptureResult{index: index, native: &native}
+					continue
+				}
 				output, err := o.deps.CapturePane(captureCtx, panes[index].Pane.ID, o.config.CaptureLines)
 				cancel()
 				if err == nil {
@@ -692,7 +723,7 @@ func (o *SessionObserver) captureAll(ctx context.Context, panes []tmux.PaneActiv
 	return results
 }
 
-func (o *SessionObserver) buildPaneObservation(cache *sessionObservationCache, pane tmux.PaneActivity, output string, captureErr error, observedAt time.Time) PaneObservation {
+func (o *SessionObserver) buildPaneObservation(cache *sessionObservationCache, pane tmux.PaneActivity, output string, captureErr error, observedAt time.Time, native ...*StateObservation) PaneObservation {
 	key := pane.Pane.Ref().StableKey()
 	normalizedAgentType := string(agent.AgentType(pane.Pane.Type).Canonical())
 	baseStatus := AgentStatus{
@@ -714,6 +745,20 @@ func (o *SessionObserver) buildPaneObservation(cache *sessionObservationCache, p
 		PaneName:  pane.Pane.Title,
 		AgentType: normalizedAgentType,
 		Metadata:  pane.Pane,
+	}
+	if normalizedAgentType == "omp" {
+		observation.Current = observeOMPData(pane.Pane, nil, context.Canceled, observedAt)
+		if len(native) > 0 && native[0] != nil {
+			observation.Current = *native[0]
+		}
+		observation.Current.Status.LastOutput = truncateOutput(output, o.detector.config.OutputPreviewLength)
+		observation.RawOutput = output
+		if observation.Current.Freshness == FreshnessFresh {
+			cache.lastKnown[key] = cloneStateObservation(observation.Current)
+		} else {
+			observation.LastKnown = staleStateObservation(cache.lastKnown[key], observedAt)
+		}
+		return observation
 	}
 	if captureErr != nil {
 		observation.Current = StateObservation{

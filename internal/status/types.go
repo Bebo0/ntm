@@ -85,6 +85,8 @@ func (e ErrorType) String() string {
 
 // AgentStatus represents the full status of an agent pane
 type AgentStatus struct {
+	// HasDraft prevents automated dispatch from overwriting a human composer.
+	HasDraft bool `json:"has_draft,omitempty"`
 	// PaneID is the tmux pane identifier (e.g., "%0")
 	PaneID string `json:"pane_id"`
 	// PaneName is the custom pane title (e.g., "myproject__cc_1")
@@ -121,6 +123,7 @@ const (
 type ObservationProvenance string
 
 const (
+	ProvenanceOMPNative    ObservationProvenance = "omp_native"
 	ProvenanceTMUXTopology ObservationProvenance = "tmux_topology"
 	ProvenanceTMUXCapture  ObservationProvenance = "tmux_capture"
 	ProvenanceDetector     ObservationProvenance = "status_detector"
@@ -189,6 +192,7 @@ func DispatchObservationIsCurrent(observedAt, now time.Time) bool {
 // all rejected.
 func (p PaneObservation) SafeToDispatch() bool {
 	return p.Current.Freshness == FreshnessFresh &&
+		!p.Current.Status.HasDraft &&
 		p.Current.Error == "" &&
 		ObservationConfidenceIsActionable(p.Current.Confidence) &&
 		p.Current.Status.State == StateIdle

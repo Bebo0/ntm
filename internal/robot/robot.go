@@ -1570,13 +1570,14 @@ type SessionInfo struct {
 
 // Agent represents an AI agent in a session
 type Agent struct {
-	Type     string `json:"type"`              // claude, codex, antigravity, grok, gemini, or another supported type
-	Variant  string `json:"variant,omitempty"` // Model alias or persona name
-	Pane     string `json:"pane"`
-	Name     string `json:"name,omitempty"` // Memorable agent name (e.g., claude-alpha)
-	Window   int    `json:"window"`
-	PaneIdx  int    `json:"pane_idx"`
-	IsActive bool   `json:"is_active"`
+	NativeObservation *status.StateObservation `json:"native_observation,omitempty"`
+	Type              string                   `json:"type"`              // claude, codex, antigravity, grok, gemini, or another supported type
+	Variant           string                   `json:"variant,omitempty"` // Model alias or persona name
+	Pane              string                   `json:"pane"`
+	Name              string                   `json:"name,omitempty"` // Memorable agent name (e.g., claude-alpha)
+	Window            int                      `json:"window"`
+	PaneIdx           int                      `json:"pane_idx"`
+	IsActive          bool                     `json:"is_active"`
 
 	// Status enrichment fields
 	PID                  int       `json:"pid,omitempty"`                     // Shell PID
@@ -4307,6 +4308,9 @@ func generateTailHints(panes map[string]PaneOutput) *TailAgentHints {
 // It delegates to the status package for consistent detection logic.
 func determineState(output, agentType string) string {
 	normalizedType := normalizeAgentType(agentType)
+	if normalizedType == "omp" {
+		return "unknown"
+	}
 	// Normalize agent type for status package (expects "cc", "cod", etc.)
 	shortType := translateAgentTypeForStatus(normalizedType)
 	lastLine := status.GetLastNonEmptyLine(output)
@@ -4919,7 +4923,10 @@ func GetSnapshotWithOptions(cfg *config.Config, opts PaginationOptions) (*Snapsh
 			if capturedErr == nil {
 				lines := splitLines(status.StripANSI(captured))
 				agent.OutputTailLines = len(lines)
-				agent.State = determineState(captured, agent.Type)
+				agent.State = determinePaneState(pane, captured, agent.Type)
+			}
+			if pane.Type.Canonical() == tmux.AgentOMP && capturedErr != nil {
+				agent.State = determinePaneState(pane, "", "omp")
 			}
 
 			snapSession.Agents = append(snapSession.Agents, agent)
@@ -6032,6 +6039,15 @@ func stateAgentTypeForPane(pane tmux.Pane, detectedType string) string {
 }
 
 func determinePaneState(pane tmux.Pane, output, detectedType string) string {
+	if pane.Type.Canonical() == tmux.AgentOMP {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		observation := status.ObserveOMP(ctx, pane, time.Now())
+		if observation.Status.State == status.StateWorking {
+			return "active"
+		}
+		return string(observation.Status.State)
+	}
 	return determineState(output, stateAgentTypeForPane(pane, detectedType))
 }
 
@@ -7657,7 +7673,14 @@ func collectNormalizedTmuxProjectionContext(ctx context.Context, projectDir stri
 			}
 
 			content := allCapturedContent[pane.ID]
-			enrichAgentStatus(&agent, sessions[i].Name, modelNameForPane(pane, cfg), content)
+			if pane.Type.Canonical() == tmux.AgentOMP {
+				nativeCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
+				observation := status.ObserveOMP(nativeCtx, pane, time.Now())
+				cancel()
+				agent.NativeObservation = &observation
+			} else {
+				enrichAgentStatus(&agent, sessions[i].Name, modelNameForPane(pane, cfg), content)
+			}
 			if content != "" {
 				outputTails[pane.ID] = content
 			}
